@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Oracle Bump Simulation</title>
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #1a1a2e; color: #e0e0e0; }
+    #header { padding: 10px 24px; background: #16213e; border-bottom: 1px solid #0f3460; }
+    #header h1 { font-size: 18px; font-weight: 600; margin-bottom: 4px; }
+    #config-info { font-size: 11px; color: #888; display: flex; gap: 12px; flex-wrap: wrap; }
+    #config-info span { background: #0f3460; padding: 2px 8px; border-radius: 4px; }
+
+    .toolbar { padding: 5px 24px; background: #16213e; border-bottom: 1px solid #0f3460; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+    .toolbar-group { display: flex; gap: 3px; align-items: center; }
+    .toolbar-sep { width: 1px; height: 20px; background: #0f3460; margin: 0 6px; }
+    .toolbar-label { font-size: 11px; color: #666; margin-right: 4px; white-space: nowrap; }
+    .tb { background: #0f3460; color: #ccc; border: 1px solid #1a4a80; border-radius: 4px; padding: 3px 9px; font-size: 11px; cursor: pointer; transition: all 0.12s; white-space: nowrap; }
+    .tb:hover { background: #1a4a80; color: #fff; }
+    .tb.active { background: #2962FF; color: #fff; border-color: #2962FF; }
+    .toolbar-hint { font-size: 10px; color: #555; margin-left: auto; }
+    kbd { background: #0f3460; padding: 1px 4px; border-radius: 3px; font-size: 10px; font-family: inherit; }
+
+    .series-selector { padding: 5px 24px; background: #16213e; border-bottom: 1px solid #0f3460; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .series-selector label { font-size: 11px; cursor: pointer; display: flex; align-items: center; gap: 4px; }
+    .series-selector label input { cursor: pointer; }
+
+    #charts-container { display: flex; flex-direction: column; height: calc(100vh - 150px); }
+    #price-chart { flex: 3; position: relative; }
+    #deviation-chart { flex: 1; border-top: 1px solid #0f3460; }
+
+    #summary { position: absolute; top: 170px; right: 24px; z-index: 10; background: rgba(22,33,62,0.92); padding: 10px 14px; border-radius: 6px; font-size: 11px; border: 1px solid #0f3460; max-height: calc(100vh - 220px); overflow-y: auto; }
+    #summary .row { display: flex; justify-content: space-between; gap: 20px; margin: 2px 0; }
+    #summary .label { color: #888; }
+    #summary .value { font-weight: 600; }
+
+    .drag-select { position: fixed; background: rgba(41,98,255,0.12); border-left: 2px solid rgba(41,98,255,0.6); border-right: 2px solid rgba(41,98,255,0.6); pointer-events: none; z-index: 50; }
+  </style>
+</head>
+<body>
+  <div id="header">
+    <h1>Oracle Bump Simulation</h1>
+    <div id="config-info"></div>
+  </div>
+
+  <!-- Toolbar row 1: Timeframe + View mode -->
+  <div class="toolbar" id="toolbar-tf">
+    <div class="toolbar-group">
+      <span class="toolbar-label">Timeframe:</span>
+      <button class="tb tf-btn" data-tf="6">6s</button>
+      <button class="tb tf-btn" data-tf="60">1m</button>
+      <button class="tb tf-btn active" data-tf="900">15m</button>
+      <button class="tb tf-btn" data-tf="3600">1h</button>
+      <button class="tb tf-btn" data-tf="21600">6h</button>
+      <button class="tb tf-btn" data-tf="43200">12h</button>
+      <button class="tb tf-btn" data-tf="86400">1d</button>
+      <button class="tb tf-btn" data-tf="604800">1w</button>
+    </div>
+    <div class="toolbar-sep"></div>
+    <div class="toolbar-group">
+      <span class="toolbar-label">View:</span>
+      <button class="tb view-btn active" data-view="candle">Candle</button>
+      <button class="tb view-btn" data-view="line">Line</button>
+    </div>
+    <div class="toolbar-sep"></div>
+    <div class="toolbar-group">
+      <span class="toolbar-label">Nav:</span>
+      <button class="tb" id="btn-left" title="Pan left (ArrowLeft)">&#9664;</button>
+      <button class="tb" id="btn-right" title="Pan right (ArrowRight)">&#9654;</button>
+      <button class="tb" id="btn-zoom-in" title="Zoom in (+)">+</button>
+      <button class="tb" id="btn-zoom-out" title="Zoom out (-)">&#8722;</button>
+      <button class="tb" id="btn-reset" title="Reset to full view (R)">Reset</button>
+    </div>
+    <span class="toolbar-hint">
+      <kbd>Click+Drag</kbd> select range &nbsp; <kbd>Dbl-click</kbd> reset &nbsp; <kbd>Scroll</kbd> zoom &nbsp; <kbd>&#8592;&#8594;</kbd> pan &nbsp; <kbd>+/-</kbd> zoom &nbsp; <kbd>R</kbd> reset
+    </span>
+  </div>
+
+  <div class="series-selector" id="series-selector">
+    <span style="font-size:11px;color:#888;">Series:</span>
+  </div>
+
+  <div id="charts-container">
+    <div id="price-chart"></div>
+    <div id="deviation-chart"></div>
+  </div>
+  <div id="summary"></div>
+
+  <script>
+    // ── Injected data ──
+    const simulationData = /*DATA_PLACEHOLDER*/[];
+    const simulationConfigs = /*CONFIG_PLACEHOLDER*/[];
+
+    const COLORS = ['#2962FF','#FF6D00','#00C853','#D500F9','#FF1744','#00E5FF','#FFEA00','#69F0AE'];
+    const REAL_COLOR = '#888888';
+
+    // ── State ──
+    let currentTF = 900;       // seconds per candle
+    let currentView = 'candle'; // 'candle' or 'line'
+
+    // ── OHLC Aggregation ──
+    // Aggregate raw {timestamp, price} array into OHLC candles of `interval` seconds.
+    function aggregateOHLC(points, interval) {
+      if (points.length === 0) return [];
+      const map = new Map();
+      for (const p of points) {
+        const bucket = Math.floor(p.timestamp / interval) * interval;
+        const c = map.get(bucket);
+        if (!c) {
+          map.set(bucket, { time: bucket, open: p.price, high: p.price, low: p.price, close: p.price });
+        } else {
+          if (p.price > c.high) c.high = p.price;
+          if (p.price < c.low) c.low = p.price;
+          c.close = p.price;
+        }
+      }
+      return Array.from(map.values()).sort((a, b) => a.time - b.time);
+    }
+
+    // Aggregate to line data (close of each bucket)
+    function aggregateLine(points, interval) {
+      if (interval <= 6) {
+        // No aggregation needed at base resolution
+        return points.map(p => ({ time: p.timestamp, value: p.price }));
+      }
+      const candles = aggregateOHLC(points, interval);
+      return candles.map(c => ({ time: c.time, value: c.close }));
+    }
+
+    // Aggregate deviation data (max deviation per bucket for worst-case view)
+    function aggregateDeviation(metrics, interval) {
+      if (interval <= 6) {
+        return metrics.map(m => ({ time: m.timestamp, value: m.deviationPct }));
+      }
+      const map = new Map();
+      for (const m of metrics) {
+        const bucket = Math.floor(m.timestamp / interval) * interval;
+        const existing = map.get(bucket);
+        if (!existing) {
+          map.set(bucket, { time: bucket, value: m.deviationPct });
+        } else {
+          // Show max deviation in each bucket
+          if (m.deviationPct > existing.value) existing.value = m.deviationPct;
+        }
+      }
+      return Array.from(map.values()).sort((a, b) => a.time - b.time);
+    }
+
+    // Extract raw points from metrics
+    function realPoints(metrics) {
+      return metrics.map(m => ({ timestamp: m.timestamp, price: m.realPrice }));
+    }
+    function oraclePoints(metrics) {
+      return metrics.map(m => ({ timestamp: m.timestamp, price: m.oraclePrice }));
+    }
+
+    // ── Config info ──
+    const configEl = document.getElementById('config-info');
+    if (simulationConfigs.length === 1) {
+      const c = simulationConfigs[0];
+      configEl.innerHTML = [
+        `<span>Validators: ${c.validatorCount}</span>`,
+        `<span>Malicious: ${(c.maliciousFraction*100).toFixed(0)}%</span>`,
+        `<span>Epsilon: ${typeof c.epsilon==='number'?c.epsilon.toFixed(6):c.epsilon}</span>`,
+        `<span>Author honest: ${c.authorAlwaysHonest}</span>`,
+        `<span>Seed: ${c.seed}</span>`,
+        `<span>${c.startDate} to ${c.endDate}</span>`,
+      ].join('');
+    } else {
+      configEl.innerHTML = `<span>${simulationConfigs.length} scenarios compared</span>`+
+        `<span>${simulationConfigs[0].startDate} to ${simulationConfigs[0].endDate}</span>`;
+    }
+
+    // ── Charts ──
+    const priceChartEl = document.getElementById('price-chart');
+    const priceChart = LightweightCharts.createChart(priceChartEl, {
+      layout: { background: { color: '#1a1a2e' }, textColor: '#888' },
+      grid: { vertLines: { color: '#1e2d4a' }, horzLines: { color: '#1e2d4a' } },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      rightPriceScale: { borderColor: '#0f3460' },
+      timeScale: { borderColor: '#0f3460', timeVisible: true, secondsVisible: true },
+    });
+
+    const devChartEl = document.getElementById('deviation-chart');
+    const devChart = LightweightCharts.createChart(devChartEl, {
+      layout: { background: { color: '#1a1a2e' }, textColor: '#888' },
+      grid: { vertLines: { color: '#1e2d4a' }, horzLines: { color: '#1e2d4a' } },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      rightPriceScale: { borderColor: '#0f3460' },
+      timeScale: { borderColor: '#0f3460', timeVisible: true, secondsVisible: false },
+    });
+
+    // ── Series management ──
+    // We track all active series so we can tear them down and rebuild on TF/view change.
+    let activePriceSeries = [];   // { series, label, color, kind }
+    let activeDevSeries = [];
+    let seriesVisibility = {};    // label -> boolean, persists across rebuilds
+
+    function clearPriceSeries() {
+      for (const s of activePriceSeries) priceChart.removeSeries(s.series);
+      activePriceSeries = [];
+    }
+    function clearDevSeries() {
+      for (const s of activeDevSeries) devChart.removeSeries(s.series);
+      activeDevSeries = [];
+    }
+
+    function rebuildChart() {
+      clearPriceSeries();
+      clearDevSeries();
+
+      const tf = currentTF;
+      const isCandle = currentView === 'candle';
+
+      // Real price series (from first scenario's data, shared)
+      if (simulationData.length > 0) {
+        const raw = realPoints(simulationData[0].metrics);
+        const label = 'Real Price';
+        const visible = seriesVisibility[label] !== false;
+
+        if (isCandle) {
+          const ohlc = aggregateOHLC(raw, tf);
+          const s = priceChart.addCandlestickSeries({
+            upColor: '#5c6b73', downColor: '#5c6b73',
+            wickUpColor: '#888', wickDownColor: '#888',
+            borderUpColor: '#888', borderDownColor: '#888',
+            title: label, visible,
+          });
+          s.setData(ohlc);
+          activePriceSeries.push({ series: s, label, color: REAL_COLOR, kind: 'candle' });
+        } else {
+          const line = aggregateLine(raw, tf);
+          const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, title: label, visible });
+          s.setData(line);
+          activePriceSeries.push({ series: s, label, color: REAL_COLOR, kind: 'line' });
+        }
+      }
+
+      // Oracle series per scenario
+      simulationData.forEach((sim, idx) => {
+        const color = COLORS[idx % COLORS.length];
+        const label = sim.config.label || `${(sim.config.maliciousFraction*100).toFixed(0)}% malicious`;
+        const oLabel = `Oracle: ${label}`;
+        const dLabel = `Dev: ${label}`;
+        const oVisible = seriesVisibility[oLabel] !== false;
+        const dVisible = seriesVisibility[dLabel] !== false;
+
+        const raw = oraclePoints(sim.metrics);
+
+        if (isCandle) {
+          const ohlc = aggregateOHLC(raw, tf);
+          // Oracle as hollow/colored candles to distinguish from real
+          const s = priceChart.addCandlestickSeries({
+            upColor: color + 'CC', downColor: color + '66',
+            wickUpColor: color, wickDownColor: color,
+            borderUpColor: color, borderDownColor: color,
+            title: label, visible: oVisible,
+          });
+          s.setData(ohlc);
+          activePriceSeries.push({ series: s, label: oLabel, color, kind: 'candle' });
+        } else {
+          const line = aggregateLine(raw, tf);
+          const s = priceChart.addLineSeries({ color, lineWidth: 2, title: label, visible: oVisible });
+          s.setData(line);
+          activePriceSeries.push({ series: s, label: oLabel, color, kind: 'line' });
+        }
+
+        // Deviation always as line
+        const devData = aggregateDeviation(sim.metrics, tf);
+        const ds = devChart.addLineSeries({ color, lineWidth: 1, title: `${label} dev%`, visible: dVisible });
+        ds.setData(devData);
+        activeDevSeries.push({ series: ds, label: dLabel, color, kind: 'line' });
+      });
+
+      rebuildSeriesSelector();
+      priceChart.timeScale().fitContent();
+      devChart.timeScale().fitContent();
+    }
+
+    // ── Series selector checkboxes ──
+    function rebuildSeriesSelector() {
+      const el = document.getElementById('series-selector');
+      // Keep the label span, remove the rest
+      while (el.children.length > 1) el.removeChild(el.lastChild);
+
+      const allS = [...activePriceSeries, ...activeDevSeries];
+      for (const s of allS) {
+        const lbl = document.createElement('label');
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = seriesVisibility[s.label] !== false;
+        cb.addEventListener('change', () => {
+          seriesVisibility[s.label] = cb.checked;
+          s.series.applyOptions({ visible: cb.checked });
+        });
+        const dot = document.createElement('span');
+        dot.style.cssText = `width:10px;height:10px;border-radius:50%;background:${s.color};display:inline-block;`;
+        lbl.appendChild(cb);
+        lbl.appendChild(dot);
+        lbl.appendChild(document.createTextNode(s.label));
+        el.appendChild(lbl);
+      }
+    }
+
+    // ── Toolbar: timeframe buttons ──
+    document.querySelectorAll('.tf-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentTF = parseInt(btn.dataset.tf);
+        rebuildChart();
+      });
+    });
+
+    // ── Toolbar: view mode buttons ──
+    document.querySelectorAll('.view-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        currentView = btn.dataset.view;
+        rebuildChart();
+      });
+    });
+
+    // ── Toolbar: nav buttons ──
+    function getVisibleLogicalRange() {
+      return priceChart.timeScale().getVisibleLogicalRange();
+    }
+    function panBy(frac) {
+      const lr = getVisibleLogicalRange();
+      if (!lr) return;
+      const span = lr.to - lr.from;
+      const shift = span * frac;
+      priceChart.timeScale().setVisibleLogicalRange({ from: lr.from + shift, to: lr.to + shift });
+    }
+    function zoomBy(factor) {
+      const lr = getVisibleLogicalRange();
+      if (!lr) return;
+      const center = (lr.from + lr.to) / 2;
+      const newSpan = (lr.to - lr.from) * factor;
+      priceChart.timeScale().setVisibleLogicalRange({ from: center - newSpan/2, to: center + newSpan/2 });
+    }
+
+    document.getElementById('btn-left').addEventListener('click', () => panBy(-0.25));
+    document.getElementById('btn-right').addEventListener('click', () => panBy(0.25));
+    document.getElementById('btn-zoom-in').addEventListener('click', () => zoomBy(0.5));
+    document.getElementById('btn-zoom-out').addEventListener('click', () => zoomBy(2));
+    document.getElementById('btn-reset').addEventListener('click', () => {
+      priceChart.timeScale().fitContent();
+      devChart.timeScale().fitContent();
+    });
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+      if (e.target.tagName === 'INPUT') return;
+      switch (e.key) {
+        case 'ArrowLeft': panBy(-0.15); e.preventDefault(); break;
+        case 'ArrowRight': panBy(0.15); e.preventDefault(); break;
+        case '+': case '=': zoomBy(0.5); e.preventDefault(); break;
+        case '-': zoomBy(2); e.preventDefault(); break;
+        case '0': case 'r': case 'R':
+          document.getElementById('btn-reset').click();
+          e.preventDefault();
+          break;
+      }
+    });
+
+    // ── Summary panel ──
+    const summaryEl = document.getElementById('summary');
+    if (simulationData.length === 1) {
+      const s = simulationData[0].summary;
+      summaryEl.innerHTML = `
+        <div class="row"><span class="label">Total blocks</span><span class="value">${s.totalBlocks.toLocaleString()}</span></div>
+        <div class="row"><span class="label">Mean dev %</span><span class="value">${s.meanDeviationPct.toFixed(4)}%</span></div>
+        <div class="row"><span class="label">Max dev %</span><span class="value">${s.maxDeviationPct.toFixed(4)}%</span></div>
+        <div class="row"><span class="label">Convergence</span><span class="value">${(s.convergenceRate*100).toFixed(1)}%</span></div>
+        <div class="row"><span class="label">Epsilon</span><span class="value">${s.epsilon.toFixed(6)}</span></div>
+      `;
+    } else {
+      let html = '';
+      simulationData.forEach((sim) => {
+        const s = sim.summary;
+        const label = sim.config.label || `${(sim.config.maliciousFraction*100).toFixed(0)}%`;
+        html += `<div style="margin-bottom:6px;border-bottom:1px solid #0f3460;padding-bottom:4px;">
+          <strong>${label}</strong>
+          <div class="row"><span class="label">Mean dev</span><span class="value">${s.meanDeviationPct.toFixed(4)}%</span></div>
+          <div class="row"><span class="label">Max dev</span><span class="value">${s.maxDeviationPct.toFixed(4)}%</span></div>
+          <div class="row"><span class="label">Convergence</span><span class="value">${(s.convergenceRate*100).toFixed(1)}%</span></div>
+        </div>`;
+      });
+      summaryEl.innerHTML = html;
+    }
+
+    // ── Sync charts ──
+    let syncing = false;
+    priceChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+      if (syncing || !range) return;
+      syncing = true;
+      devChart.timeScale().setVisibleLogicalRange(range);
+      syncing = false;
+    });
+    devChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+      if (syncing || !range) return;
+      syncing = true;
+      priceChart.timeScale().setVisibleLogicalRange(range);
+      syncing = false;
+    });
+
+    // ── Resize ──
+    const ro = new ResizeObserver(() => {
+      priceChart.applyOptions({ width: priceChartEl.clientWidth, height: priceChartEl.clientHeight });
+      devChart.applyOptions({ width: devChartEl.clientWidth, height: devChartEl.clientHeight });
+    });
+    ro.observe(priceChartEl);
+    ro.observe(devChartEl);
+
+    // ── Drag-to-zoom (click and drag a range on the chart to zoom in) ──
+    function setupDragZoom(containerEl, chart) {
+      let startX = null;
+      let isDragging = false;
+      let selBox = null;
+      const THRESHOLD = 8; // min px before selection activates
+
+      containerEl.addEventListener('pointerdown', (e) => {
+        if (e.button !== 0) return; // left click only
+        // Only start drag in the plot area (not on time axis or price scale).
+        // Time axis is at the bottom ~30px, price scale is on the right ~60px.
+        const rect = containerEl.getBoundingClientRect();
+        const localY = e.clientY - rect.top;
+        const localX = e.clientX - rect.left;
+        if (localY > rect.height - 30) return; // time axis
+        if (localX > rect.width - 60) return;  // price scale
+        startX = e.clientX;
+        isDragging = false;
+      });
+
+      document.addEventListener('pointermove', (e) => {
+        if (startX === null) return;
+        const dx = e.clientX - startX;
+
+        if (!isDragging && Math.abs(dx) >= THRESHOLD) {
+          isDragging = true;
+          const rect = containerEl.getBoundingClientRect();
+          selBox = document.createElement('div');
+          selBox.className = 'drag-select';
+          selBox.style.top = rect.top + 'px';
+          selBox.style.height = rect.height + 'px';
+          document.body.appendChild(selBox);
+        }
+
+        if (isDragging && selBox) {
+          const left = Math.min(startX, e.clientX);
+          selBox.style.left = left + 'px';
+          selBox.style.width = Math.abs(dx) + 'px';
+        }
+      });
+
+      document.addEventListener('pointerup', (e) => {
+        if (isDragging && selBox) {
+          const rect = containerEl.getBoundingClientRect();
+          const x1 = Math.min(startX, e.clientX) - rect.left;
+          const x2 = Math.max(startX, e.clientX) - rect.left;
+
+          const ts = chart.timeScale();
+          const from = ts.coordinateToLogical(x1);
+          const to = ts.coordinateToLogical(x2);
+
+          if (from !== null && to !== null && Math.abs(to - from) > 1) {
+            ts.setVisibleLogicalRange({ from, to });
+          }
+
+          selBox.remove();
+          selBox = null;
+        }
+        startX = null;
+        isDragging = false;
+      });
+
+      // Double-click to reset zoom
+      containerEl.addEventListener('dblclick', () => {
+        priceChart.timeScale().fitContent();
+        devChart.timeScale().fitContent();
+      });
+    }
+
+    setupDragZoom(priceChartEl, priceChart);
+    setupDragZoom(devChartEl, devChart);
+
+    // ── Initial render ──
+    rebuildChart();
+  </script>
+</body>
+</html>

@@ -1,0 +1,12 @@
+{
+  "name": "oracle-sim",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "sim": "bun run src/main.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.1.0",
+    "typescript": "^5.5.0"
+  }
+}

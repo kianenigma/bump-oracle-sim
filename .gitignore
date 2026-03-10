@@ -1,0 +1,7 @@
+node_modules/
+data/
+dist/
+*.html
+!src/viz/template.html
+bun.lockb
+bun.lock
