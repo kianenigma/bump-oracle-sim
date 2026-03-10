@@ -19,13 +19,13 @@ export const scenarios: Record<string, ScenarioFn> = {
 
   /** Sweep malicious fraction from 0% to 50% in steps of 10% */
   "sweep-malicious"(overrides, pricePoints) {
-    const fractions = [0, 0.1, 0.2, 0.3, 0.4, 0.5];
+    const fractions = [0, 0.1, 0.2, 0.3, 0.4, 0.49, 0.5];
     const results: SimulationResult[] = [];
 
     for (const frac of fractions) {
       const label = `${(frac * 100).toFixed(0)}% malicious`;
       console.log(`\n[Scenario: sweep-malicious — ${label}]`);
-      const config = mergeConfig({ ...overrides, maliciousFraction: frac, label });
+      const config = mergeConfig({ ...overrides, maliciousFraction: frac, label, authorAlwaysHonest: false });
       results.push(runSimulation(config, pricePoints));
     }
 
