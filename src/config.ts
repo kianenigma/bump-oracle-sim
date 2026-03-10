@@ -5,7 +5,7 @@ export const DEFAULT_CONFIG: SimulationConfig = {
   endDate: "2025-01-07",
   validatorCount: 100,
   maliciousFraction: 0,
-  epsilon: 1 / 600 / 10, // price can move at most a 0.1$ per block
+  epsilon: 1 / 100 / 10, // price can move at most a 0.1$ per block
   seed: 42,
   authorAlwaysHonest: true,
   jitterStdDev: 0.001, // 0.1% price jitter

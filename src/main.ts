@@ -6,7 +6,6 @@ import { interpolateToBlocks } from "./data/interpolator.js";
 import { runSimulation } from "./sim/engine.js";
 import { generateStaticHtml } from "./viz/chart.js";
 import { writeSimData } from "./viz/writer.js";
-import { toSimData } from "./viz/writer.js";
 import { startServer } from "./viz/server.js";
 import { scenarios, listScenarios } from "./analysis/scenarios.js";
 
@@ -143,7 +142,8 @@ if (args["export-html"]) {
 const outputPath = args.output!;
 await writeSimData(results, outputPath);
 
-const simData = toSimData(results);
+// Load from the file we just wrote (avoids holding both results + simData in memory)
+const simData: SimDataFile = await Bun.file(outputPath).json();
 const port = parseInt(args.port!);
 console.log(`\nStarting visualization server...`);
 await startServer(simData, port, !args["no-open"]);

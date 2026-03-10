@@ -32,6 +32,23 @@ export const scenarios: Record<string, ScenarioFn> = {
     return results;
   },
 
+  "sweep-malicious-and-epsilon"(overrides, pricePoints) {
+    const fractions = [0, 0.1, 0.3, 0.49];
+    const epsilons = [(DEFAULT_CONFIG.epsilon as number) / 5, DEFAULT_CONFIG.epsilon, (DEFAULT_CONFIG.epsilon as number) * 5];
+    const results: SimulationResult[] = [];
+
+    for (const frac of fractions) {
+      for (const epsilon of epsilons) {
+        const label = `${(frac * 100).toFixed(0)}% malicious, epsilon=${(epsilon as number).toFixed(6)}`;
+        console.log(`\n[Scenario: sweep-malicious-and-epsilon — ${label}]`);
+        const config = mergeConfig({ ...overrides, maliciousFraction: frac, epsilon, label, authorAlwaysHonest: false });
+        results.push(runSimulation(config, pricePoints));
+      }
+    }
+
+    return results;
+  },
+
   /** Vary epsilon to find optimal value */
   "epsilon-sweep"(overrides, pricePoints) {
     const multipliers = [0.25, 0.5, 1, 2, 4];

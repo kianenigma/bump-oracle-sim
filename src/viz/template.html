@@ -27,10 +27,13 @@
     .series-selector { padding: 5px 24px; background: #16213e; border-bottom: 1px solid #0f3460; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .series-selector label { font-size: 11px; cursor: pointer; display: flex; align-items: center; gap: 4px; }
     .series-selector label input { cursor: pointer; }
+    .series-selector .sel-link { font-size: 10px; color: #4a90d9; cursor: pointer; text-decoration: underline; user-select: none; }
+    .series-selector .sel-link:hover { color: #6db3f8; }
+    .series-selector .sel-sep { font-size: 10px; color: #555; }
 
     #charts-container { display: flex; flex-direction: column; height: calc(100vh - 150px); }
     #price-chart { flex: 3; position: relative; }
-    #deviation-chart { flex: 1; border-top: 1px solid #0f3460; }
+    #deviation-chart { flex: 1; border-top: 1px solid #0f3460; position: relative; }
 
     #summary { position: absolute; top: 170px; right: 24px; z-index: 10; background: rgba(22,33,62,0.92); padding: 10px 14px; border-radius: 6px; font-size: 11px; border: 1px solid #0f3460; max-height: calc(100vh - 220px); overflow-y: auto; }
     #summary .row { display: flex; justify-content: space-between; gap: 20px; margin: 2px 0; }
@@ -38,6 +41,11 @@
     #summary .value { font-weight: 600; }
 
     .drag-select { position: fixed; background: rgba(41,98,255,0.12); border-left: 2px solid rgba(41,98,255,0.6); border-right: 2px solid rgba(41,98,255,0.6); pointer-events: none; z-index: 50; }
+
+    .chart-legend { position: absolute; top: 4px; left: 8px; z-index: 10; font-size: 11px; pointer-events: none; display: flex; gap: 12px; flex-wrap: wrap; }
+    .chart-legend .legend-item { display: flex; align-items: center; gap: 4px; }
+    .chart-legend .legend-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+    .chart-legend .legend-val { font-weight: 600; }
 
     #loading-overlay {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -97,8 +105,8 @@
   </div>
 
   <div id="charts-container">
-    <div id="price-chart"></div>
-    <div id="deviation-chart"></div>
+    <div id="price-chart"><div class="chart-legend" id="price-legend"></div></div>
+    <div id="deviation-chart"><div class="chart-legend" id="dev-legend"></div></div>
   </div>
   <div id="summary"></div>
 
@@ -121,6 +129,7 @@
     let bufferedTo = 0;
     let bufferedTF = 0;
     let lastServerData = null;   // cached last /api/data response for view toggles
+    let lastServerView = null;   // 'candle' or 'line' — the view mode when series were built
     let fetchController = null;  // AbortController for in-flight requests
     let fetchDebounceTimer = null;
     let totalTimeRange = null;   // { from, to } for the full dataset
@@ -214,27 +223,82 @@
     }
 
     // ── Series selector checkboxes ──
+    // One checkbox per group: "Real Price" toggles the real price series,
+    // each oracle checkbox toggles both its price series and its deviation series.
     function rebuildSeriesSelector() {
       const el = document.getElementById('series-selector');
       while (el.children.length > 1) el.removeChild(el.lastChild);
 
-      const allS = [...activePriceSeries, ...activeDevSeries];
-      for (const s of allS) {
-        const lbl = document.createElement('label');
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.checked = seriesVisibility[s.label] !== false;
-        cb.addEventListener('change', () => {
-          seriesVisibility[s.label] = cb.checked;
-          s.series.applyOptions({ visible: cb.checked });
-        });
-        const dot = document.createElement('span');
-        dot.style.cssText = `width:10px;height:10px;border-radius:50%;background:${s.color};display:inline-block;`;
-        lbl.appendChild(cb);
-        lbl.appendChild(dot);
-        lbl.appendChild(document.createTextNode(s.label));
-        el.appendChild(lbl);
+      // Real price checkbox
+      if (activePriceSeries.length > 0) {
+        const rp = activePriceSeries[0]; // always real price
+        addSelectorCheckbox(el, rp.label, rp.color, [rp]);
       }
+
+      // One checkbox per oracle (price + deviation paired)
+      for (let i = 0; i < activeDevSeries.length; i++) {
+        const priceSeries = activePriceSeries[1 + i];
+        const devSeries = activeDevSeries[i];
+        if (!priceSeries || !devSeries) continue;
+        const displayLabel = priceSeries.label.replace(/^Oracle: /, '');
+        addSelectorCheckbox(el, displayLabel, priceSeries.color, [priceSeries, devSeries]);
+      }
+
+      // Add All / None links
+      const allLink = document.createElement('span');
+      allLink.className = 'sel-link';
+      allLink.textContent = 'All';
+      allLink.addEventListener('click', () => setAllSeriesVisibility(true));
+
+      const sep = document.createElement('span');
+      sep.className = 'sel-sep';
+      sep.textContent = '/';
+
+      const noneLink = document.createElement('span');
+      noneLink.className = 'sel-link';
+      noneLink.textContent = 'None';
+      noneLink.addEventListener('click', () => setAllSeriesVisibility(false));
+
+      el.appendChild(allLink);
+      el.appendChild(sep);
+      el.appendChild(noneLink);
+    }
+
+    function setAllSeriesVisibility(visible) {
+      // Update all series visibility
+      for (const entry of activePriceSeries) {
+        seriesVisibility[entry.label] = visible;
+        entry.series.applyOptions({ visible });
+      }
+      for (const entry of activeDevSeries) {
+        seriesVisibility[entry.label] = visible;
+        entry.series.applyOptions({ visible });
+      }
+      // Sync checkboxes
+      document.querySelectorAll('#series-selector input[type="checkbox"]').forEach(cb => {
+        cb.checked = visible;
+      });
+    }
+
+    function addSelectorCheckbox(parent, displayLabel, color, seriesEntries) {
+      const lbl = document.createElement('label');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      // Use the first series' label as the visibility key for the group
+      const visKey = seriesEntries[0].label;
+      cb.checked = seriesVisibility[visKey] !== false;
+      cb.addEventListener('change', () => {
+        for (const entry of seriesEntries) {
+          seriesVisibility[entry.label] = cb.checked;
+          entry.series.applyOptions({ visible: cb.checked });
+        }
+      });
+      const dot = document.createElement('span');
+      dot.style.cssText = `width:10px;height:10px;border-radius:50%;background:${color};display:inline-block;`;
+      lbl.appendChild(cb);
+      lbl.appendChild(dot);
+      lbl.appendChild(document.createTextNode(displayLabel));
+      parent.appendChild(lbl);
     }
 
     // ══════════════════════════════════════════════
@@ -278,9 +342,7 @@
         const color = COLORS[idx % COLORS.length];
         const label = sim.config.label || `${(sim.config.maliciousFraction*100).toFixed(0)}% malicious`;
         const oLabel = `Oracle: ${label}`;
-        const dLabel = `Dev: ${label}`;
-        const oVisible = seriesVisibility[oLabel] !== false;
-        const dVisible = seriesVisibility[dLabel] !== false;
+        const visible = seriesVisibility[oLabel] !== false;
 
         const raw = oraclePoints(sim.metrics);
 
@@ -290,21 +352,21 @@
             upColor: color + 'CC', downColor: color + '66',
             wickUpColor: color, wickDownColor: color,
             borderUpColor: color, borderDownColor: color,
-            title: label, visible: oVisible,
+            title: label, visible,
           });
           s.setData(ohlc);
           activePriceSeries.push({ series: s, label: oLabel, color, kind: 'candle' });
         } else {
           const line = aggregateLine(raw, tf);
-          const s = priceChart.addLineSeries({ color, lineWidth: 2, title: label, visible: oVisible });
+          const s = priceChart.addLineSeries({ color, lineWidth: 2, title: label, visible });
           s.setData(line);
           activePriceSeries.push({ series: s, label: oLabel, color, kind: 'line' });
         }
 
         const devData = aggregateDeviation(sim.metrics, tf);
-        const ds = devChart.addLineSeries({ color, lineWidth: 1, title: `${label} dev%`, visible: dVisible });
+        const ds = devChart.addLineSeries({ color, lineWidth: 1, title: `${label} dev%`, visible });
         ds.setData(devData);
-        activeDevSeries.push({ series: ds, label: dLabel, color, kind: 'line' });
+        activeDevSeries.push({ series: ds, label: `Dev: ${label}`, color, kind: 'line' });
       });
 
       rebuildSeriesSelector();
@@ -368,11 +430,46 @@
     // ── SERVER MODE ──
     // ══════════════════════════════════════════════
 
-    function applyServerData(data, fitContent) {
+    // Check whether current series structure matches data (same oracle count, same view mode)
+    function canUpdateInPlace(data) {
+      if (lastServerView !== currentView) return false;
+      if (activePriceSeries.length === 0) return false;
+      // Expected: 1 real price + N oracles in price chart, N oracles in dev chart
+      const expectedPrice = 1 + data.oracles.length;
+      const expectedDev = data.oracles.length;
+      return activePriceSeries.length === expectedPrice && activeDevSeries.length === expectedDev;
+    }
+
+    // Update existing series data in-place — preserves visible range automatically
+    function updateSeriesData(data) {
+      const isCandle = currentView === 'candle';
+
+      // First series is always real price
+      if (isCandle) {
+        activePriceSeries[0].series.setData(data.realPrice.ohlc);
+      } else {
+        activePriceSeries[0].series.setData(data.realPrice.line);
+      }
+
+      // Oracle price series (indices 1..N) and deviation series (indices 0..N-1)
+      data.oracles.forEach((oracle, idx) => {
+        if (isCandle) {
+          activePriceSeries[1 + idx].series.setData(oracle.ohlc);
+        } else {
+          activePriceSeries[1 + idx].series.setData(oracle.line);
+        }
+        activeDevSeries[idx].series.setData(oracle.deviation);
+      });
+    }
+
+    // Full teardown and rebuild of all series — used for initial load and structural changes
+    // Caller is responsible for setting transitionLock and restoring visible range.
+    function rebuildServerSeries(data) {
       clearPriceSeries();
       clearDevSeries();
 
       const isCandle = currentView === 'candle';
+      lastServerView = currentView;
 
       // Real price
       const rpLabel = 'Real Price';
@@ -396,45 +493,35 @@
       data.oracles.forEach((oracle, idx) => {
         const color = COLORS[idx % COLORS.length];
         const oLabel = `Oracle: ${oracle.label}`;
-        const dLabel = `Dev: ${oracle.label}`;
-        const oVisible = seriesVisibility[oLabel] !== false;
-        const dVisible = seriesVisibility[dLabel] !== false;
+        const visible = seriesVisibility[oLabel] !== false;
 
         if (isCandle) {
           const s = priceChart.addCandlestickSeries({
             upColor: color + 'CC', downColor: color + '66',
             wickUpColor: color, wickDownColor: color,
             borderUpColor: color, borderDownColor: color,
-            title: oracle.label, visible: oVisible,
+            title: oracle.label, visible,
           });
           s.setData(oracle.ohlc);
           activePriceSeries.push({ series: s, label: oLabel, color, kind: 'candle' });
         } else {
-          const s = priceChart.addLineSeries({ color, lineWidth: 2, title: oracle.label, visible: oVisible });
+          const s = priceChart.addLineSeries({ color, lineWidth: 2, title: oracle.label, visible });
           s.setData(oracle.line);
           activePriceSeries.push({ series: s, label: oLabel, color, kind: 'line' });
         }
 
-        const ds = devChart.addLineSeries({ color, lineWidth: 1, title: `${oracle.label} dev%`, visible: dVisible });
+        const ds = devChart.addLineSeries({ color, lineWidth: 1, title: `${oracle.label} dev%`, visible });
         ds.setData(oracle.deviation);
-        activeDevSeries.push({ series: ds, label: dLabel, color, kind: 'line' });
+        activeDevSeries.push({ series: ds, label: `Dev: ${oracle.label}`, color, kind: 'line' });
       });
 
       rebuildSeriesSelector();
-
-      if (fitContent) {
-        priceChart.timeScale().fitContent();
-        devChart.timeScale().fitContent();
-      }
     }
 
     async function fetchData(from, to, tf, fitContent) {
       // Cancel any in-flight request
       if (fetchController) fetchController.abort();
       fetchController = new AbortController();
-
-      // Capture the visible time range BEFORE fetch so we can restore it after
-      const savedTimeRange = fitContent ? null : getVisibleTimeRange();
 
       showLoading();
       try {
@@ -461,31 +548,105 @@
           });
         }
 
-        applyServerData(data, fitContent);
+        // Save time range BEFORE any data changes
+        const savedTimeRange = fitContent ? null : getVisibleTimeRange();
 
-        // Restore the exact time range the user was looking at
-        if (savedTimeRange) {
-          setVisibleRangeBoth(savedTimeRange);
+        // Clear any pending viewport-change debounce timer so it doesn't fire
+        // with a stale/corrupted range after we finish updating
+        if (fetchDebounceTimer) {
+          clearTimeout(fetchDebounceTimer);
+          fetchDebounceTimer = null;
         }
+
+        // Lock transitions: prevents onViewportChange from firing during
+        // intermediate states (setData / removeSeries / addSeries)
+        transitionLock = true;
+
+        if (canUpdateInPlace(data)) {
+          updateSeriesData(data);
+        } else {
+          rebuildServerSeries(data);
+        }
+
+        // Restore visible range or fit content
+        if (fitContent) {
+          priceChart.timeScale().fitContent();
+          devChart.timeScale().fitContent();
+        } else if (savedTimeRange) {
+          priceChart.timeScale().setVisibleRange(savedTimeRange);
+          devChart.timeScale().setVisibleRange(savedTimeRange);
+        }
+
+        transitionLock = false;
 
         updateTFButtonStates();
       } catch (e) {
         if (e.name !== 'AbortError') console.error('Fetch error:', e);
+        transitionLock = false;
       } finally {
         hideLoading();
       }
     }
 
+    const TIMEFRAMES = [6, 60, 900, 3600, 21600, 43200, 86400, 604800];
+
+    function smallestValidTF(span) {
+      for (const tf of TIMEFRAMES) {
+        if (span / tf <= 5000) return tf;
+      }
+      return TIMEFRAMES[TIMEFRAMES.length - 1];
+    }
+
+    // Estimate the viewport span in seconds using the logical range.
+    // getVisibleRange() is bounded by data points and won't detect zoom-outs
+    // beyond the loaded data. The logical range reflects the full visual viewport.
+    function getViewportSpan() {
+      const lr = priceChart.timeScale().getVisibleLogicalRange();
+      if (!lr) return totalTimeRange ? (totalTimeRange.to - totalTimeRange.from) : 0;
+      return (lr.to - lr.from) * currentTF;
+    }
+
+    // Estimate the viewport time range (can extend beyond loaded data).
+    // Uses the data midpoint as anchor and logical range for span.
+    function getViewportTimeRange() {
+      const dataRange = priceChart.timeScale().getVisibleRange();
+      const lr = priceChart.timeScale().getVisibleLogicalRange();
+      if (!lr) return dataRange ? { from: dataRange.from, to: dataRange.to } : null;
+
+      const span = (lr.to - lr.from) * currentTF;
+      // Anchor on the center of visible data, or buffer center if no data visible
+      let center;
+      if (dataRange) {
+        center = (dataRange.from + dataRange.to) / 2;
+      } else if (bufferedFrom && bufferedTo) {
+        center = (bufferedFrom + bufferedTo) / 2;
+      } else if (totalTimeRange) {
+        center = (totalTimeRange.from + totalTimeRange.to) / 2;
+      } else {
+        return null;
+      }
+      return { from: center - span / 2, to: center + span / 2 };
+    }
+
     function updateTFButtonStates() {
       if (!totalTimeRange) return;
-      const visible = getVisibleTimeRange();
-      const span = visible
-        ? (visible.to - visible.from)
-        : (totalTimeRange.to - totalTimeRange.from);
+      const span = getViewportSpan();
+
+      // Enable/disable buttons
       document.querySelectorAll('.tf-btn').forEach(btn => {
         const tf = parseInt(btn.dataset.tf);
         btn.disabled = span / tf > 5000;
       });
+
+      // Auto-upgrade currentTF if it's no longer valid for this viewport
+      if (span / currentTF > 5000) {
+        currentTF = smallestValidTF(span);
+        document.querySelectorAll('.tf-btn').forEach(b => {
+          b.classList.toggle('active', parseInt(b.dataset.tf) === currentTF);
+        });
+        // Invalidate buffer so next viewport check triggers a re-fetch at the new TF
+        bufferedTF = 0;
+      }
     }
 
     function getVisibleTimeRange() {
@@ -500,7 +661,8 @@
       // Always update which TF buttons are available for the current zoom level
       updateTFButtonStates();
 
-      const range = getVisibleTimeRange();
+      // Use the estimated viewport range (can extend beyond loaded data)
+      const range = getViewportTimeRange();
       if (!range) return;
 
       // Skip re-fetch if visible range is within buffered range and TF matches
@@ -618,12 +780,21 @@
         currentView = btn.dataset.view;
 
         if (IS_SERVER_MODE && lastServerData) {
-          // Re-apply cached data with new view mode — no re-fetch needed
+          // Structural change (candle <-> line) — rebuild with cached data, no re-fetch
           const savedRange = getVisibleTimeRange();
-          applyServerData(lastServerData, false);
-          if (savedRange) {
-            setVisibleRangeBoth(savedRange);
+
+          if (fetchDebounceTimer) {
+            clearTimeout(fetchDebounceTimer);
+            fetchDebounceTimer = null;
           }
+
+          transitionLock = true;
+          rebuildServerSeries(lastServerData);
+          if (savedRange) {
+            priceChart.timeScale().setVisibleRange(savedRange);
+            devChart.timeScale().setVisibleRange(savedRange);
+          }
+          transitionLock = false;
         } else {
           rebuildChartEmbedded(true);
         }
@@ -654,10 +825,19 @@
     document.getElementById('btn-zoom-in').addEventListener('click', () => zoomBy(0.5));
     document.getElementById('btn-zoom-out').addEventListener('click', () => zoomBy(2));
     document.getElementById('btn-reset').addEventListener('click', () => {
-      priceChart.timeScale().fitContent();
-      devChart.timeScale().fitContent();
       if (IS_SERVER_MODE && totalTimeRange) {
+        // Reset TF to the appropriate default for the full range
+        const fullSpan = totalTimeRange.to - totalTimeRange.from;
+        currentTF = smallestValidTF(fullSpan);
+        document.querySelectorAll('.tf-btn').forEach(b => {
+          b.classList.toggle('active', parseInt(b.dataset.tf) === currentTF);
+        });
+        updateTFButtonStates();
+        bufferedTF = 0;
         fetchData(totalTimeRange.from, totalTimeRange.to, currentTF, true);
+      } else {
+        priceChart.timeScale().fitContent();
+        devChart.timeScale().fitContent();
       }
     });
 
@@ -702,6 +882,55 @@
       devChart.timeScale().setVisibleRange(range);
       transitionLock = false;
     }
+
+    // ── Crosshair legends ──
+    const priceLegendEl = document.getElementById('price-legend');
+    const devLegendEl = document.getElementById('dev-legend');
+
+    function formatPrice(v) {
+      if (v === undefined || v === null) return '—';
+      return v.toFixed(4);
+    }
+    function formatDev(v) {
+      if (v === undefined || v === null) return '—';
+      return v.toFixed(4) + '%';
+    }
+
+    function updatePriceLegend(param) {
+      if (!param || !param.time || !param.seriesData) {
+        priceLegendEl.innerHTML = '';
+        return;
+      }
+      let html = '';
+      for (const entry of activePriceSeries) {
+        const d = param.seriesData.get(entry.series);
+        if (!d) continue;
+        // Candlestick has open/high/low/close; line has value
+        const val = d.close !== undefined ? d.close : d.value;
+        const displayLabel = entry.label.replace(/^Oracle: /, '');
+        html += `<span class="legend-item"><span class="legend-dot" style="background:${entry.color}"></span>${displayLabel}: <span class="legend-val">${formatPrice(val)}</span></span>`;
+      }
+      priceLegendEl.innerHTML = html;
+    }
+
+    function updateDevLegend(param) {
+      if (!param || !param.time || !param.seriesData) {
+        devLegendEl.innerHTML = '';
+        return;
+      }
+      let html = '';
+      for (const entry of activeDevSeries) {
+        const d = param.seriesData.get(entry.series);
+        if (!d) continue;
+        const val = d.value;
+        const displayLabel = entry.label.replace(/^Dev: /, '');
+        html += `<span class="legend-item"><span class="legend-dot" style="background:${entry.color}"></span>${displayLabel}: <span class="legend-val">${formatDev(val)}</span></span>`;
+      }
+      devLegendEl.innerHTML = html;
+    }
+
+    priceChart.subscribeCrosshairMove(updatePriceLegend);
+    devChart.subscribeCrosshairMove(updateDevLegend);
 
     // ── Resize ──
     const ro = new ResizeObserver(() => {
