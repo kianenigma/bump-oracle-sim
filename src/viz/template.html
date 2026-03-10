@@ -42,10 +42,6 @@
 
     .drag-select { position: fixed; background: rgba(41,98,255,0.12); border-left: 2px solid rgba(41,98,255,0.6); border-right: 2px solid rgba(41,98,255,0.6); pointer-events: none; z-index: 50; }
 
-    .chart-legend { position: absolute; top: 4px; left: 8px; z-index: 10; font-size: 11px; pointer-events: none; display: flex; gap: 12px; flex-wrap: wrap; }
-    .chart-legend .legend-item { display: flex; align-items: center; gap: 4px; }
-    .chart-legend .legend-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
-    .chart-legend .legend-val { font-weight: 600; }
 
     #loading-overlay {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -105,8 +101,8 @@
   </div>
 
   <div id="charts-container">
-    <div id="price-chart"><div class="chart-legend" id="price-legend"></div></div>
-    <div id="deviation-chart"><div class="chart-legend" id="dev-legend"></div></div>
+    <div id="price-chart"></div>
+    <div id="deviation-chart"></div>
   </div>
   <div id="summary"></div>
 
@@ -326,13 +322,13 @@
             upColor: '#5c6b73', downColor: '#5c6b73',
             wickUpColor: '#888', wickDownColor: '#888',
             borderUpColor: '#888', borderDownColor: '#888',
-            title: label, visible,
+            title: label, visible, lastValueVisible: false, priceLineVisible: false,
           });
           s.setData(ohlc);
           activePriceSeries.push({ series: s, label, color: REAL_COLOR, kind: 'candle' });
         } else {
           const line = aggregateLine(raw, tf);
-          const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, title: label, visible });
+          const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, title: label, visible, lastValueVisible: false, priceLineVisible: false });
           s.setData(line);
           activePriceSeries.push({ series: s, label, color: REAL_COLOR, kind: 'line' });
         }
@@ -352,19 +348,19 @@
             upColor: color + 'CC', downColor: color + '66',
             wickUpColor: color, wickDownColor: color,
             borderUpColor: color, borderDownColor: color,
-            title: label, visible,
+            title: label, visible, lastValueVisible: false, priceLineVisible: false,
           });
           s.setData(ohlc);
           activePriceSeries.push({ series: s, label: oLabel, color, kind: 'candle' });
         } else {
           const line = aggregateLine(raw, tf);
-          const s = priceChart.addLineSeries({ color, lineWidth: 2, title: label, visible });
+          const s = priceChart.addLineSeries({ color, lineWidth: 2, title: label, visible, lastValueVisible: false, priceLineVisible: false });
           s.setData(line);
           activePriceSeries.push({ series: s, label: oLabel, color, kind: 'line' });
         }
 
         const devData = aggregateDeviation(sim.metrics, tf);
-        const ds = devChart.addLineSeries({ color, lineWidth: 1, title: `${label} dev%`, visible });
+        const ds = devChart.addLineSeries({ color, lineWidth: 1, title: `${label} dev%`, visible, lastValueVisible: false, priceLineVisible: false });
         ds.setData(devData);
         activeDevSeries.push({ series: ds, label: `Dev: ${label}`, color, kind: 'line' });
       });
@@ -479,12 +475,12 @@
           upColor: '#5c6b73', downColor: '#5c6b73',
           wickUpColor: '#888', wickDownColor: '#888',
           borderUpColor: '#888', borderDownColor: '#888',
-          title: rpLabel, visible: rpVisible,
+          title: rpLabel, visible: rpVisible, lastValueVisible: false, priceLineVisible: false,
         });
         s.setData(data.realPrice.ohlc);
         activePriceSeries.push({ series: s, label: rpLabel, color: REAL_COLOR, kind: 'candle' });
       } else {
-        const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, title: rpLabel, visible: rpVisible });
+        const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, title: rpLabel, visible: rpVisible, lastValueVisible: false, priceLineVisible: false });
         s.setData(data.realPrice.line);
         activePriceSeries.push({ series: s, label: rpLabel, color: REAL_COLOR, kind: 'line' });
       }
@@ -500,17 +496,17 @@
             upColor: color + 'CC', downColor: color + '66',
             wickUpColor: color, wickDownColor: color,
             borderUpColor: color, borderDownColor: color,
-            title: oracle.label, visible,
+            title: oracle.label, visible, lastValueVisible: false, priceLineVisible: false,
           });
           s.setData(oracle.ohlc);
           activePriceSeries.push({ series: s, label: oLabel, color, kind: 'candle' });
         } else {
-          const s = priceChart.addLineSeries({ color, lineWidth: 2, title: oracle.label, visible });
+          const s = priceChart.addLineSeries({ color, lineWidth: 2, title: oracle.label, visible, lastValueVisible: false, priceLineVisible: false });
           s.setData(oracle.line);
           activePriceSeries.push({ series: s, label: oLabel, color, kind: 'line' });
         }
 
-        const ds = devChart.addLineSeries({ color, lineWidth: 1, title: `${oracle.label} dev%`, visible });
+        const ds = devChart.addLineSeries({ color, lineWidth: 1, title: `${oracle.label} dev%`, visible, lastValueVisible: false, priceLineVisible: false });
         ds.setData(oracle.deviation);
         activeDevSeries.push({ series: ds, label: `Dev: ${oracle.label}`, color, kind: 'line' });
       });
@@ -883,54 +879,78 @@
       transitionLock = false;
     }
 
-    // ── Crosshair legends ──
-    const priceLegendEl = document.getElementById('price-legend');
-    const devLegendEl = document.getElementById('dev-legend');
+    // ── Crosshair-tracking price scale markers ──
+    // Each series gets a PriceLine (invisible horizontal line, visible axis label)
+    // that follows the crosshair to show the value at the cursor position.
 
-    function formatPrice(v) {
-      if (v === undefined || v === null) return '—';
-      return v.toFixed(4);
-    }
-    function formatDev(v) {
-      if (v === undefined || v === null) return '—';
-      return v.toFixed(4) + '%';
-    }
-
-    function updatePriceLegend(param) {
-      if (!param || !param.time || !param.seriesData) {
-        priceLegendEl.innerHTML = '';
-        return;
+    function ensurePriceLines(entries) {
+      for (const entry of entries) {
+        if (!entry.priceLine) {
+          entry.priceLine = entry.series.createPriceLine({
+            price: 0,
+            color: entry.color,
+            lineVisible: false,
+            axisLabelVisible: false,
+            lineWidth: 0,
+            title: '',
+          });
+        }
       }
-      let html = '';
+    }
+
+    function updatePriceTracking(param) {
+      ensurePriceLines(activePriceSeries);
+      const hasData = param && param.time && param.seriesData;
       for (const entry of activePriceSeries) {
+        if (!entry.priceLine) continue;
+        const isVisible = hasData && seriesVisibility[entry.label] !== false;
+        if (!isVisible) {
+          entry.priceLine.applyOptions({ axisLabelVisible: false });
+          continue;
+        }
         const d = param.seriesData.get(entry.series);
-        if (!d) continue;
-        // Candlestick has open/high/low/close; line has value
+        if (!d) {
+          entry.priceLine.applyOptions({ axisLabelVisible: false });
+          continue;
+        }
         const val = d.close !== undefined ? d.close : d.value;
         const displayLabel = entry.label.replace(/^Oracle: /, '');
-        html += `<span class="legend-item"><span class="legend-dot" style="background:${entry.color}"></span>${displayLabel}: <span class="legend-val">${formatPrice(val)}</span></span>`;
+        entry.priceLine.applyOptions({
+          price: val,
+          axisLabelVisible: true,
+          axisLabelColor: entry.color,
+          title: displayLabel,
+        });
       }
-      priceLegendEl.innerHTML = html;
     }
 
-    function updateDevLegend(param) {
-      if (!param || !param.time || !param.seriesData) {
-        devLegendEl.innerHTML = '';
-        return;
-      }
-      let html = '';
+    function updateDevTracking(param) {
+      ensurePriceLines(activeDevSeries);
+      const hasData = param && param.time && param.seriesData;
       for (const entry of activeDevSeries) {
+        if (!entry.priceLine) continue;
+        const isVisible = hasData && seriesVisibility[entry.label] !== false;
+        if (!isVisible) {
+          entry.priceLine.applyOptions({ axisLabelVisible: false });
+          continue;
+        }
         const d = param.seriesData.get(entry.series);
-        if (!d) continue;
-        const val = d.value;
+        if (!d) {
+          entry.priceLine.applyOptions({ axisLabelVisible: false });
+          continue;
+        }
         const displayLabel = entry.label.replace(/^Dev: /, '');
-        html += `<span class="legend-item"><span class="legend-dot" style="background:${entry.color}"></span>${displayLabel}: <span class="legend-val">${formatDev(val)}</span></span>`;
+        entry.priceLine.applyOptions({
+          price: d.value,
+          axisLabelVisible: true,
+          axisLabelColor: entry.color,
+          title: displayLabel,
+        });
       }
-      devLegendEl.innerHTML = html;
     }
 
-    priceChart.subscribeCrosshairMove(updatePriceLegend);
-    devChart.subscribeCrosshairMove(updateDevLegend);
+    priceChart.subscribeCrosshairMove(updatePriceTracking);
+    devChart.subscribeCrosshairMove(updateDevTracking);
 
     // ── Resize ──
     const ro = new ResizeObserver(() => {
