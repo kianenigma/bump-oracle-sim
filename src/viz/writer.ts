@@ -37,6 +37,9 @@ export async function writeSimData(
   results: SimulationResult[],
   outputPath: string
 ): Promise<string> {
+  // Bun's FileSink opens with O_WRONLY|O_CREAT but NOT O_TRUNC,
+  // so a previous larger file would leave trailing garbage. Truncate first.
+  await Bun.write(outputPath, "");
   const writer = Bun.file(outputPath).writer();
 
   writer.write('{"version":1,"scenarios":[');

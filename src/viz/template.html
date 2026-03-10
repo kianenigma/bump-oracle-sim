@@ -35,7 +35,11 @@
     #price-chart { flex: 3; position: relative; }
     #deviation-chart { flex: 1; border-top: 1px solid #0f3460; position: relative; }
 
-    #summary { position: absolute; top: 170px; right: 24px; z-index: 10; background: rgba(22,33,62,0.92); padding: 10px 14px; border-radius: 6px; font-size: 11px; border: 1px solid #0f3460; max-height: calc(100vh - 220px); overflow-y: auto; }
+    #summary-wrapper { position: absolute; top: 170px; right: 24px; z-index: 10; }
+    #summary-toggle { background: rgba(22,33,62,0.92); border: 1px solid #0f3460; border-radius: 6px; color: #888; font-size: 10px; cursor: pointer; padding: 3px 8px; display: block; margin-left: auto; margin-bottom: 2px; }
+    #summary-toggle:hover { color: #ccc; }
+    #summary { background: rgba(22,33,62,0.92); padding: 10px 14px; border-radius: 6px; font-size: 11px; border: 1px solid #0f3460; max-height: calc(100vh - 220px); overflow-y: auto; }
+    #summary.collapsed { display: none; }
     #summary .row { display: flex; justify-content: space-between; gap: 20px; margin: 2px 0; }
     #summary .label { color: #888; }
     #summary .value { font-weight: 600; }
@@ -104,7 +108,10 @@
     <div id="price-chart"></div>
     <div id="deviation-chart"></div>
   </div>
-  <div id="summary"></div>
+  <div id="summary-wrapper">
+    <button id="summary-toggle">Stats</button>
+    <div id="summary" class="collapsed"></div>
+  </div>
 
   <script>
     // ── Mode detection ──
@@ -185,6 +192,14 @@
       return metrics.map(m => ({ timestamp: m.timestamp, price: m.oraclePrice }));
     }
 
+    // ── Summary panel toggle ──
+    document.getElementById('summary-toggle').addEventListener('click', () => {
+      const panel = document.getElementById('summary');
+      const btn = document.getElementById('summary-toggle');
+      panel.classList.toggle('collapsed');
+      btn.textContent = panel.classList.contains('collapsed') ? 'Stats' : 'Hide Stats';
+    });
+
     // ── Charts ──
     const priceChartEl = document.getElementById('price-chart');
     const priceChart = LightweightCharts.createChart(priceChartEl, {
@@ -261,16 +276,20 @@
     }
 
     function setAllSeriesVisibility(visible) {
-      // Update all series visibility
       for (const entry of activePriceSeries) {
         seriesVisibility[entry.label] = visible;
         entry.series.applyOptions({ visible });
+        if (!visible && entry.priceLine) {
+          entry.priceLine.applyOptions({ axisLabelVisible: false });
+        }
       }
       for (const entry of activeDevSeries) {
         seriesVisibility[entry.label] = visible;
         entry.series.applyOptions({ visible });
+        if (!visible && entry.priceLine) {
+          entry.priceLine.applyOptions({ axisLabelVisible: false });
+        }
       }
-      // Sync checkboxes
       document.querySelectorAll('#series-selector input[type="checkbox"]').forEach(cb => {
         cb.checked = visible;
       });
@@ -287,6 +306,9 @@
         for (const entry of seriesEntries) {
           seriesVisibility[entry.label] = cb.checked;
           entry.series.applyOptions({ visible: cb.checked });
+          if (!cb.checked && entry.priceLine) {
+            entry.priceLine.applyOptions({ axisLabelVisible: false });
+          }
         }
       });
       const dot = document.createElement('span');
@@ -322,13 +344,13 @@
             upColor: '#5c6b73', downColor: '#5c6b73',
             wickUpColor: '#888', wickDownColor: '#888',
             borderUpColor: '#888', borderDownColor: '#888',
-            title: label, visible, lastValueVisible: false, priceLineVisible: false,
+            visible, lastValueVisible: false, priceLineVisible: false,
           });
           s.setData(ohlc);
           activePriceSeries.push({ series: s, label, color: REAL_COLOR, kind: 'candle' });
         } else {
           const line = aggregateLine(raw, tf);
-          const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, title: label, visible, lastValueVisible: false, priceLineVisible: false });
+          const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, visible, lastValueVisible: false, priceLineVisible: false });
           s.setData(line);
           activePriceSeries.push({ series: s, label, color: REAL_COLOR, kind: 'line' });
         }
@@ -348,19 +370,19 @@
             upColor: color + 'CC', downColor: color + '66',
             wickUpColor: color, wickDownColor: color,
             borderUpColor: color, borderDownColor: color,
-            title: label, visible, lastValueVisible: false, priceLineVisible: false,
+            visible, lastValueVisible: false, priceLineVisible: false,
           });
           s.setData(ohlc);
           activePriceSeries.push({ series: s, label: oLabel, color, kind: 'candle' });
         } else {
           const line = aggregateLine(raw, tf);
-          const s = priceChart.addLineSeries({ color, lineWidth: 2, title: label, visible, lastValueVisible: false, priceLineVisible: false });
+          const s = priceChart.addLineSeries({ color, lineWidth: 2, visible, lastValueVisible: false, priceLineVisible: false });
           s.setData(line);
           activePriceSeries.push({ series: s, label: oLabel, color, kind: 'line' });
         }
 
         const devData = aggregateDeviation(sim.metrics, tf);
-        const ds = devChart.addLineSeries({ color, lineWidth: 1, title: `${label} dev%`, visible, lastValueVisible: false, priceLineVisible: false });
+        const ds = devChart.addLineSeries({ color, lineWidth: 1, visible, lastValueVisible: false, priceLineVisible: false });
         ds.setData(devData);
         activeDevSeries.push({ series: ds, label: `Dev: ${label}`, color, kind: 'line' });
       });
@@ -475,12 +497,12 @@
           upColor: '#5c6b73', downColor: '#5c6b73',
           wickUpColor: '#888', wickDownColor: '#888',
           borderUpColor: '#888', borderDownColor: '#888',
-          title: rpLabel, visible: rpVisible, lastValueVisible: false, priceLineVisible: false,
+          visible: rpVisible, lastValueVisible: false, priceLineVisible: false,
         });
         s.setData(data.realPrice.ohlc);
         activePriceSeries.push({ series: s, label: rpLabel, color: REAL_COLOR, kind: 'candle' });
       } else {
-        const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, title: rpLabel, visible: rpVisible, lastValueVisible: false, priceLineVisible: false });
+        const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, visible: rpVisible, lastValueVisible: false, priceLineVisible: false });
         s.setData(data.realPrice.line);
         activePriceSeries.push({ series: s, label: rpLabel, color: REAL_COLOR, kind: 'line' });
       }
@@ -496,17 +518,17 @@
             upColor: color + 'CC', downColor: color + '66',
             wickUpColor: color, wickDownColor: color,
             borderUpColor: color, borderDownColor: color,
-            title: oracle.label, visible, lastValueVisible: false, priceLineVisible: false,
+            visible, lastValueVisible: false, priceLineVisible: false,
           });
           s.setData(oracle.ohlc);
           activePriceSeries.push({ series: s, label: oLabel, color, kind: 'candle' });
         } else {
-          const s = priceChart.addLineSeries({ color, lineWidth: 2, title: oracle.label, visible, lastValueVisible: false, priceLineVisible: false });
+          const s = priceChart.addLineSeries({ color, lineWidth: 2, visible, lastValueVisible: false, priceLineVisible: false });
           s.setData(oracle.line);
           activePriceSeries.push({ series: s, label: oLabel, color, kind: 'line' });
         }
 
-        const ds = devChart.addLineSeries({ color, lineWidth: 1, title: `${oracle.label} dev%`, visible, lastValueVisible: false, priceLineVisible: false });
+        const ds = devChart.addLineSeries({ color, lineWidth: 1, visible, lastValueVisible: false, priceLineVisible: false });
         ds.setData(oracle.deviation);
         activeDevSeries.push({ series: ds, label: `Dev: ${oracle.label}`, color, kind: 'line' });
       });
