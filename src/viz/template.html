@@ -18,8 +18,9 @@
     .toolbar-sep { width: 1px; height: 20px; background: #0f3460; margin: 0 6px; }
     .toolbar-label { font-size: 11px; color: #666; margin-right: 4px; white-space: nowrap; }
     .tb { background: #0f3460; color: #ccc; border: 1px solid #1a4a80; border-radius: 4px; padding: 3px 9px; font-size: 11px; cursor: pointer; transition: all 0.12s; white-space: nowrap; }
-    .tb:hover { background: #1a4a80; color: #fff; }
+    .tb:hover:not(:disabled) { background: #1a4a80; color: #fff; }
     .tb.active { background: #2962FF; color: #fff; border-color: #2962FF; }
+    .tb:disabled { opacity: 0.35; cursor: not-allowed; }
     .toolbar-hint { font-size: 10px; color: #555; margin-left: auto; }
     kbd { background: #0f3460; padding: 1px 4px; border-radius: 3px; font-size: 10px; font-family: inherit; }
 
@@ -37,9 +38,22 @@
     #summary .value { font-weight: 600; }
 
     .drag-select { position: fixed; background: rgba(41,98,255,0.12); border-left: 2px solid rgba(41,98,255,0.6); border-right: 2px solid rgba(41,98,255,0.6); pointer-events: none; z-index: 50; }
+
+    #loading-overlay {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      background: rgba(26,26,46,0.7); z-index: 100;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 16px; color: #ccc;
+      transition: opacity 0.2s;
+    }
+    #loading-overlay.hidden { opacity: 0; pointer-events: none; }
+    .spinner { width: 24px; height: 24px; border: 3px solid #0f3460; border-top-color: #2962FF; border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 12px; }
+    @keyframes spin { to { transform: rotate(360deg); } }
   </style>
 </head>
 <body>
+  <div id="loading-overlay"><div class="spinner"></div><span>Loading...</span></div>
+
   <div id="header">
     <h1>Oracle Bump Simulation</h1>
     <div id="config-info"></div>
@@ -89,19 +103,34 @@
   <div id="summary"></div>
 
   <script>
-    // ── Injected data ──
-    const simulationData = /*DATA_PLACEHOLDER*/[];
-    const simulationConfigs = /*CONFIG_PLACEHOLDER*/[];
+    // ── Mode detection ──
+    const EMBEDDED_DATA = /*DATA_PLACEHOLDER*/null;
+    const EMBEDDED_CONFIGS = /*CONFIG_PLACEHOLDER*/null;
+    const IS_SERVER_MODE = EMBEDDED_DATA === null;
 
     const COLORS = ['#2962FF','#FF6D00','#00C853','#D500F9','#FF1744','#00E5FF','#FFEA00','#69F0AE'];
     const REAL_COLOR = '#888888';
 
     // ── State ──
-    let currentTF = 900;       // seconds per candle
-    let currentView = 'candle'; // 'candle' or 'line'
+    let currentTF = 900;
+    let currentView = 'candle';
 
-    // ── OHLC Aggregation ──
-    // Aggregate raw {timestamp, price} array into OHLC candles of `interval` seconds.
+    // Server mode state
+    let serverMeta = null;       // ApiMetaResponse
+    let bufferedFrom = 0;        // buffered data range
+    let bufferedTo = 0;
+    let bufferedTF = 0;
+    let lastServerData = null;   // cached last /api/data response for view toggles
+    let fetchController = null;  // AbortController for in-flight requests
+    let fetchDebounceTimer = null;
+    let totalTimeRange = null;   // { from, to } for the full dataset
+
+    // ── Loading overlay ──
+    const loadingEl = document.getElementById('loading-overlay');
+    function showLoading() { loadingEl.classList.remove('hidden'); }
+    function hideLoading() { loadingEl.classList.add('hidden'); }
+
+    // ── OHLC Aggregation (embedded mode only) ──
     function aggregateOHLC(points, interval) {
       if (points.length === 0) return [];
       const map = new Map();
@@ -119,17 +148,14 @@
       return Array.from(map.values()).sort((a, b) => a.time - b.time);
     }
 
-    // Aggregate to line data (close of each bucket)
     function aggregateLine(points, interval) {
       if (interval <= 6) {
-        // No aggregation needed at base resolution
         return points.map(p => ({ time: p.timestamp, value: p.price }));
       }
       const candles = aggregateOHLC(points, interval);
       return candles.map(c => ({ time: c.time, value: c.close }));
     }
 
-    // Aggregate deviation data (max deviation per bucket for worst-case view)
     function aggregateDeviation(metrics, interval) {
       if (interval <= 6) {
         return metrics.map(m => ({ time: m.timestamp, value: m.deviationPct }));
@@ -141,36 +167,17 @@
         if (!existing) {
           map.set(bucket, { time: bucket, value: m.deviationPct });
         } else {
-          // Show max deviation in each bucket
           if (m.deviationPct > existing.value) existing.value = m.deviationPct;
         }
       }
       return Array.from(map.values()).sort((a, b) => a.time - b.time);
     }
 
-    // Extract raw points from metrics
     function realPoints(metrics) {
       return metrics.map(m => ({ timestamp: m.timestamp, price: m.realPrice }));
     }
     function oraclePoints(metrics) {
       return metrics.map(m => ({ timestamp: m.timestamp, price: m.oraclePrice }));
-    }
-
-    // ── Config info ──
-    const configEl = document.getElementById('config-info');
-    if (simulationConfigs.length === 1) {
-      const c = simulationConfigs[0];
-      configEl.innerHTML = [
-        `<span>Validators: ${c.validatorCount}</span>`,
-        `<span>Malicious: ${(c.maliciousFraction*100).toFixed(0)}%</span>`,
-        `<span>Epsilon: ${typeof c.epsilon==='number'?c.epsilon.toFixed(6):c.epsilon}</span>`,
-        `<span>Author honest: ${c.authorAlwaysHonest}</span>`,
-        `<span>Seed: ${c.seed}</span>`,
-        `<span>${c.startDate} to ${c.endDate}</span>`,
-      ].join('');
-    } else {
-      configEl.innerHTML = `<span>${simulationConfigs.length} scenarios compared</span>`+
-        `<span>${simulationConfigs[0].startDate} to ${simulationConfigs[0].endDate}</span>`;
     }
 
     // ── Charts ──
@@ -193,10 +200,9 @@
     });
 
     // ── Series management ──
-    // We track all active series so we can tear them down and rebuild on TF/view change.
-    let activePriceSeries = [];   // { series, label, color, kind }
+    let activePriceSeries = [];
     let activeDevSeries = [];
-    let seriesVisibility = {};    // label -> boolean, persists across rebuilds
+    let seriesVisibility = {};
 
     function clearPriceSeries() {
       for (const s of activePriceSeries) priceChart.removeSeries(s.series);
@@ -207,82 +213,9 @@
       activeDevSeries = [];
     }
 
-    function rebuildChart() {
-      clearPriceSeries();
-      clearDevSeries();
-
-      const tf = currentTF;
-      const isCandle = currentView === 'candle';
-
-      // Real price series (from first scenario's data, shared)
-      if (simulationData.length > 0) {
-        const raw = realPoints(simulationData[0].metrics);
-        const label = 'Real Price';
-        const visible = seriesVisibility[label] !== false;
-
-        if (isCandle) {
-          const ohlc = aggregateOHLC(raw, tf);
-          const s = priceChart.addCandlestickSeries({
-            upColor: '#5c6b73', downColor: '#5c6b73',
-            wickUpColor: '#888', wickDownColor: '#888',
-            borderUpColor: '#888', borderDownColor: '#888',
-            title: label, visible,
-          });
-          s.setData(ohlc);
-          activePriceSeries.push({ series: s, label, color: REAL_COLOR, kind: 'candle' });
-        } else {
-          const line = aggregateLine(raw, tf);
-          const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, title: label, visible });
-          s.setData(line);
-          activePriceSeries.push({ series: s, label, color: REAL_COLOR, kind: 'line' });
-        }
-      }
-
-      // Oracle series per scenario
-      simulationData.forEach((sim, idx) => {
-        const color = COLORS[idx % COLORS.length];
-        const label = sim.config.label || `${(sim.config.maliciousFraction*100).toFixed(0)}% malicious`;
-        const oLabel = `Oracle: ${label}`;
-        const dLabel = `Dev: ${label}`;
-        const oVisible = seriesVisibility[oLabel] !== false;
-        const dVisible = seriesVisibility[dLabel] !== false;
-
-        const raw = oraclePoints(sim.metrics);
-
-        if (isCandle) {
-          const ohlc = aggregateOHLC(raw, tf);
-          // Oracle as hollow/colored candles to distinguish from real
-          const s = priceChart.addCandlestickSeries({
-            upColor: color + 'CC', downColor: color + '66',
-            wickUpColor: color, wickDownColor: color,
-            borderUpColor: color, borderDownColor: color,
-            title: label, visible: oVisible,
-          });
-          s.setData(ohlc);
-          activePriceSeries.push({ series: s, label: oLabel, color, kind: 'candle' });
-        } else {
-          const line = aggregateLine(raw, tf);
-          const s = priceChart.addLineSeries({ color, lineWidth: 2, title: label, visible: oVisible });
-          s.setData(line);
-          activePriceSeries.push({ series: s, label: oLabel, color, kind: 'line' });
-        }
-
-        // Deviation always as line
-        const devData = aggregateDeviation(sim.metrics, tf);
-        const ds = devChart.addLineSeries({ color, lineWidth: 1, title: `${label} dev%`, visible: dVisible });
-        ds.setData(devData);
-        activeDevSeries.push({ series: ds, label: dLabel, color, kind: 'line' });
-      });
-
-      rebuildSeriesSelector();
-      priceChart.timeScale().fitContent();
-      devChart.timeScale().fitContent();
-    }
-
     // ── Series selector checkboxes ──
     function rebuildSeriesSelector() {
       const el = document.getElementById('series-selector');
-      // Keep the label span, remove the rest
       while (el.children.length > 1) el.removeChild(el.lastChild);
 
       const allS = [...activePriceSeries, ...activeDevSeries];
@@ -304,13 +237,376 @@
       }
     }
 
+    // ══════════════════════════════════════════════
+    // ── EMBEDDED MODE ──
+    // ══════════════════════════════════════════════
+
+    function rebuildChartEmbedded(preserveView) {
+      // Save visible time range before tearing down series
+      const savedRange = preserveView ? getVisibleTimeRange() : null;
+
+      clearPriceSeries();
+      clearDevSeries();
+
+      const tf = currentTF;
+      const isCandle = currentView === 'candle';
+
+      if (EMBEDDED_DATA.length > 0) {
+        const raw = realPoints(EMBEDDED_DATA[0].metrics);
+        const label = 'Real Price';
+        const visible = seriesVisibility[label] !== false;
+
+        if (isCandle) {
+          const ohlc = aggregateOHLC(raw, tf);
+          const s = priceChart.addCandlestickSeries({
+            upColor: '#5c6b73', downColor: '#5c6b73',
+            wickUpColor: '#888', wickDownColor: '#888',
+            borderUpColor: '#888', borderDownColor: '#888',
+            title: label, visible,
+          });
+          s.setData(ohlc);
+          activePriceSeries.push({ series: s, label, color: REAL_COLOR, kind: 'candle' });
+        } else {
+          const line = aggregateLine(raw, tf);
+          const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, title: label, visible });
+          s.setData(line);
+          activePriceSeries.push({ series: s, label, color: REAL_COLOR, kind: 'line' });
+        }
+      }
+
+      EMBEDDED_DATA.forEach((sim, idx) => {
+        const color = COLORS[idx % COLORS.length];
+        const label = sim.config.label || `${(sim.config.maliciousFraction*100).toFixed(0)}% malicious`;
+        const oLabel = `Oracle: ${label}`;
+        const dLabel = `Dev: ${label}`;
+        const oVisible = seriesVisibility[oLabel] !== false;
+        const dVisible = seriesVisibility[dLabel] !== false;
+
+        const raw = oraclePoints(sim.metrics);
+
+        if (isCandle) {
+          const ohlc = aggregateOHLC(raw, tf);
+          const s = priceChart.addCandlestickSeries({
+            upColor: color + 'CC', downColor: color + '66',
+            wickUpColor: color, wickDownColor: color,
+            borderUpColor: color, borderDownColor: color,
+            title: label, visible: oVisible,
+          });
+          s.setData(ohlc);
+          activePriceSeries.push({ series: s, label: oLabel, color, kind: 'candle' });
+        } else {
+          const line = aggregateLine(raw, tf);
+          const s = priceChart.addLineSeries({ color, lineWidth: 2, title: label, visible: oVisible });
+          s.setData(line);
+          activePriceSeries.push({ series: s, label: oLabel, color, kind: 'line' });
+        }
+
+        const devData = aggregateDeviation(sim.metrics, tf);
+        const ds = devChart.addLineSeries({ color, lineWidth: 1, title: `${label} dev%`, visible: dVisible });
+        ds.setData(devData);
+        activeDevSeries.push({ series: ds, label: dLabel, color, kind: 'line' });
+      });
+
+      rebuildSeriesSelector();
+
+      if (savedRange) {
+        setVisibleRangeBoth(savedRange);
+      } else {
+        priceChart.timeScale().fitContent();
+        devChart.timeScale().fitContent();
+      }
+    }
+
+    function initEmbedded() {
+      const configEl = document.getElementById('config-info');
+      if (EMBEDDED_CONFIGS.length === 1) {
+        const c = EMBEDDED_CONFIGS[0];
+        configEl.innerHTML = [
+          `<span>Validators: ${c.validatorCount}</span>`,
+          `<span>Malicious: ${(c.maliciousFraction*100).toFixed(0)}%</span>`,
+          `<span>Epsilon: ${typeof c.epsilon==='number'?c.epsilon.toFixed(6):c.epsilon}</span>`,
+          `<span>Author honest: ${c.authorAlwaysHonest}</span>`,
+          `<span>Seed: ${c.seed}</span>`,
+          `<span>${c.startDate} to ${c.endDate}</span>`,
+        ].join('');
+      } else {
+        configEl.innerHTML = `<span>${EMBEDDED_CONFIGS.length} scenarios compared</span>`+
+          `<span>${EMBEDDED_CONFIGS[0].startDate} to ${EMBEDDED_CONFIGS[0].endDate}</span>`;
+      }
+
+      // Summary
+      const summaryEl = document.getElementById('summary');
+      if (EMBEDDED_DATA.length === 1) {
+        const s = EMBEDDED_DATA[0].summary;
+        summaryEl.innerHTML = `
+          <div class="row"><span class="label">Total blocks</span><span class="value">${s.totalBlocks.toLocaleString()}</span></div>
+          <div class="row"><span class="label">Mean dev %</span><span class="value">${s.meanDeviationPct.toFixed(4)}%</span></div>
+          <div class="row"><span class="label">Max dev %</span><span class="value">${s.maxDeviationPct.toFixed(4)}%</span></div>
+          <div class="row"><span class="label">Convergence</span><span class="value">${(s.convergenceRate*100).toFixed(1)}%</span></div>
+          <div class="row"><span class="label">Epsilon</span><span class="value">${s.epsilon.toFixed(6)}</span></div>
+        `;
+      } else {
+        let html = '';
+        EMBEDDED_DATA.forEach((sim) => {
+          const s = sim.summary;
+          const label = sim.config.label || `${(sim.config.maliciousFraction*100).toFixed(0)}%`;
+          html += `<div style="margin-bottom:6px;border-bottom:1px solid #0f3460;padding-bottom:4px;">
+            <strong>${label}</strong>
+            <div class="row"><span class="label">Mean dev</span><span class="value">${s.meanDeviationPct.toFixed(4)}%</span></div>
+            <div class="row"><span class="label">Max dev</span><span class="value">${s.maxDeviationPct.toFixed(4)}%</span></div>
+            <div class="row"><span class="label">Convergence</span><span class="value">${(s.convergenceRate*100).toFixed(1)}%</span></div>
+          </div>`;
+        });
+        summaryEl.innerHTML = html;
+      }
+
+      rebuildChartEmbedded();
+      hideLoading();
+    }
+
+    // ══════════════════════════════════════════════
+    // ── SERVER MODE ──
+    // ══════════════════════════════════════════════
+
+    function applyServerData(data, fitContent) {
+      clearPriceSeries();
+      clearDevSeries();
+
+      const isCandle = currentView === 'candle';
+
+      // Real price
+      const rpLabel = 'Real Price';
+      const rpVisible = seriesVisibility[rpLabel] !== false;
+      if (isCandle) {
+        const s = priceChart.addCandlestickSeries({
+          upColor: '#5c6b73', downColor: '#5c6b73',
+          wickUpColor: '#888', wickDownColor: '#888',
+          borderUpColor: '#888', borderDownColor: '#888',
+          title: rpLabel, visible: rpVisible,
+        });
+        s.setData(data.realPrice.ohlc);
+        activePriceSeries.push({ series: s, label: rpLabel, color: REAL_COLOR, kind: 'candle' });
+      } else {
+        const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, title: rpLabel, visible: rpVisible });
+        s.setData(data.realPrice.line);
+        activePriceSeries.push({ series: s, label: rpLabel, color: REAL_COLOR, kind: 'line' });
+      }
+
+      // Oracle series
+      data.oracles.forEach((oracle, idx) => {
+        const color = COLORS[idx % COLORS.length];
+        const oLabel = `Oracle: ${oracle.label}`;
+        const dLabel = `Dev: ${oracle.label}`;
+        const oVisible = seriesVisibility[oLabel] !== false;
+        const dVisible = seriesVisibility[dLabel] !== false;
+
+        if (isCandle) {
+          const s = priceChart.addCandlestickSeries({
+            upColor: color + 'CC', downColor: color + '66',
+            wickUpColor: color, wickDownColor: color,
+            borderUpColor: color, borderDownColor: color,
+            title: oracle.label, visible: oVisible,
+          });
+          s.setData(oracle.ohlc);
+          activePriceSeries.push({ series: s, label: oLabel, color, kind: 'candle' });
+        } else {
+          const s = priceChart.addLineSeries({ color, lineWidth: 2, title: oracle.label, visible: oVisible });
+          s.setData(oracle.line);
+          activePriceSeries.push({ series: s, label: oLabel, color, kind: 'line' });
+        }
+
+        const ds = devChart.addLineSeries({ color, lineWidth: 1, title: `${oracle.label} dev%`, visible: dVisible });
+        ds.setData(oracle.deviation);
+        activeDevSeries.push({ series: ds, label: dLabel, color, kind: 'line' });
+      });
+
+      rebuildSeriesSelector();
+
+      if (fitContent) {
+        priceChart.timeScale().fitContent();
+        devChart.timeScale().fitContent();
+      }
+    }
+
+    async function fetchData(from, to, tf, fitContent) {
+      // Cancel any in-flight request
+      if (fetchController) fetchController.abort();
+      fetchController = new AbortController();
+
+      // Capture the visible time range BEFORE fetch so we can restore it after
+      const savedTimeRange = fitContent ? null : getVisibleTimeRange();
+
+      showLoading();
+      try {
+        const params = new URLSearchParams({
+          scenario: 'all',
+          from: String(from),
+          to: String(to),
+          tf: String(tf),
+        });
+        const res = await fetch(`/api/data?${params}`, { signal: fetchController.signal });
+        const data = await res.json();
+
+        // Update buffer tracking
+        bufferedFrom = data.from;
+        bufferedTo = data.to;
+        bufferedTF = data.tf;
+        lastServerData = data;
+
+        // Update TF button state if server auto-upgraded
+        if (data.tf !== data.requestedTF) {
+          currentTF = data.tf;
+          document.querySelectorAll('.tf-btn').forEach(b => {
+            b.classList.toggle('active', parseInt(b.dataset.tf) === currentTF);
+          });
+        }
+
+        applyServerData(data, fitContent);
+
+        // Restore the exact time range the user was looking at
+        if (savedTimeRange) {
+          setVisibleRangeBoth(savedTimeRange);
+        }
+
+        updateTFButtonStates();
+      } catch (e) {
+        if (e.name !== 'AbortError') console.error('Fetch error:', e);
+      } finally {
+        hideLoading();
+      }
+    }
+
+    function updateTFButtonStates() {
+      if (!totalTimeRange) return;
+      const visible = getVisibleTimeRange();
+      const span = visible
+        ? (visible.to - visible.from)
+        : (totalTimeRange.to - totalTimeRange.from);
+      document.querySelectorAll('.tf-btn').forEach(btn => {
+        const tf = parseInt(btn.dataset.tf);
+        btn.disabled = span / tf > 5000;
+      });
+    }
+
+    function getVisibleTimeRange() {
+      const range = priceChart.timeScale().getVisibleRange();
+      if (!range) return null;
+      return { from: range.from, to: range.to };
+    }
+
+    function onViewportChange() {
+      if (!IS_SERVER_MODE || transitionLock) return;
+
+      // Always update which TF buttons are available for the current zoom level
+      updateTFButtonStates();
+
+      const range = getVisibleTimeRange();
+      if (!range) return;
+
+      // Skip re-fetch if visible range is within buffered range and TF matches
+      if (
+        bufferedTF === currentTF &&
+        range.from >= bufferedFrom &&
+        range.to <= bufferedTo
+      ) {
+        return;
+      }
+
+      // Debounce
+      if (fetchDebounceTimer) clearTimeout(fetchDebounceTimer);
+      fetchDebounceTimer = setTimeout(() => {
+        fetchData(range.from, range.to, currentTF, false);
+      }, 200);
+    }
+
+    async function initServer() {
+      showLoading();
+      try {
+        const res = await fetch('/api/meta');
+        serverMeta = await res.json();
+
+        // Populate header
+        const configEl = document.getElementById('config-info');
+        if (serverMeta.scenarios.length === 1) {
+          const c = serverMeta.scenarios[0].config;
+          configEl.innerHTML = [
+            `<span>Validators: ${c.validatorCount}</span>`,
+            `<span>Malicious: ${(c.maliciousFraction*100).toFixed(0)}%</span>`,
+            `<span>Epsilon: ${typeof c.epsilon==='number'?c.epsilon.toFixed(6):c.epsilon}</span>`,
+            `<span>Author honest: ${c.authorAlwaysHonest}</span>`,
+            `<span>Seed: ${c.seed}</span>`,
+            `<span>${c.startDate} to ${c.endDate}</span>`,
+          ].join('');
+        } else {
+          configEl.innerHTML = `<span>${serverMeta.scenarioCount} scenarios compared</span>`+
+            `<span>${serverMeta.scenarios[0].config.startDate} to ${serverMeta.scenarios[0].config.endDate}</span>`;
+        }
+
+        // Summary
+        const summaryEl = document.getElementById('summary');
+        if (serverMeta.scenarios.length === 1) {
+          const s = serverMeta.scenarios[0].summary;
+          summaryEl.innerHTML = `
+            <div class="row"><span class="label">Total blocks</span><span class="value">${s.totalBlocks.toLocaleString()}</span></div>
+            <div class="row"><span class="label">Mean dev %</span><span class="value">${s.meanDeviationPct.toFixed(4)}%</span></div>
+            <div class="row"><span class="label">Max dev %</span><span class="value">${s.maxDeviationPct.toFixed(4)}%</span></div>
+            <div class="row"><span class="label">Convergence</span><span class="value">${(s.convergenceRate*100).toFixed(1)}%</span></div>
+            <div class="row"><span class="label">Epsilon</span><span class="value">${s.epsilon.toFixed(6)}</span></div>
+          `;
+        } else {
+          let html = '';
+          serverMeta.scenarios.forEach((sc) => {
+            const s = sc.summary;
+            const label = sc.config.label || `${(sc.config.maliciousFraction*100).toFixed(0)}%`;
+            html += `<div style="margin-bottom:6px;border-bottom:1px solid #0f3460;padding-bottom:4px;">
+              <strong>${label}</strong>
+              <div class="row"><span class="label">Mean dev</span><span class="value">${s.meanDeviationPct.toFixed(4)}%</span></div>
+              <div class="row"><span class="label">Max dev</span><span class="value">${s.maxDeviationPct.toFixed(4)}%</span></div>
+              <div class="row"><span class="label">Convergence</span><span class="value">${(s.convergenceRate*100).toFixed(1)}%</span></div>
+            </div>`;
+          });
+          summaryEl.innerHTML = html;
+        }
+
+        // Compute total time range from all scenarios
+        let minFrom = Infinity, maxTo = -Infinity;
+        for (const sc of serverMeta.scenarios) {
+          if (sc.timeRange.from < minFrom) minFrom = sc.timeRange.from;
+          if (sc.timeRange.to > maxTo) maxTo = sc.timeRange.to;
+        }
+        totalTimeRange = { from: minFrom, to: maxTo };
+
+        updateTFButtonStates();
+
+        // Initial data fetch (full range)
+        await fetchData(totalTimeRange.from, totalTimeRange.to, currentTF, true);
+
+        // Subscribe to viewport changes for on-demand loading
+        priceChart.timeScale().subscribeVisibleTimeRangeChange(onViewportChange);
+      } catch (e) {
+        console.error('Failed to initialize:', e);
+        hideLoading();
+      }
+    }
+
     // ── Toolbar: timeframe buttons ──
     document.querySelectorAll('.tf-btn').forEach(btn => {
       btn.addEventListener('click', () => {
+        if (btn.disabled) return;
         document.querySelectorAll('.tf-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         currentTF = parseInt(btn.dataset.tf);
-        rebuildChart();
+
+        if (IS_SERVER_MODE) {
+          // Force re-fetch at new TF
+          bufferedTF = 0;
+          const range = getVisibleTimeRange();
+          const from = range ? range.from : totalTimeRange.from;
+          const to = range ? range.to : totalTimeRange.to;
+          fetchData(from, to, currentTF, false);
+        } else {
+          rebuildChartEmbedded(true);
+        }
       });
     });
 
@@ -320,7 +616,17 @@
         document.querySelectorAll('.view-btn').forEach(b => b.classList.remove('active'));
         btn.classList.add('active');
         currentView = btn.dataset.view;
-        rebuildChart();
+
+        if (IS_SERVER_MODE && lastServerData) {
+          // Re-apply cached data with new view mode — no re-fetch needed
+          const savedRange = getVisibleTimeRange();
+          applyServerData(lastServerData, false);
+          if (savedRange) {
+            setVisibleRangeBoth(savedRange);
+          }
+        } else {
+          rebuildChartEmbedded(true);
+        }
       });
     });
 
@@ -350,6 +656,9 @@
     document.getElementById('btn-reset').addEventListener('click', () => {
       priceChart.timeScale().fitContent();
       devChart.timeScale().fitContent();
+      if (IS_SERVER_MODE && totalTimeRange) {
+        fetchData(totalTimeRange.from, totalTimeRange.to, currentTF, true);
+      }
     });
 
     // Keyboard shortcuts
@@ -367,46 +676,32 @@
       }
     });
 
-    // ── Summary panel ──
-    const summaryEl = document.getElementById('summary');
-    if (simulationData.length === 1) {
-      const s = simulationData[0].summary;
-      summaryEl.innerHTML = `
-        <div class="row"><span class="label">Total blocks</span><span class="value">${s.totalBlocks.toLocaleString()}</span></div>
-        <div class="row"><span class="label">Mean dev %</span><span class="value">${s.meanDeviationPct.toFixed(4)}%</span></div>
-        <div class="row"><span class="label">Max dev %</span><span class="value">${s.maxDeviationPct.toFixed(4)}%</span></div>
-        <div class="row"><span class="label">Convergence</span><span class="value">${(s.convergenceRate*100).toFixed(1)}%</span></div>
-        <div class="row"><span class="label">Epsilon</span><span class="value">${s.epsilon.toFixed(6)}</span></div>
-      `;
-    } else {
-      let html = '';
-      simulationData.forEach((sim) => {
-        const s = sim.summary;
-        const label = sim.config.label || `${(sim.config.maliciousFraction*100).toFixed(0)}%`;
-        html += `<div style="margin-bottom:6px;border-bottom:1px solid #0f3460;padding-bottom:4px;">
-          <strong>${label}</strong>
-          <div class="row"><span class="label">Mean dev</span><span class="value">${s.meanDeviationPct.toFixed(4)}%</span></div>
-          <div class="row"><span class="label">Max dev</span><span class="value">${s.maxDeviationPct.toFixed(4)}%</span></div>
-          <div class="row"><span class="label">Convergence</span><span class="value">${(s.convergenceRate*100).toFixed(1)}%</span></div>
-        </div>`;
-      });
-      summaryEl.innerHTML = html;
-    }
-
     // ── Sync charts ──
+    // `syncing` prevents infinite recursion during normal pan/zoom.
+    // `transitionLock` suppresses ALL sync during programmatic range restoration
+    // (TF change, view toggle) so the logical-range sync doesn't corrupt the
+    // time-based range we're setting.
     let syncing = false;
+    let transitionLock = false;
     priceChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-      if (syncing || !range) return;
+      if (syncing || transitionLock || !range) return;
       syncing = true;
       devChart.timeScale().setVisibleLogicalRange(range);
       syncing = false;
     });
     devChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-      if (syncing || !range) return;
+      if (syncing || transitionLock || !range) return;
       syncing = true;
       priceChart.timeScale().setVisibleLogicalRange(range);
       syncing = false;
     });
+
+    function setVisibleRangeBoth(range) {
+      transitionLock = true;
+      priceChart.timeScale().setVisibleRange(range);
+      devChart.timeScale().setVisibleRange(range);
+      transitionLock = false;
+    }
 
     // ── Resize ──
     const ro = new ResizeObserver(() => {
@@ -416,22 +711,20 @@
     ro.observe(priceChartEl);
     ro.observe(devChartEl);
 
-    // ── Drag-to-zoom (click and drag a range on the chart to zoom in) ──
+    // ── Drag-to-zoom ──
     function setupDragZoom(containerEl, chart) {
       let startX = null;
       let isDragging = false;
       let selBox = null;
-      const THRESHOLD = 8; // min px before selection activates
+      const THRESHOLD = 8;
 
       containerEl.addEventListener('pointerdown', (e) => {
-        if (e.button !== 0) return; // left click only
-        // Only start drag in the plot area (not on time axis or price scale).
-        // Time axis is at the bottom ~30px, price scale is on the right ~60px.
+        if (e.button !== 0) return;
         const rect = containerEl.getBoundingClientRect();
         const localY = e.clientY - rect.top;
         const localX = e.clientX - rect.left;
-        if (localY > rect.height - 30) return; // time axis
-        if (localX > rect.width - 60) return;  // price scale
+        if (localY > rect.height - 30) return;
+        if (localX > rect.width - 60) return;
         startX = e.clientX;
         isDragging = false;
       });
@@ -478,7 +771,6 @@
         isDragging = false;
       });
 
-      // Double-click to reset zoom
       containerEl.addEventListener('dblclick', () => {
         priceChart.timeScale().fitContent();
         devChart.timeScale().fitContent();
@@ -488,8 +780,12 @@
     setupDragZoom(priceChartEl, priceChart);
     setupDragZoom(devChartEl, devChart);
 
-    // ── Initial render ──
-    rebuildChart();
+    // ── Init ──
+    if (IS_SERVER_MODE) {
+      initServer();
+    } else {
+      initEmbedded();
+    }
   </script>
 </body>
 </html>

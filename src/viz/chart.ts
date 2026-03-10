@@ -3,10 +3,6 @@ import type { SimulationResult } from "../types.js";
 
 const TEMPLATE_PATH = join(import.meta.dir, "template.html");
 
-/**
- * Downsample by keeping every Nth point (always first and last).
- * Only used when the data exceeds maxPoints.
- */
 function downsample<T>(data: T[], maxPoints: number): T[] {
   if (data.length <= maxPoints) return data;
   const step = data.length / maxPoints;
@@ -18,24 +14,25 @@ function downsample<T>(data: T[], maxPoints: number): T[] {
   return result;
 }
 
-export async function generateChart(
+export async function generateStaticHtml(
   results: SimulationResult[],
   outputPath: string,
-  maxPointsPerSeries?: number
+  downsampling: "none" | "auto" = "auto"
 ): Promise<string> {
   const template = await Bun.file(TEMPLATE_PATH).text();
 
-  // Scale the budget per series based on number of scenarios to keep total file size reasonable.
-  // Single scenario: 500K points (~20MB). 6 scenarios: ~83K each (~20MB total).
-  const totalBudget = 500_000;
-  const perSeriesCap = maxPointsPerSeries ?? Math.floor(totalBudget / results.length);
-
   const chartData = results.map((r) => {
-    const metrics = downsample(r.metrics, perSeriesCap);
-    if (metrics.length < r.metrics.length) {
-      const ratio = r.metrics.length / metrics.length;
-      console.log(`  Downsampled ${r.config.label}: ${r.metrics.length} -> ${metrics.length} points (1:${ratio.toFixed(0)})`);
+    let metrics = r.metrics;
+
+    if (downsampling === "auto") {
+      const perSeriesCap = Math.floor(500_000 / results.length);
+      metrics = downsample(metrics, perSeriesCap);
+      if (metrics.length < r.metrics.length) {
+        const ratio = r.metrics.length / metrics.length;
+        console.log(`  Downsampled ${r.config.label}: ${r.metrics.length} -> ${metrics.length} points (1:${ratio.toFixed(0)})`);
+      }
     }
+
     return {
       config: r.config,
       summary: r.summary,
@@ -51,8 +48,8 @@ export async function generateChart(
   const configs = results.map((r) => r.config);
 
   const html = template
-    .replace("/*DATA_PLACEHOLDER*/[]", JSON.stringify(chartData))
-    .replace("/*CONFIG_PLACEHOLDER*/[]", JSON.stringify(configs));
+    .replace("/*DATA_PLACEHOLDER*/null", JSON.stringify(chartData))
+    .replace("/*CONFIG_PLACEHOLDER*/null", JSON.stringify(configs));
 
   const sizeMB = (new TextEncoder().encode(html).length / 1_000_000).toFixed(1);
   await Bun.write(outputPath, html);

@@ -74,3 +74,67 @@ export interface CacheMetadata {
   dataPoints: number;
   data: Candle[];
 }
+
+// ── .simdata file format (columnar JSON) ──
+
+export interface SimDataScenario {
+  config: SimulationConfig;
+  summary: SimulationSummary;
+  timestamps: number[];
+  realPrices: number[];
+  oraclePrices: number[];
+  deviationPcts: number[];
+}
+
+export interface SimDataFile {
+  version: 1;
+  scenarios: SimDataScenario[];
+}
+
+// ── API response types ──
+
+export interface OHLCCandle {
+  time: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+}
+
+export interface LinePoint {
+  time: number;
+  value: number;
+}
+
+export interface ApiScenarioMeta {
+  index: number;
+  config: SimulationConfig;
+  summary: SimulationSummary;
+  timeRange: { from: number; to: number };
+  blockCount: number;
+}
+
+export interface ApiMetaResponse {
+  scenarioCount: number;
+  scenarios: ApiScenarioMeta[];
+}
+
+export interface ApiOracleData {
+  index: number;
+  label: string;
+  ohlc: OHLCCandle[];
+  line: LinePoint[];
+  deviation: LinePoint[];
+}
+
+export interface ApiDataResponse {
+  tf: number;
+  requestedTF: number;
+  from: number;
+  to: number;
+  realPrice: {
+    ohlc: OHLCCandle[];
+    line: LinePoint[];
+  };
+  oracles: ApiOracleData[];
+}

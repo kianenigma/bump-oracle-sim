@@ -1,10 +1,13 @@
 import { parseArgs } from "util";
 import { DEFAULT_CONFIG, CANDLE_INTERVAL } from "./config.js";
-import type { SimulationConfig, SimulationResult } from "./types.js";
+import type { SimulationConfig, SimulationResult, SimDataFile } from "./types.js";
 import { fetchCandles } from "./data/fetcher.js";
 import { interpolateToBlocks } from "./data/interpolator.js";
 import { runSimulation } from "./sim/engine.js";
-import { generateChart } from "./viz/chart.js";
+import { generateStaticHtml } from "./viz/chart.js";
+import { writeSimData } from "./viz/writer.js";
+import { toSimData } from "./viz/writer.js";
+import { startServer } from "./viz/server.js";
 import { scenarios, listScenarios } from "./analysis/scenarios.js";
 
 const { values: args } = parseArgs({
@@ -16,12 +19,17 @@ const { values: args } = parseArgs({
     validators: { type: "string", default: String(DEFAULT_CONFIG.validatorCount) },
     malicious: { type: "string", default: String(DEFAULT_CONFIG.maliciousFraction) },
     seed: { type: "string", default: String(DEFAULT_CONFIG.seed) },
-    output: { type: "string", default: "output.html" },
+    output: { type: "string", default: "output.simdata" },
     scenario: { type: "string" },
     "fetch-only": { type: "boolean", default: false },
     "author-always-honest": { type: "boolean", default: DEFAULT_CONFIG.authorAlwaysHonest },
     jitter: { type: "string", default: String(DEFAULT_CONFIG.jitterStdDev) },
+    downsampling: { type: "string", default: "auto" },
     "list-scenarios": { type: "boolean", default: false },
+    "export-html": { type: "string" },
+    port: { type: "string", default: "3000" },
+    data: { type: "string" },
+    "no-open": { type: "boolean", default: false },
     help: { type: "boolean", default: false },
   },
 });
@@ -39,12 +47,17 @@ Options:
   --validators <number>        Number of validators (default: ${DEFAULT_CONFIG.validatorCount})
   --malicious <fraction>       Fraction of malicious validators 0-1 (default: 0)
   --seed <number>              Random seed (default: ${DEFAULT_CONFIG.seed})
-  --output <path>              Output HTML file (default: output.html)
+  --output <path>              Output file (default: output.simdata)
   --scenario <name>            Named scenario (use --list-scenarios to see options)
   --fetch-only                 Only fetch and cache price data, don't simulate
   --author-always-honest       Block author is always honest (default: true)
   --jitter <fraction>          Price jitter std dev as fraction (default: ${DEFAULT_CONFIG.jitterStdDev})
+  --downsampling <none|auto>   Downsample data for HTML export (default: auto)
   --list-scenarios             List available named scenarios
+  --export-html <path>         Export self-contained HTML file (old behavior)
+  --port <number>              Server port (default: 3000)
+  --data <path>                Serve existing .simdata file without re-running simulation
+  --no-open                    Don't auto-open browser
   --help                       Show this help
 `);
   process.exit(0);
@@ -55,10 +68,26 @@ if (args["list-scenarios"]) {
   process.exit(0);
 }
 
+// ── Mode: serve existing .simdata file ──
+if (args.data) {
+  console.log(`\nLoading simulation data from ${args.data}...`);
+  const file = Bun.file(args.data);
+  if (!(await file.exists())) {
+    console.error(`File not found: ${args.data}`);
+    process.exit(1);
+  }
+  const simData: SimDataFile = await file.json();
+  console.log(`  ${simData.scenarios.length} scenario(s), ${simData.scenarios[0].timestamps.length} blocks each`);
+
+  const port = parseInt(args.port!);
+  await startServer(simData, port, !args["no-open"]);
+  process.exit(0);
+}
+
+// ── Shared: fetch and simulate ──
 const startDate = args["start-date"]!;
 const endDate = args["end-date"]!;
 
-// Step 1: Fetch price data
 console.log(`\nFetching DOT/USDT data: ${startDate} to ${endDate}`);
 const cacheData = await fetchCandles(startDate, endDate, CANDLE_INTERVAL);
 
@@ -67,12 +96,10 @@ if (args["fetch-only"]) {
   process.exit(0);
 }
 
-// Step 2: Interpolate to 6s blocks
 console.log(`\nInterpolating ${cacheData.dataPoints} candles to 6s blocks...`);
 const pricePoints = interpolateToBlocks(cacheData.data);
 console.log(`  Generated ${pricePoints.length} price points`);
 
-// Step 3: Run simulation(s)
 let results: SimulationResult[];
 
 const baseOverrides: Partial<SimulationConfig> = {
@@ -93,7 +120,6 @@ if (args.scenario) {
   }
   results = scenarioFn(baseOverrides, pricePoints);
 } else {
-  // Single run
   const config: SimulationConfig = {
     ...DEFAULT_CONFIG,
     ...baseOverrides,
@@ -104,8 +130,20 @@ if (args.scenario) {
   results = [runSimulation(config, pricePoints)];
 }
 
-// Step 4: Generate chart
-console.log(`\nGenerating chart...`);
-await generateChart(results, args.output!);
+// ── Mode: export self-contained HTML ──
+if (args["export-html"]) {
+  const downsampling = args.downsampling as "none" | "auto";
+  console.log(`\nGenerating self-contained HTML (downsampling: ${downsampling})...`);
+  await generateStaticHtml(results, args["export-html"], downsampling);
+  console.log(`\nDone! Open ${args["export-html"]} in a browser to view results.`);
+  process.exit(0);
+}
 
-console.log(`\nDone! Open ${args.output} in a browser to view results.`);
+// ── Default mode: write .simdata + start server ──
+const outputPath = args.output!;
+await writeSimData(results, outputPath);
+
+const simData = toSimData(results);
+const port = parseInt(args.port!);
+console.log(`\nStarting visualization server...`);
+await startServer(simData, port, !args["no-open"]);

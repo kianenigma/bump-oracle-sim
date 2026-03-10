@@ -3,5 +3,6 @@ data/
 dist/
 *.html
 !src/viz/template.html
+*.simdata
 bun.lockb
 bun.lock
