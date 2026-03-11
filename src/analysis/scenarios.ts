@@ -241,6 +241,36 @@ export const scenarios: Record<string, ScenarioFn> = {
     return runBatch(configs, pricePoints, outputDir, threadCount);
   },
 
+  /** Sweep all malicious variants with a fixed epsilon */
+  async "sweep-all-malicious"(overrides, pricePoints, outputDir, threadCount) {
+    const mixes: ValidatorMix[] = [
+      {},                   // 0% (baseline)
+      { malicious: 0.1 },
+      { malicious: 0.2 },
+      { malicious: 0.33 },
+      { pushy: 0.1 },
+      { pushy: 0.2 },
+      { pushy: 0.33 },
+      { noop: 0.1 },
+      { noop: 0.2 },
+      { noop: 0.33 },
+      { delayed: 0.1 },
+      { delayed: 0.2 },
+      { delayed: 0.33 },
+      { drift: 0.1 },
+      { drift: 0.2 },
+      { drift: 0.33 },
+    ];
+    const configs: SimulationConfig[] = [];
+
+    for (const mix of mixes) {
+      const label = Object.entries(mix).map(([k, v]) => `${(v * 100).toFixed(0)}% ${k}`).join(", ") || "baseline";
+      configs.push(mergeConfig({ ...overrides, validatorMix: mix, label }));
+    }
+
+    return runBatch(configs, pricePoints, outputDir, threadCount);
+  },
+
   async "sweep-malicious-and-epsilon"(overrides, pricePoints, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3];
     const epsilons = [(DEFAULT_CONFIG.epsilon as number) / 5, DEFAULT_CONFIG.epsilon, (DEFAULT_CONFIG.epsilon as number) * 5];

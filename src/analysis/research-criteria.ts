@@ -15,13 +15,25 @@ export interface ResearchCriteria {
 }
 
 export const DEFAULT_CRITERIA: ResearchCriteria = {
+  // We highly prefer the episolon of choice to NEVER cause, even for a short amount of time, for
+  // the price to diverge too much from the truth.
+  weightMaxDeviation: 0.8,
+  // We define the price as "converged" if it is less than 0.1% diverged from the true price. This
+  // is a measure of "in what percentage of the time the price is less than 0.1% diverged from the
+  // true price". We give it a moderate weight of 0.3
+  convergenceThreshold: 0.1,
   weightConvergence: 0.3,
-  weightMeanDeviation: 0.25,
-  weightMaxDeviation: 0.2,
-  weightIntegral: 0.15,
-  weightResilience: 0.1,
-  maxAcceptableDeviation: 5.0,
-  convergenceThreshold: 0.5,
+  // The average (mean) of the entire deviation. While important, I am not super sure if it is a
+  // better metric than the deviation integral, so we give it a small weight for now.
+  weightMeanDeviation: 0.1,
+  // The integral of the deviation over time.
+  // We give it a moderate weight of 0.3
+  weightIntegral: 0.3,
+  // This is a measure of "how much the system is able to resist adversarial mixes".
+  // Since our scenario is running with 33% malicious validators, we expect the system to behave good with this degree of maliciousness.
+  weightResilience: 0.5,
+  /// If the price was at any point 10% away, then we reject this epislon (score will become 0)
+  maxAcceptableDeviation: 10,
 };
 
 export interface EpsilonScore {
