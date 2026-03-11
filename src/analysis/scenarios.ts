@@ -1,10 +1,12 @@
 import { join } from "path";
 import { mkdirSync } from "fs";
-import type { SimulationConfig, SimulationResult, PricePoint, ScenarioMeta } from "../types.js";
+import type { SimulationConfig, SimulationResult, PricePoint, ScenarioMeta, ValidatorMix } from "../types.js";
 import { DEFAULT_CONFIG } from "../config.js";
 import { runSimulation, type BlockSink } from "../sim/engine.js";
 import { maxBlockDelta } from "../data/interpolator.js";
 import { ChunkWriter, writeIndex } from "../viz/writer.js";
+import { loadCriteria } from "./research-criteria.js";
+import { generateReport } from "./research-report.js";
 
 type ScenarioFn = (
   baseConfig: Partial<SimulationConfig>,
@@ -152,6 +154,77 @@ export const scenarios: Record<string, ScenarioFn> = {
       label: "stress (49% malicious)",
     });
     return runBatch([config], pricePoints, outputDir);
+  },
+
+  /**
+   * Research: grid search over epsilon multipliers × adversary mixes.
+   * Scores each combination and produces a report recommending the optimal epsilon.
+   */
+  research(overrides, pricePoints, outputDir) {
+    console.log(`\n[Scenario: research]`);
+    const criteria = loadCriteria();
+    const base = mergeConfig({ ...overrides, convergenceThreshold: criteria.convergenceThreshold });
+
+    // Compute auto epsilon
+    const maxDelta = maxBlockDelta(pricePoints);
+    const autoEpsilon = maxDelta / base.validatorCount || 0.0001;
+    console.log(`  Auto-epsilon base: ${autoEpsilon.toFixed(6)}`);
+
+    // Grid dimensions
+    const multipliers = [0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
+    const mixes: ValidatorMix[] = [
+      {},                   // 0% (baseline)
+      { malicious: 0.1 },
+      { malicious: 0.2 },
+      { malicious: 0.33 },
+      { pushy: 0.1 },
+      { pushy: 0.2 },
+      { pushy: 0.33 },
+      { noop: 0.1 },
+      { noop: 0.2 },
+      { noop: 0.33 },
+      { delayed: 0.1 },
+      { delayed: 0.2 },
+      { delayed: 0.33 },
+      { drift: 0.1 },
+      { drift: 0.2 },
+      { drift: 0.33 },
+    ];
+
+    // Build epsilon -> multiplier lookup
+    const epsilonMultipliers = new Map<number, number>();
+    for (const mult of multipliers) {
+      epsilonMultipliers.set(autoEpsilon * mult, mult);
+    }
+
+    // Build all configs
+    const configs: SimulationConfig[] = [];
+    for (const mult of multipliers) {
+      const eps = autoEpsilon * mult;
+      for (const mix of mixes) {
+        const mixDesc = Object.entries(mix).map(([k, v]) => `${(v * 100).toFixed(0)}% ${k}`).join(", ") || "baseline";
+        const label = `eps=${eps.toFixed(6)} (${mult}x), ${mixDesc}`;
+        configs.push(mergeConfig({
+          ...overrides,
+          epsilon: eps,
+          validatorMix: mix,
+          convergenceThreshold: criteria.convergenceThreshold,
+          label,
+        }));
+      }
+    }
+
+    console.log(`  Grid: ${multipliers.length} epsilons x ${mixes.length} mixes = ${configs.length} simulations`);
+
+    const results = runBatch(configs, pricePoints, outputDir);
+
+    // Generate report
+    const reportPath = outputDir
+      ? join(outputDir, "research_report.json")
+      : "research_report.json";
+    generateReport(results, epsilonMultipliers, criteria, autoEpsilon, reportPath);
+
+    return results;
   },
 };
 

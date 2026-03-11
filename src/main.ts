@@ -1,5 +1,5 @@
 import { parseArgs } from "util";
-import { mkdirSync, existsSync, statSync } from "fs";
+import { mkdirSync, existsSync, statSync, rmSync } from "fs";
 import { join } from "path";
 import { DEFAULT_CONFIG, CANDLE_INTERVAL } from "./config.js";
 import type { SimulationConfig, SimulationResult, ScenarioMeta, ValidatorMix } from "./types.js";
@@ -28,6 +28,7 @@ const { values: args } = parseArgs({
     port: { type: "string", default: "3000" },
     data: { type: "string" },
     "no-open": { type: "boolean", default: false },
+    force: { type: "boolean", default: false },
     help: { type: "boolean", default: false },
   },
 });
@@ -54,6 +55,7 @@ Options:
   --port <number>               Server port (default: 3000)
   --data <path>                 Serve existing .simdata directory without re-running simulation
   --no-open                     Don't auto-open browser
+  --force                       Overwrite existing output directory
   --help                        Show this help
 `);
   process.exit(0);
@@ -79,11 +81,15 @@ function parseMix(mixStr: string): ValidatorMix {
   return mix;
 }
 
-/** Ensure outputDir is a directory. Error if a file exists at that path. */
-function ensureOutputDir(dir: string): void {
-  if (existsSync(dir) && !statSync(dir).isDirectory()) {
-    console.error(`Error: "${dir}" exists as a file. Please remove it or choose a different --output path.`);
-    process.exit(1);
+/** Ensure outputDir is ready. Error if it already exists (unless --force). */
+function ensureOutputDir(dir: string, force: boolean): void {
+  if (existsSync(dir)) {
+    if (force) {
+      rmSync(dir, { recursive: true });
+    } else {
+      console.error(`Error: "${dir}" already exists. Use --force to overwrite, or remove it manually.`);
+      process.exit(1);
+    }
   }
   mkdirSync(dir, { recursive: true });
 }
@@ -133,6 +139,8 @@ const baseOverrides: Partial<SimulationConfig> = {
   convergenceThreshold: parseFloat(args["convergence-threshold"]!),
 };
 
+ensureOutputDir(outputDir, !!args.force);
+
 if (args.scenario) {
   const scenarioFn = scenarios[args.scenario];
   if (!scenarioFn) {
@@ -151,8 +159,6 @@ if (args.scenario) {
     label: mixDesc,
   };
   console.log(`\n[Single simulation]`);
-
-  ensureOutputDir(outputDir);
   const scenarioDir = join(outputDir, "scenario_0");
   const writer = new ChunkWriter(scenarioDir);
   const result = runSimulation(config, pricePoints, writer.sink);
