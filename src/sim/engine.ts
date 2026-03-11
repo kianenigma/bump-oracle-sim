@@ -16,7 +16,14 @@ const VALIDATOR_REGISTRY: Record<string, ValidatorCtor> = {
   pushy: PushyMaliciousValidator,
 };
 
-export function runSimulation(config: SimulationConfig, pricePoints: PricePoint[]): SimulationResult {
+// Callback invoked for each block during simulation. Return value is ignored.
+export type BlockSink = (block: BlockMetrics) => void;
+
+export function runSimulation(
+  config: SimulationConfig,
+  pricePoints: PricePoint[],
+  sink?: BlockSink,
+): SimulationResult {
   const rng = mulberry32(config.seed);
   const endpoint = new PriceEndpoint(pricePoints);
 
@@ -75,38 +82,14 @@ export function runSimulation(config: SimulationConfig, pricePoints: PricePoint[
     if (count > 0) parts.push(`${count} ${name}`);
   }
 
-  // Initialize chain — author is always honest
+  // Initialize chain
   const initialPrice = pricePoints[0].price;
   const chain = new Chain(initialPrice, epsilon, validators, endpoint, rng);
 
-  // Run simulation
+  // Run simulation with incremental summary computation
   const totalBlocks = endpoint.totalBlocks;
-  const metrics: BlockMetrics[] = [];
+  const convergenceThreshold = config.convergenceThreshold;
 
-  console.log(`  Running ${totalBlocks.toLocaleString()} blocks (${parts.join(", ")})...`);
-
-  const progressInterval = Math.max(1, Math.floor(totalBlocks / 100)); // ~1% steps
-  for (let i = 0; i < totalBlocks; i++) {
-    metrics.push(chain.nextBlock());
-    if ((i + 1) % progressInterval === 0) {
-      const pct = ((i + 1) / totalBlocks * 100).toFixed(0);
-      process.stdout.write(`\r  Progress: ${pct}% (${(i + 1).toLocaleString()} / ${totalBlocks.toLocaleString()})`);
-    }
-  }
-  process.stdout.write(`\r  Progress: 100%${" ".repeat(40)}\n`);
-
-  // Compute summary
-  const summary = computeSummary(metrics, epsilon, config.convergenceThreshold);
-
-  console.log(`  Done. Mean deviation: ${summary.meanDeviationPct.toFixed(4)}%, max: ${summary.maxDeviationPct.toFixed(4)}%`);
-  console.log(`  Convergence rate (<${summary.convergenceThreshold}% deviation): ${(summary.convergenceRate * 100).toFixed(1)}%`);
-  console.log(`  Deviation integral: ${summary.deviationIntegral.toFixed(2)} %-seconds`);
-  console.log(`  Max deviation rate: ${summary.maxDeviationRate.toFixed(6)} %/s`);
-
-  return { config: { ...config, epsilon }, metrics, summary };
-}
-
-function computeSummary(metrics: BlockMetrics[], epsilon: number, convergenceThreshold: number): SimulationSummary {
   let sumDev = 0;
   let sumDevPct = 0;
   let maxDev = 0;
@@ -114,41 +97,62 @@ function computeSummary(metrics: BlockMetrics[], epsilon: number, convergenceThr
   let converged = 0;
   let deviationIntegral = 0;
   let maxDeviationRate = 0;
+  let prevBlock: BlockMetrics | null = null;
 
-  for (let i = 0; i < metrics.length; i++) {
-    const m = metrics[i];
+  console.log(`  Running ${totalBlocks.toLocaleString()} blocks (${parts.join(", ")})...`);
+
+  const progressInterval = Math.max(1, Math.floor(totalBlocks / 100));
+  for (let i = 0; i < totalBlocks; i++) {
+    const m = chain.nextBlock();
+
+    // Incremental summary: finalize the *previous* block's trapezoidal integral
+    if (prevBlock !== null) {
+      const devEnd = m.realPrice !== 0
+        ? (Math.abs(m.realPrice - prevBlock.oraclePrice) / m.realPrice) * 100
+        : 0;
+      deviationIntegral += (prevBlock.deviationPct + devEnd) / 2 * BLOCK_TIME_SECONDS;
+      const rate = Math.abs(m.deviationPct - prevBlock.deviationPct) / BLOCK_TIME_SECONDS;
+      if (rate > maxDeviationRate) maxDeviationRate = rate;
+    }
+
     sumDev += m.deviation;
     sumDevPct += m.deviationPct;
     if (m.deviation > maxDev) maxDev = m.deviation;
     if (m.deviationPct > maxDevPct) maxDevPct = m.deviationPct;
     if (m.deviationPct < convergenceThreshold) converged++;
 
-    if (i < metrics.length - 1) {
-      const nextReal = metrics[i + 1].realPrice;
-      const devEnd = nextReal !== 0 ? (Math.abs(nextReal - m.oraclePrice) / nextReal) * 100 : 0;
+    if (sink) sink(m);
+    prevBlock = m;
 
-      // Trapezoidal integral: oracle price fixed at oraclePrice[i], real price
-      // drifts linearly to realPrice[i+1]. Average of devStart and devEnd * dt.
-      deviationIntegral += (m.deviationPct + devEnd) / 2 * BLOCK_TIME_SECONDS;
-
-      // Max deviation rate: d(deviationPct)/dt between consecutive blocks (%/s)
-      const rate = Math.abs(metrics[i + 1].deviationPct - m.deviationPct) / BLOCK_TIME_SECONDS;
-      if (rate > maxDeviationRate) maxDeviationRate = rate;
-    } else {
-      deviationIntegral += m.deviationPct * BLOCK_TIME_SECONDS;
+    if ((i + 1) % progressInterval === 0) {
+      const pct = ((i + 1) / totalBlocks * 100).toFixed(0);
+      process.stdout.write(`\r  Progress: ${pct}% (${(i + 1).toLocaleString()} / ${totalBlocks.toLocaleString()})`);
     }
   }
+  process.stdout.write(`\r  Progress: 100%${" ".repeat(40)}\n`);
 
-  return {
-    totalBlocks: metrics.length,
-    meanDeviation: sumDev / metrics.length,
+  // Last block's integral contribution (no next block)
+  if (prevBlock !== null) {
+    deviationIntegral += prevBlock.deviationPct * BLOCK_TIME_SECONDS;
+  }
+
+  const summary: SimulationSummary = {
+    totalBlocks,
+    meanDeviation: sumDev / totalBlocks,
     maxDeviation: maxDev,
-    meanDeviationPct: sumDevPct / metrics.length,
+    meanDeviationPct: sumDevPct / totalBlocks,
     maxDeviationPct: maxDevPct,
     epsilon,
-    convergenceRate: converged / metrics.length,
+    convergenceRate: converged / totalBlocks,
     convergenceThreshold,
     deviationIntegral,
     maxDeviationRate,
   };
+
+  console.log(`  Done. Mean deviation: ${summary.meanDeviationPct.toFixed(4)}%, max: ${summary.maxDeviationPct.toFixed(4)}%`);
+  console.log(`  Convergence rate (<${summary.convergenceThreshold}% deviation): ${(summary.convergenceRate * 100).toFixed(1)}%`);
+  console.log(`  Deviation integral: ${summary.deviationIntegral.toFixed(2)} %-seconds`);
+  console.log(`  Max deviation rate: ${summary.maxDeviationRate.toFixed(6)} %/s`);
+
+  return { config: { ...config, epsilon }, summary };
 }

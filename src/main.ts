@@ -1,11 +1,12 @@
 import { parseArgs } from "util";
+import { mkdirSync, existsSync, statSync } from "fs";
+import { join } from "path";
 import { DEFAULT_CONFIG, CANDLE_INTERVAL } from "./config.js";
-import type { SimulationConfig, SimulationResult, SimDataFile, ValidatorMix } from "./types.js";
+import type { SimulationConfig, SimulationResult, ScenarioMeta, ValidatorMix } from "./types.js";
 import { fetchCandles } from "./data/fetcher.js";
 import { interpolateToBlocks } from "./data/interpolator.js";
 import { runSimulation } from "./sim/engine.js";
-import { generateStaticHtml } from "./viz/chart.js";
-import { writeSimData } from "./viz/writer.js";
+import { ChunkWriter, writeIndex } from "./viz/writer.js";
 import { startServer } from "./viz/server.js";
 import { scenarios, listScenarios } from "./analysis/scenarios.js";
 
@@ -23,9 +24,7 @@ const { values: args } = parseArgs({
     "fetch-only": { type: "boolean", default: false },
     jitter: { type: "string", default: String(DEFAULT_CONFIG.jitterStdDev) },
     "convergence-threshold": { type: "string", default: String(DEFAULT_CONFIG.convergenceThreshold) },
-    downsampling: { type: "string", default: "auto" },
     "list-scenarios": { type: "boolean", default: false },
-    "export-html": { type: "string" },
     port: { type: "string", default: "3000" },
     data: { type: "string" },
     "no-open": { type: "boolean", default: false },
@@ -42,22 +41,20 @@ Usage: bun run src/main.ts [options]
 Options:
   --start-date <YYYY-MM-DD>    Start date (default: ${DEFAULT_CONFIG.startDate})
   --end-date <YYYY-MM-DD>      End date (default: ${DEFAULT_CONFIG.endDate})
-  --epsilon <number>      Price epsilon per bump (default: ${DEFAULT_CONFIG.epsilon})
-  --validators <number>        Number of validators (default: ${DEFAULT_CONFIG.validatorCount})
-  --mix <spec>                 Validator mix, e.g. "malicious=0.2,pushy=0.1" (rest are honest)
-  --seed <number>              Random seed (default: ${DEFAULT_CONFIG.seed})
-  --output <path>              Output file (default: output.simdata)
-  --scenario <name>            Named scenario (use --list-scenarios to see options)
-  --fetch-only                 Only fetch and cache price data, don't simulate
-  --jitter <fraction>          Price jitter std dev as fraction (default: ${DEFAULT_CONFIG.jitterStdDev})
-  --convergence-threshold <%>  Convergence threshold in % (default: ${DEFAULT_CONFIG.convergenceThreshold})
-  --downsampling <none|auto>   Downsample data for HTML export (default: auto)
-  --list-scenarios             List available named scenarios
-  --export-html <path>         Export self-contained HTML file (old behavior)
-  --port <number>              Server port (default: 3000)
-  --data <path>                Serve existing .simdata file without re-running simulation
-  --no-open                    Don't auto-open browser
-  --help                       Show this help
+  --epsilon <number>            Price epsilon per bump (default: ${DEFAULT_CONFIG.epsilon})
+  --validators <number>         Number of validators (default: ${DEFAULT_CONFIG.validatorCount})
+  --mix <spec>                  Validator mix, e.g. "malicious=0.2,pushy=0.1" (rest are honest)
+  --seed <number>               Random seed (default: ${DEFAULT_CONFIG.seed})
+  --output <path>               Output directory (default: output.simdata)
+  --scenario <name>             Named scenario (use --list-scenarios to see options)
+  --fetch-only                  Only fetch and cache price data, don't simulate
+  --jitter <fraction>           Price jitter std dev as fraction (default: ${DEFAULT_CONFIG.jitterStdDev})
+  --convergence-threshold <%>   Convergence threshold in % (default: ${DEFAULT_CONFIG.convergenceThreshold})
+  --list-scenarios              List available named scenarios
+  --port <number>               Server port (default: 3000)
+  --data <path>                 Serve existing .simdata directory without re-running simulation
+  --no-open                     Don't auto-open browser
+  --help                        Show this help
 `);
   process.exit(0);
 }
@@ -82,19 +79,20 @@ function parseMix(mixStr: string): ValidatorMix {
   return mix;
 }
 
-// ── Mode: serve existing .simdata file ──
-if (args.data) {
-  console.log(`\nLoading simulation data from ${args.data}...`);
-  const file = Bun.file(args.data);
-  if (!(await file.exists())) {
-    console.error(`File not found: ${args.data}`);
+/** Ensure outputDir is a directory. Error if a file exists at that path. */
+function ensureOutputDir(dir: string): void {
+  if (existsSync(dir) && !statSync(dir).isDirectory()) {
+    console.error(`Error: "${dir}" exists as a file. Please remove it or choose a different --output path.`);
     process.exit(1);
   }
-  const simData: SimDataFile = await file.json();
-  console.log(`  ${simData.scenarios.length} scenario(s), ${simData.scenarios[0].timestamps.length} blocks each`);
+  mkdirSync(dir, { recursive: true });
+}
 
+// ── Mode: serve existing .simdata directory ──
+if (args.data) {
+  console.log(`\nLoading simulation data from ${args.data}...`);
   const port = parseInt(args.port!);
-  await startServer(simData, port, !args["no-open"]);
+  await startServer(args.data, port, !args["no-open"]);
   process.exit(0);
 }
 
@@ -114,7 +112,16 @@ console.log(`\nInterpolating ${cacheData.dataPoints} candles to 6s blocks...`);
 const pricePoints = interpolateToBlocks(cacheData.data);
 console.log(`  Generated ${pricePoints.length} price points`);
 
-let results: SimulationResult[];
+// Determine output directory
+const userSetOutput = Bun.argv.slice(2).includes("--output");
+let outputDir: string;
+if (userSetOutput) {
+  outputDir = args.output!;
+} else if (args.scenario) {
+  outputDir = `${args.scenario}_${startDate}_${endDate}.simdata`;
+} else {
+  outputDir = args.output!;
+}
 
 const baseOverrides: Partial<SimulationConfig> = {
   startDate,
@@ -132,8 +139,9 @@ if (args.scenario) {
     console.error(`Unknown scenario: ${args.scenario}. Available: ${listScenarios().join(", ")}`);
     process.exit(1);
   }
-  results = scenarioFn(baseOverrides, pricePoints);
+  scenarioFn(baseOverrides, pricePoints, outputDir);
 } else {
+  // Single simulation
   const mix = parseMix(args.mix!);
   const mixDesc = Object.entries(mix).map(([k, v]) => `${(v * 100).toFixed(0)}% ${k}`).join(", ") || "honest";
   const config: SimulationConfig = {
@@ -143,32 +151,24 @@ if (args.scenario) {
     label: mixDesc,
   };
   console.log(`\n[Single simulation]`);
-  results = [runSimulation(config, pricePoints)];
+
+  ensureOutputDir(outputDir);
+  const scenarioDir = join(outputDir, "scenario_0");
+  const writer = new ChunkWriter(scenarioDir);
+  const result = runSimulation(config, pricePoints, writer.sink);
+  const info = writer.finish();
+
+  const meta: ScenarioMeta = {
+    config: result.config,
+    summary: result.summary,
+    blockCount: info.blockCount,
+    chunkCount: info.chunkCount,
+    timeRange: info.timeRange,
+  };
+  writeIndex(outputDir, [meta]);
 }
 
-// ── Mode: export self-contained HTML ──
-if (args["export-html"]) {
-  const downsampling = args.downsampling as "none" | "auto";
-  console.log(`\nGenerating self-contained HTML (downsampling: ${downsampling})...`);
-  await generateStaticHtml(results, args["export-html"], downsampling);
-  console.log(`\nDone! Open ${args["export-html"]} in a browser to view results.`);
-  process.exit(0);
-}
-
-// ── Default mode: write .simdata + start server ──
-const userSetOutput = Bun.argv.slice(2).includes("--output");
-let outputPath: string;
-if (userSetOutput) {
-  outputPath = args.output!;
-} else if (args.scenario) {
-  outputPath = `${args.scenario}_${startDate}_${endDate}.simdata`;
-} else {
-  outputPath = args.output!;
-}
-await writeSimData(results, outputPath);
-
-// Load from the file we just wrote (avoids holding both results + simData in memory)
-const simData: SimDataFile = await Bun.file(outputPath).json();
+// Start server
 const port = parseInt(args.port!);
 console.log(`\nStarting visualization server...`);
-await startServer(simData, port, !args["no-open"]);
+await startServer(outputDir, port, !args["no-open"]);

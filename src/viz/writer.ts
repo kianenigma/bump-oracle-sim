@@ -1,79 +1,138 @@
-import type { SimulationResult, SimDataFile } from "../types.js";
+import { join } from "path";
+import { mkdirSync, existsSync } from "fs";
+import type { BlockMetrics, SimulationConfig, SimulationSummary, SimDataIndex, ScenarioMeta, BlockChunk } from "../types.js";
+import { BLOCKS_PER_CHUNK } from "../types.js";
+import type { BlockSink } from "../sim/engine.js";
 
-export function toSimData(results: SimulationResult[]): SimDataFile {
-  return {
-    version: 1,
-    scenarios: results.map((r) => ({
-      config: r.config,
-      summary: r.summary,
-      timestamps: r.metrics.map((m) => m.timestamp),
-      realPrices: r.metrics.map((m) => m.realPrice),
-      oraclePrices: r.metrics.map((m) => m.oraclePrice),
-      deviationPcts: r.metrics.map((m) => m.deviationPct),
-    })),
-  };
+/**
+ * Streams block data to chunked JSON files in a scenario subdirectory.
+ * Each chunk file is ≤ ~50MB (1M blocks × ~48 bytes columnar JSON).
+ */
+export class ChunkWriter {
+  private dir: string;
+  private chunkIndex = 0;
+  private blockOffset = 0;
+  private totalBlocks = 0;
+  private timestamps: number[] = [];
+  private realPrices: number[] = [];
+  private oraclePrices: number[] = [];
+  private deviationPcts: number[] = [];
+  private firstTimestamp = 0;
+  private lastTimestamp = 0;
+
+  constructor(dir: string) {
+    mkdirSync(dir, { recursive: true });
+    this.dir = dir;
+  }
+
+  get sink(): BlockSink {
+    return (m: BlockMetrics) => this.addBlock(m);
+  }
+
+  addBlock(m: BlockMetrics): void {
+    if (this.totalBlocks === 0) this.firstTimestamp = m.timestamp;
+    this.lastTimestamp = m.timestamp;
+
+    this.timestamps.push(m.timestamp);
+    this.realPrices.push(m.realPrice);
+    this.oraclePrices.push(m.oraclePrice);
+    this.deviationPcts.push(m.deviationPct);
+    this.totalBlocks++;
+
+    if (this.timestamps.length >= BLOCKS_PER_CHUNK) {
+      this.flushChunk();
+    }
+  }
+
+  finish(): { blockCount: number; chunkCount: number; timeRange: { from: number; to: number } } {
+    if (this.timestamps.length > 0) {
+      this.flushChunk();
+    }
+    return {
+      blockCount: this.totalBlocks,
+      chunkCount: this.chunkIndex,
+      timeRange: { from: this.firstTimestamp, to: this.lastTimestamp },
+    };
+  }
+
+  private flushChunk(): void {
+    const chunk: BlockChunk = {
+      chunkIndex: this.chunkIndex,
+      blockOffset: this.blockOffset,
+      blockCount: this.timestamps.length,
+      timestamps: this.timestamps,
+      realPrices: this.realPrices,
+      oraclePrices: this.oraclePrices,
+      deviationPcts: this.deviationPcts,
+    };
+
+    const path = join(this.dir, `blocks_${this.chunkIndex}.json`);
+    writeChunkStreaming(path, chunk);
+
+    this.blockOffset += this.timestamps.length;
+    this.chunkIndex++;
+    this.timestamps = [];
+    this.realPrices = [];
+    this.oraclePrices = [];
+    this.deviationPcts = [];
+  }
+}
+
+/** Stream-write a chunk file to avoid building a single giant JSON string. */
+function writeChunkStreaming(path: string, chunk: BlockChunk): void {
+  Bun.write(path, ""); // truncate
+  const writer = Bun.file(path).writer();
+
+  writer.write(`{"chunkIndex":${chunk.chunkIndex},"blockOffset":${chunk.blockOffset},"blockCount":${chunk.blockCount},`);
+
+  const arrays: [string, number[]][] = [
+    ["timestamps", chunk.timestamps],
+    ["realPrices", chunk.realPrices],
+    ["oraclePrices", chunk.oraclePrices],
+    ["deviationPcts", chunk.deviationPcts],
+  ];
+
+  for (let a = 0; a < arrays.length; a++) {
+    const [name, arr] = arrays[a];
+    writer.write(`"${name}":[`);
+    for (let i = 0; i < arr.length; i++) {
+      if (i > 0) writer.write(",");
+      writer.write(String(arr[i]));
+    }
+    writer.write("]");
+    if (a < arrays.length - 1) writer.write(",");
+  }
+
+  writer.write("}");
+  writer.end();
 }
 
 /**
- * Write a numeric array to a file writer element-by-element to avoid
- * building a giant JSON string in memory.
+ * Write the top-level index.json for a simulation output directory.
  */
-function writeNumericArray(
-  sink: FileSink,
-  metrics: SimulationResult["metrics"],
-  accessor: (m: SimulationResult["metrics"][0]) => number
-): void {
-  sink.write("[");
-  for (let i = 0; i < metrics.length; i++) {
-    if (i > 0) sink.write(",");
-    sink.write(String(accessor(metrics[i])));
-  }
-  sink.write("]");
+export function writeIndex(outputDir: string, scenarios: ScenarioMeta[]): void {
+  const index: SimDataIndex = {
+    scenarioCount: scenarios.length,
+    scenarios,
+  };
+  Bun.write(join(outputDir, "index.json"), JSON.stringify(index, null, 2));
 }
 
-type FileSink = ReturnType<ReturnType<typeof Bun.file>["writer"]>;
-
-export async function writeSimData(
-  results: SimulationResult[],
-  outputPath: string
-): Promise<string> {
-  // Bun's FileSink opens with O_WRONLY|O_CREAT but NOT O_TRUNC,
-  // so a previous larger file would leave trailing garbage. Truncate first.
-  await Bun.write(outputPath, "");
-  const writer = Bun.file(outputPath).writer();
-
-  writer.write('{"version":1,"scenarios":[');
-
-  for (let s = 0; s < results.length; s++) {
-    if (s > 0) writer.write(",");
-    const r = results[s];
-
-    writer.write("{");
-    writer.write(`"config":${JSON.stringify(r.config)},`);
-    writer.write(`"summary":${JSON.stringify(r.summary)},`);
-
-    writer.write('"timestamps":');
-    writeNumericArray(writer, r.metrics, (m) => m.timestamp);
-    writer.write(",");
-
-    writer.write('"realPrices":');
-    writeNumericArray(writer, r.metrics, (m) => m.realPrice);
-    writer.write(",");
-
-    writer.write('"oraclePrices":');
-    writeNumericArray(writer, r.metrics, (m) => m.oraclePrice);
-    writer.write(",");
-
-    writer.write('"deviationPcts":');
-    writeNumericArray(writer, r.metrics, (m) => m.deviationPct);
-
-    writer.write("}");
+/**
+ * Load an index.json from a simulation output directory.
+ */
+export async function loadIndex(outputDir: string): Promise<SimDataIndex> {
+  const indexPath = join(outputDir, "index.json");
+  if (!existsSync(indexPath)) {
+    throw new Error(`No index.json found in ${outputDir}`);
   }
+  return Bun.file(indexPath).json();
+}
 
-  writer.write("]}");
-  await writer.end();
-
-  const sizeMB = (Bun.file(outputPath).size / 1_000_000).toFixed(1);
-  console.log(`Simulation data written to ${outputPath} (${sizeMB} MB)`);
-  return outputPath;
+/**
+ * Load a specific chunk file for a scenario.
+ */
+export async function loadChunk(outputDir: string, scenarioIndex: number, chunkIndex: number): Promise<BlockChunk> {
+  const path = join(outputDir, `scenario_${scenarioIndex}`, `blocks_${chunkIndex}.json`);
+  return Bun.file(path).json();
 }

@@ -55,7 +55,6 @@ export interface SimulationConfig {
 
 export interface SimulationResult {
   config: SimulationConfig;
-  metrics: BlockMetrics[];
   summary: SimulationSummary;
 }
 
@@ -92,20 +91,31 @@ export interface CacheMetadata {
   data: Candle[];
 }
 
-// ── .simdata file format (columnar JSON) ──
+// ── .simdata directory format (chunked) ──
 
-export interface SimDataScenario {
-  config: SimulationConfig;
-  summary: SimulationSummary;
+export const BLOCKS_PER_CHUNK = 1_000_000;
+
+export interface BlockChunk {
+  chunkIndex: number;
+  blockOffset: number;
+  blockCount: number;
   timestamps: number[];
   realPrices: number[];
   oraclePrices: number[];
   deviationPcts: number[];
 }
 
-export interface SimDataFile {
-  version: 1;
-  scenarios: SimDataScenario[];
+export interface ScenarioMeta {
+  config: SimulationConfig;
+  summary: SimulationSummary;
+  blockCount: number;
+  chunkCount: number;
+  timeRange: { from: number; to: number };
+}
+
+export interface SimDataIndex {
+  scenarioCount: number;
+  scenarios: ScenarioMeta[];
 }
 
 // ── API response types ──

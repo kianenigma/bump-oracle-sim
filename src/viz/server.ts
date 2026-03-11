@@ -1,14 +1,17 @@
 import { join } from "path";
 import type {
-  SimDataFile,
+  SimDataIndex,
+  ScenarioMeta,
+  BlockChunk,
   ApiMetaResponse,
   ApiDataResponse,
 } from "../types.js";
 import { aggregateOHLC, aggregateLine, aggregateDeviation } from "./aggregation.js";
+import { loadIndex, loadChunk } from "./writer.js";
 
 const TEMPLATE_PATH = join(import.meta.dir, "template.html");
 const MAX_CANDLES = 10_000;
-const OVER_FETCH_RATIO = 0.1; // 10% padding on each side
+const OVER_FETCH_RATIO = 0.1;
 
 const TIMEFRAMES = [6, 60, 900, 3600, 21600, 43200, 86400, 604800];
 
@@ -19,29 +22,65 @@ function nextTF(tf: number): number {
   return TIMEFRAMES[TIMEFRAMES.length - 1];
 }
 
-function buildMetaResponse(data: SimDataFile): ApiMetaResponse {
+function buildMetaResponse(index: SimDataIndex): ApiMetaResponse {
   return {
-    scenarioCount: data.scenarios.length,
-    scenarios: data.scenarios.map((s, i) => ({
+    scenarioCount: index.scenarioCount,
+    scenarios: index.scenarios.map((s, i) => ({
       index: i,
       config: s.config,
       summary: s.summary,
-      timeRange: {
-        from: s.timestamps[0],
-        to: s.timestamps[s.timestamps.length - 1],
-      },
-      blockCount: s.timestamps.length,
+      timeRange: s.timeRange,
+      blockCount: s.blockCount,
     })),
   };
 }
 
-function buildDataResponse(
-  data: SimDataFile,
+/**
+ * Load and concatenate the chunks that overlap [from, to] for a given scenario.
+ */
+async function loadScenarioRange(
+  outputDir: string,
+  scenarioIndex: number,
+  meta: ScenarioMeta,
+  from: number,
+  to: number
+): Promise<{ timestamps: number[]; realPrices: number[]; oraclePrices: number[]; deviationPcts: number[] }> {
+  const timestamps: number[] = [];
+  const realPrices: number[] = [];
+  const oraclePrices: number[] = [];
+  const deviationPcts: number[] = [];
+
+  for (let c = 0; c < meta.chunkCount; c++) {
+    const chunk = await loadChunk(outputDir, scenarioIndex, c);
+
+    // Skip chunks entirely outside the range
+    const chunkFrom = chunk.timestamps[0];
+    const chunkTo = chunk.timestamps[chunk.timestamps.length - 1];
+    if (chunkTo < from || chunkFrom > to) continue;
+
+    // Append the relevant portion
+    for (let i = 0; i < chunk.blockCount; i++) {
+      const t = chunk.timestamps[i];
+      if (t < from) continue;
+      if (t > to) break;
+      timestamps.push(t);
+      realPrices.push(chunk.realPrices[i]);
+      oraclePrices.push(chunk.oraclePrices[i]);
+      deviationPcts.push(chunk.deviationPcts[i]);
+    }
+  }
+
+  return { timestamps, realPrices, oraclePrices, deviationPcts };
+}
+
+async function buildDataResponse(
+  outputDir: string,
+  index: SimDataIndex,
   from: number,
   to: number,
   tf: number,
   scenarioFilter: string
-): ApiDataResponse {
+): Promise<ApiDataResponse> {
   const requestedTF = tf;
 
   // Add over-fetch padding
@@ -56,30 +95,33 @@ function buildDataResponse(
     tf = nextTF(tf);
   }
 
-  // Use first scenario for real price (they all share the same real price data)
-  const firstScenario = data.scenarios[0];
-  const realOhlc = aggregateOHLC(firstScenario.timestamps, firstScenario.realPrices, paddedFrom, paddedTo, tf);
-  const realLine = aggregateLine(firstScenario.timestamps, firstScenario.realPrices, paddedFrom, paddedTo, tf);
+  // Load real price from first scenario
+  const firstData = await loadScenarioRange(outputDir, 0, index.scenarios[0], paddedFrom, paddedTo);
+  const realOhlc = aggregateOHLC(firstData.timestamps, firstData.realPrices, paddedFrom, paddedTo, tf);
+  const realLine = aggregateLine(firstData.timestamps, firstData.realPrices, paddedFrom, paddedTo, tf);
 
   // Determine which scenarios to include
   let scenarioIndices: number[];
   if (scenarioFilter === "all") {
-    scenarioIndices = data.scenarios.map((_, i) => i);
+    scenarioIndices = index.scenarios.map((_, i) => i);
   } else {
     const idx = parseInt(scenarioFilter);
-    scenarioIndices = isNaN(idx) ? data.scenarios.map((_, i) => i) : [idx];
+    scenarioIndices = isNaN(idx) ? index.scenarios.map((_, i) => i) : [idx];
   }
 
-  const oracles = scenarioIndices.map((idx) => {
-    const s = data.scenarios[idx];
+  const oracles = await Promise.all(scenarioIndices.map(async (idx) => {
+    // Reuse firstData for scenario 0
+    const data = idx === 0
+      ? firstData
+      : await loadScenarioRange(outputDir, idx, index.scenarios[idx], paddedFrom, paddedTo);
     return {
       index: idx,
-      label: s.config.label,
-      ohlc: aggregateOHLC(s.timestamps, s.oraclePrices, paddedFrom, paddedTo, tf),
-      line: aggregateLine(s.timestamps, s.oraclePrices, paddedFrom, paddedTo, tf),
-      deviation: aggregateDeviation(s.timestamps, s.deviationPcts, paddedFrom, paddedTo, tf),
+      label: index.scenarios[idx].config.label,
+      ohlc: aggregateOHLC(data.timestamps, data.oraclePrices, paddedFrom, paddedTo, tf),
+      line: aggregateLine(data.timestamps, data.oraclePrices, paddedFrom, paddedTo, tf),
+      deviation: aggregateDeviation(data.timestamps, data.deviationPcts, paddedFrom, paddedTo, tf),
     };
-  });
+  }));
 
   return {
     tf,
@@ -92,16 +134,17 @@ function buildDataResponse(
 }
 
 export async function startServer(
-  data: SimDataFile,
+  outputDir: string,
   port: number,
   openBrowser: boolean
 ): Promise<void> {
+  const index = await loadIndex(outputDir);
   const templateHtml = await Bun.file(TEMPLATE_PATH).text();
-  const metaResponse = JSON.stringify(buildMetaResponse(data));
+  const metaResponse = JSON.stringify(buildMetaResponse(index));
 
   const server = Bun.serve({
     port,
-    fetch(req) {
+    async fetch(req) {
       const url = new URL(req.url);
 
       if (url.pathname === "/") {
@@ -132,7 +175,7 @@ export async function startServer(
           });
         }
 
-        const result = buildDataResponse(data, from, to, tf, scenario);
+        const result = await buildDataResponse(outputDir, index, from, to, tf, scenario);
         return new Response(JSON.stringify(result), {
           headers: {
             "Content-Type": "application/json",
@@ -155,7 +198,6 @@ export async function startServer(
 
   console.log("Press Ctrl+C to stop the server.");
 
-  // Keep process alive until Ctrl+C
   await new Promise<void>((resolve) => {
     process.on("SIGINT", () => {
       console.log("\nStopping server...");

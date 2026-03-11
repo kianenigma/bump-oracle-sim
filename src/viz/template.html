@@ -178,10 +178,7 @@
   </div>
 
   <script>
-    // ── Mode detection ──
-    const EMBEDDED_DATA = /*DATA_PLACEHOLDER*/null;
-    const EMBEDDED_CONFIGS = /*CONFIG_PLACEHOLDER*/null;
-    const IS_SERVER_MODE = EMBEDDED_DATA === null;
+    // ── Always server mode ──
 
     const COLORS = ['#2962FF','#FF6D00','#00C853','#D500F9','#FF1744','#00E5FF','#FFEA00','#69F0AE'];
     const REAL_COLOR = '#888888';
@@ -257,55 +254,6 @@
     function showLoading() { loadingEl.classList.remove('hidden'); }
     function hideLoading() { loadingEl.classList.add('hidden'); }
 
-    // ── OHLC Aggregation (embedded mode only) ──
-    function aggregateOHLC(points, interval) {
-      if (points.length === 0) return [];
-      const map = new Map();
-      for (const p of points) {
-        const bucket = Math.floor(p.timestamp / interval) * interval;
-        const c = map.get(bucket);
-        if (!c) {
-          map.set(bucket, { time: bucket, open: p.price, high: p.price, low: p.price, close: p.price });
-        } else {
-          if (p.price > c.high) c.high = p.price;
-          if (p.price < c.low) c.low = p.price;
-          c.close = p.price;
-        }
-      }
-      return Array.from(map.values()).sort((a, b) => a.time - b.time);
-    }
-
-    function aggregateLine(points, interval) {
-      if (interval <= 6) {
-        return points.map(p => ({ time: p.timestamp, value: p.price }));
-      }
-      const candles = aggregateOHLC(points, interval);
-      return candles.map(c => ({ time: c.time, value: c.close }));
-    }
-
-    function aggregateDeviation(metrics, interval) {
-      if (interval <= 6) {
-        return metrics.map(m => ({ time: m.timestamp, value: m.deviationPct }));
-      }
-      const map = new Map();
-      for (const m of metrics) {
-        const bucket = Math.floor(m.timestamp / interval) * interval;
-        const existing = map.get(bucket);
-        if (!existing) {
-          map.set(bucket, { time: bucket, value: m.deviationPct });
-        } else {
-          if (m.deviationPct > existing.value) existing.value = m.deviationPct;
-        }
-      }
-      return Array.from(map.values()).sort((a, b) => a.time - b.time);
-    }
-
-    function realPoints(metrics) {
-      return metrics.map(m => ({ timestamp: m.timestamp, price: m.realPrice }));
-    }
-    function oraclePoints(metrics) {
-      return metrics.map(m => ({ timestamp: m.timestamp, price: m.oraclePrice }));
-    }
 
     // ══════════════════════════════════════════════
     // ── STATS TABLE ──
@@ -561,105 +509,6 @@
       parent.appendChild(lbl);
     }
 
-    // ══════════════════════════════════════════════
-    // ── EMBEDDED MODE ──
-    // ══════════════════════════════════════════════
-
-    function rebuildChartEmbedded(preserveView) {
-      const savedRange = preserveView ? getVisibleTimeRange() : null;
-
-      clearPriceSeries();
-      clearDevSeries();
-
-      const tf = currentTF;
-      const isCandle = currentView === 'candle';
-
-      if (EMBEDDED_DATA.length > 0) {
-        const raw = realPoints(EMBEDDED_DATA[0].metrics);
-        const label = 'Real Price';
-        const visible = seriesVisibility[label] !== false;
-
-        if (isCandle) {
-          const ohlc = aggregateOHLC(raw, tf);
-          const s = priceChart.addCandlestickSeries({
-            upColor: '#5c6b73', downColor: '#5c6b73',
-            wickUpColor: '#888', wickDownColor: '#888',
-            borderUpColor: '#888', borderDownColor: '#888',
-            visible, lastValueVisible: false, priceLineVisible: false,
-          });
-          s.setData(ohlc);
-          activePriceSeries.push({ series: s, label, color: REAL_COLOR, kind: 'candle' });
-        } else {
-          const line = aggregateLine(raw, tf);
-          const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, visible, lastValueVisible: false, priceLineVisible: false });
-          s.setData(line);
-          activePriceSeries.push({ series: s, label, color: REAL_COLOR, kind: 'line' });
-        }
-      }
-
-      EMBEDDED_DATA.forEach((sim, idx) => {
-        const color = COLORS[idx % COLORS.length];
-        const label = sim.config.label || 'default';
-        const oLabel = `Oracle: ${label}`;
-        const visible = seriesVisibility[oLabel] !== false;
-
-        const raw = oraclePoints(sim.metrics);
-
-        if (isCandle) {
-          const ohlc = aggregateOHLC(raw, tf);
-          const s = priceChart.addCandlestickSeries({
-            upColor: color + 'CC', downColor: color + '66',
-            wickUpColor: color, wickDownColor: color,
-            borderUpColor: color, borderDownColor: color,
-            visible, lastValueVisible: false, priceLineVisible: false,
-          });
-          s.setData(ohlc);
-          activePriceSeries.push({ series: s, label: oLabel, color, kind: 'candle' });
-        } else {
-          const line = aggregateLine(raw, tf);
-          const s = priceChart.addLineSeries({ color, lineWidth: 2, visible, lastValueVisible: false, priceLineVisible: false });
-          s.setData(line);
-          activePriceSeries.push({ series: s, label: oLabel, color, kind: 'line' });
-        }
-
-        const devData = aggregateDeviation(sim.metrics, tf);
-        const ds = devChart.addLineSeries({ color, lineWidth: 1, visible, lastValueVisible: false, priceLineVisible: false });
-        ds.setData(devData);
-        activeDevSeries.push({ series: ds, label: `Dev: ${label}`, color, kind: 'line' });
-      });
-
-      rebuildSeriesSelector();
-
-      if (savedRange) {
-        setVisibleRangeBoth(savedRange);
-      } else {
-        priceChart.timeScale().fitContent();
-        devChart.timeScale().fitContent();
-      }
-    }
-
-    function initEmbedded() {
-      const configEl = document.getElementById('config-info');
-      if (EMBEDDED_CONFIGS.length === 1) {
-        const c = EMBEDDED_CONFIGS[0];
-        configEl.innerHTML = [
-          `<span>Validators: ${c.validatorCount}</span>`,
-          `<span>Mix: ${(() => { const m = c.validatorMix||{}; const parts = Object.entries(m).map(([k,v])=>(v*100).toFixed(0)+'% '+k); const h = 100-Object.values(m).reduce((a,b)=>a+b,0)*100; return h.toFixed(0)+'% honest'+(parts.length?', '+parts.join(', '):''); })()}</span>`,
-          `<span>Epsilon: ${typeof c.epsilon==='number'?c.epsilon.toFixed(6):c.epsilon}</span>`,
-          `<span>Seed: ${c.seed}</span>`,
-          `<span>${c.startDate} to ${c.endDate}</span>`,
-        ].join('');
-      } else {
-        configEl.innerHTML = `<span>${EMBEDDED_CONFIGS.length} scenarios compared</span>`+
-          `<span>${EMBEDDED_CONFIGS[0].startDate} to ${EMBEDDED_CONFIGS[0].endDate}</span>`;
-      }
-
-      // Build stats table from embedded data
-      buildStatsTable(EMBEDDED_DATA.map(sim => ({ config: sim.config, summary: sim.summary })));
-
-      rebuildChartEmbedded();
-      hideLoading();
-    }
 
     // ══════════════════════════════════════════════
     // ── SERVER MODE ──
@@ -864,7 +713,7 @@
     }
 
     function onViewportChange() {
-      if (!IS_SERVER_MODE || transitionLock) return;
+      if (transitionLock) return;
 
       updateTFButtonStates();
 
@@ -939,15 +788,11 @@
         btn.classList.add('active');
         currentTF = parseInt(btn.dataset.tf);
 
-        if (IS_SERVER_MODE) {
-          bufferedTF = 0;
-          const range = getVisibleTimeRange();
-          const from = range ? range.from : totalTimeRange.from;
-          const to = range ? range.to : totalTimeRange.to;
-          fetchData(from, to, currentTF, false);
-        } else {
-          rebuildChartEmbedded(true);
-        }
+        bufferedTF = 0;
+        const range = getVisibleTimeRange();
+        const from = range ? range.from : totalTimeRange.from;
+        const to = range ? range.to : totalTimeRange.to;
+        fetchData(from, to, currentTF, false);
       });
     });
 
@@ -958,7 +803,7 @@
         btn.classList.add('active');
         currentView = btn.dataset.view;
 
-        if (IS_SERVER_MODE && lastServerData) {
+        if (lastServerData) {
           const savedRange = getVisibleTimeRange();
 
           if (fetchDebounceTimer) {
@@ -973,8 +818,6 @@
             devChart.timeScale().setVisibleRange(savedRange);
           }
           transitionLock = false;
-        } else {
-          rebuildChartEmbedded(true);
         }
       });
     });
@@ -1003,7 +846,7 @@
     document.getElementById('btn-zoom-in').addEventListener('click', () => zoomBy(0.5));
     document.getElementById('btn-zoom-out').addEventListener('click', () => zoomBy(2));
     document.getElementById('btn-reset').addEventListener('click', () => {
-      if (IS_SERVER_MODE && totalTimeRange) {
+      if (totalTimeRange) {
         const fullSpan = totalTimeRange.to - totalTimeRange.from;
         currentTF = smallestValidTF(fullSpan);
         document.querySelectorAll('.tf-btn').forEach(b => {
@@ -1012,9 +855,6 @@
         updateTFButtonStates();
         bufferedTF = 0;
         fetchData(totalTimeRange.from, totalTimeRange.to, currentTF, true);
-      } else {
-        priceChart.timeScale().fitContent();
-        devChart.timeScale().fitContent();
       }
     });
 
@@ -1206,11 +1046,7 @@
     setupDragZoom(devChartEl, devChart);
 
     // ── Init ──
-    if (IS_SERVER_MODE) {
-      initServer();
-    } else {
-      initEmbedded();
-    }
+    initServer();
   </script>
 </body>
 </html>
