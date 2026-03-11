@@ -73,7 +73,7 @@ export const scenarios: Record<string, ScenarioFn> = {
 
     const autoConfig = mergeConfig(overrides);
     const maxDelta = maxBlockDelta(pricePoints);
-    const baseEpsilon = maxDelta / (autoConfig.validatorCount || 100);
+    const baseEpsilon = maxDelta / autoConfig.validatorCount;
 
     for (const mult of multipliers) {
       const eps = baseEpsilon * mult;

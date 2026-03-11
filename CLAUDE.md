@@ -22,10 +22,10 @@ src/
     engine.ts          Orchestrator: creates validators, runs sim, computes summary
     chain.ts           Block-by-block chain simulation
     validator.ts       HonestValidator + ValidatorAgent interface
-    malicious.ts       MaliciousValidator (inverse strategy)
+    malicious.ts       MaliciousValidator (inverse) + PushyMaliciousValidator (max-push)
     price-endpoint.ts  Wraps price data with per-validator jitter
   analysis/
-    scenarios.ts       Named scenario runners (honest, sweep-malicious, epsilon-sweep, stress)
+    scenarios.ts       Named scenario runners (honest, sweep-malicious, sweep-malicious-and-epsilon, sweep-pushy-and-epsilon, epsilon-sweep, stress)
   viz/
     server.ts          Bun.serve() with /api/meta, /api/data endpoints
     aggregation.ts     Server-side OHLC/line/deviation aggregation with binary search
@@ -45,7 +45,7 @@ bun run src/main.ts --no-open --port 8080    # Custom port, don't auto-open brow
 
 ## Key Flags
 
-- `--scenario <name>`: Run a named scenario (honest, sweep-malicious, epsilon-sweep, stress)
+- `--scenario <name>`: Run a named scenario (honest, sweep-malicious, sweep-malicious-and-epsilon, sweep-pushy-and-epsilon, epsilon-sweep, stress)
 - `--start-date` / `--end-date`: Date range (YYYY-MM-DD)
 - `--downsampling <none|auto>`: Only applies to --export-html
 
@@ -105,6 +105,13 @@ Columnar JSON for efficiency (~60% smaller than array-of-objects):
   }]
 }
 ```
+
+## Simulation Mechanics
+
+- **ValidatorMix**: `Record<string, number>` maps validator type name to fraction (honest is implicit remainder)
+- **Validator registry** in engine.ts: `{ malicious: MaliciousValidator, pushy: PushyMaliciousValidator }`
+- **Block author selection**: Picked uniformly from **all** validators. Malicious validators can influence both via bumps and via authorship (their `producePrice()` implements their strategy).
+- **Auto epsilon**: `maxBlockDelta / validatorCount` — ensures the oracle can track the steepest 6s price move with all validators aligned
 
 ## Gotchas
 

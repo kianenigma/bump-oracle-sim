@@ -156,7 +156,15 @@ if (args["export-html"]) {
 }
 
 // ── Default mode: write .simdata + start server ──
-const outputPath = args.output!;
+const userSetOutput = Bun.argv.slice(2).includes("--output");
+let outputPath: string;
+if (userSetOutput) {
+  outputPath = args.output!;
+} else if (args.scenario) {
+  outputPath = `${args.scenario}_${startDate}_${endDate}.simdata`;
+} else {
+  outputPath = args.output!;
+}
 await writeSimData(results, outputPath);
 
 // Load from the file we just wrote (avoids holding both results + simData in memory)

@@ -83,11 +83,17 @@ export function runSimulation(config: SimulationConfig, pricePoints: PricePoint[
   const totalBlocks = endpoint.totalBlocks;
   const metrics: BlockMetrics[] = [];
 
-  console.log(`  Running ${totalBlocks} blocks (${parts.join(", ")})...`);
+  console.log(`  Running ${totalBlocks.toLocaleString()} blocks (${parts.join(", ")})...`);
 
+  const progressInterval = Math.max(1, Math.floor(totalBlocks / 100)); // ~1% steps
   for (let i = 0; i < totalBlocks; i++) {
     metrics.push(chain.nextBlock());
+    if ((i + 1) % progressInterval === 0) {
+      const pct = ((i + 1) / totalBlocks * 100).toFixed(0);
+      process.stdout.write(`\r  Progress: ${pct}% (${(i + 1).toLocaleString()} / ${totalBlocks.toLocaleString()})`);
+    }
   }
+  process.stdout.write(`\r  Progress: 100%${" ".repeat(40)}\n`);
 
   // Compute summary
   const summary = computeSummary(metrics, epsilon, config.convergenceThreshold);

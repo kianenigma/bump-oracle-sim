@@ -60,16 +60,25 @@ export interface SimulationResult {
 }
 
 export interface SimulationSummary {
+  /// Total number of blocks in the simulation
   totalBlocks: number;
-  meanDeviation: number;
-  maxDeviation: number;
-  meanDeviationPct: number;
-  maxDeviationPct: number;
+  /// The epsilon used in the simulation
   epsilon: number;
-  convergenceRate: number; // fraction of blocks where deviation < threshold
-  convergenceThreshold: number; // the threshold used (in %)
-  deviationIntegral: number; // integral of deviationPct over time (%-seconds)
-  maxDeviationRate: number; // max(d(deviationPct)/dt) — peak rate of deviation change (%/s)
+  /// The threshold used for convergence (in %), and the convergance itself.
+  ///
+  /// If set to 1%, blocks in which deviation was less than 1% are counted as converged.
+  convergenceThreshold: number;
+  convergenceRate: number;
+  /// The arithmetic mean (aka. average) deviation in the simulation.
+  meanDeviation: number;
+  meanDeviationPct: number;
+  /// The max deviation in the simulation.
+  maxDeviation: number;
+  maxDeviationPct: number;
+  /// The integral of the deviation over time.
+  deviationIntegral: number;
+  /// The maximum rate of deviation change.
+  maxDeviationRate: number;
 }
 
 export interface CacheMetadata {

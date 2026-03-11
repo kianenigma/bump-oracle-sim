@@ -9,7 +9,6 @@ export class Chain {
   epsilon: number;
 
   private validators: ValidatorAgent[];
-  private honestValidators: ValidatorAgent[];
   private endpoint: PriceEndpoint;
   private rng: () => number;
 
@@ -23,7 +22,6 @@ export class Chain {
     this.lastPrice = initialPrice;
     this.epsilon = epsilon;
     this.validators = validators;
-    this.honestValidators = validators.filter((v) => v.isHonest);
     this.endpoint = endpoint;
     this.rng = rng;
   }
@@ -39,8 +37,8 @@ export class Chain {
       bump: v.produceBump(this.lastPrice, blockIndex),
     }));
 
-    // 2. Pick a random honest author
-    const author = this.honestValidators[Math.floor(this.rng() * this.honestValidators.length)];
+    // 2. Pick a random author from ALL validators (proportional to mix)
+    const author = this.validators[Math.floor(this.rng() * this.validators.length)];
 
     // 3. Author selects which bumps to activate
     const mask = author.producePrice(bumps, this.lastPrice, this.epsilon, blockIndex);
