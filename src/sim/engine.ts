@@ -2,7 +2,7 @@ import type { SimulationConfig, SimulationResult, BlockMetrics, SimulationSummar
 import { mulberry32 } from "../rng.js";
 import { PriceEndpoint } from "./price-endpoint.js";
 import { HonestValidator, type ValidatorAgent } from "./validator.js";
-import { MaliciousValidator, PushyMaliciousValidator } from "./malicious.js";
+import { MaliciousValidator, PushyMaliciousValidator, NoopValidator, DelayedValidator, DriftValidator } from "./malicious.js";
 import { Chain } from "./chain.js";
 import { maxBlockDelta } from "../data/interpolator.js";
 import { BLOCK_TIME_SECONDS } from "../config.js";
@@ -14,6 +14,9 @@ type ValidatorCtor = new (index: number, endpoint: PriceEndpoint, rng: () => num
 const VALIDATOR_REGISTRY: Record<string, ValidatorCtor> = {
   malicious: MaliciousValidator,
   pushy: PushyMaliciousValidator,
+  noop: NoopValidator,
+  delayed: DelayedValidator,
+  drift: DriftValidator,
 };
 
 // Callback invoked for each block during simulation. Return value is ignored.

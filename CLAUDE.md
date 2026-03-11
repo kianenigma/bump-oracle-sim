@@ -22,7 +22,7 @@ src/
     engine.ts          Orchestrator: creates validators, runs sim, computes summary
     chain.ts           Block-by-block chain simulation
     validator.ts       HonestValidator + ValidatorAgent interface
-    malicious.ts       MaliciousValidator (inverse) + PushyMaliciousValidator (max-push)
+    malicious.ts       MaliciousValidator (inverse), PushyMaliciousValidator (max-push), NoopValidator (stall), DelayedValidator (stale price), DriftValidator (always Up)
     price-endpoint.ts  Wraps price data with per-validator jitter
   analysis/
     scenarios.ts       Named scenario runners (honest, sweep-malicious, sweep-malicious-and-epsilon, sweep-pushy-and-epsilon, epsilon-sweep, stress)
@@ -109,7 +109,7 @@ Columnar JSON for efficiency (~60% smaller than array-of-objects):
 ## Simulation Mechanics
 
 - **ValidatorMix**: `Record<string, number>` maps validator type name to fraction (honest is implicit remainder)
-- **Validator registry** in engine.ts: `{ malicious: MaliciousValidator, pushy: PushyMaliciousValidator }`
+- **Validator registry** in engine.ts: `{ malicious, pushy, noop, delayed, drift }`
 - **Block author selection**: Picked uniformly from **all** validators. Malicious validators can influence both via bumps and via authorship (their `producePrice()` implements their strategy).
 - **Auto epsilon**: `maxBlockDelta / validatorCount` — ensures the oracle can track the steepest 6s price move with all validators aligned
 
