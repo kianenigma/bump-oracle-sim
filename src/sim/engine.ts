@@ -26,6 +26,8 @@ export function runSimulation(
   config: SimulationConfig,
   pricePoints: PricePoint[],
   sink?: BlockSink,
+  quiet = false,
+  onProgress?: (pct: number) => void,
 ): SimulationResult {
   const rng = mulberry32(config.seed);
   const endpoint = new PriceEndpoint(pricePoints);
@@ -36,7 +38,7 @@ export function runSimulation(
     const maxDelta = maxBlockDelta(pricePoints);
     epsilon = maxDelta / config.validatorCount;
     if (epsilon === 0) epsilon = 0.0001; // safety floor
-    console.log(`  Auto epsilon: ${epsilon.toFixed(6)} (maxDelta=${maxDelta.toFixed(4)}, validators=${config.validatorCount})`);
+    if (!quiet) console.log(`  Auto epsilon: ${epsilon.toFixed(6)} (maxDelta=${maxDelta.toFixed(4)}, validators=${config.validatorCount})`);
   } else {
     epsilon = config.epsilon;
   }
@@ -102,7 +104,7 @@ export function runSimulation(
   let maxDeviationRate = 0;
   let prevBlock: BlockMetrics | null = null;
 
-  console.log(`  Running ${totalBlocks.toLocaleString()} blocks (${parts.join(", ")})...`);
+  if (!quiet) console.log(`  Running ${totalBlocks.toLocaleString()} blocks (${parts.join(", ")})...`);
 
   const progressInterval = Math.max(1, Math.floor(totalBlocks / 100));
   for (let i = 0; i < totalBlocks; i++) {
@@ -128,11 +130,12 @@ export function runSimulation(
     prevBlock = m;
 
     if ((i + 1) % progressInterval === 0) {
-      const pct = ((i + 1) / totalBlocks * 100).toFixed(0);
-      process.stdout.write(`\r  Progress: ${pct}% (${(i + 1).toLocaleString()} / ${totalBlocks.toLocaleString()})`);
+      const pct = (i + 1) / totalBlocks * 100;
+      if (!quiet) process.stdout.write(`\r  Progress: ${pct.toFixed(0)}% (${(i + 1).toLocaleString()} / ${totalBlocks.toLocaleString()})`);
+      if (onProgress) onProgress(pct);
     }
   }
-  process.stdout.write(`\r  Progress: 100%${" ".repeat(40)}\n`);
+  if (!quiet) process.stdout.write(`\r  Progress: 100%${" ".repeat(40)}\n`);
 
   // Last block's integral contribution (no next block)
   if (prevBlock !== null) {
@@ -152,10 +155,12 @@ export function runSimulation(
     maxDeviationRate,
   };
 
-  console.log(`  Done. Mean deviation: ${summary.meanDeviationPct.toFixed(4)}%, max: ${summary.maxDeviationPct.toFixed(4)}%`);
-  console.log(`  Convergence rate (<${summary.convergenceThreshold}% deviation): ${(summary.convergenceRate * 100).toFixed(1)}%`);
-  console.log(`  Deviation integral: ${summary.deviationIntegral.toFixed(2)} %-seconds`);
-  console.log(`  Max deviation rate: ${summary.maxDeviationRate.toFixed(6)} %/s`);
+  if (!quiet) {
+    console.log(`  Done. Mean deviation: ${summary.meanDeviationPct.toFixed(4)}%, max: ${summary.maxDeviationPct.toFixed(4)}%`);
+    console.log(`  Convergence rate (<${summary.convergenceThreshold}% deviation): ${(summary.convergenceRate * 100).toFixed(1)}%`);
+    console.log(`  Deviation integral: ${summary.deviationIntegral.toFixed(2)} %-seconds`);
+    console.log(`  Max deviation rate: ${summary.maxDeviationRate.toFixed(6)} %/s`);
+  }
 
   return { config: { ...config, epsilon }, summary };
 }

@@ -8,11 +8,12 @@ import { ChunkWriter, writeIndex } from "../viz/writer.js";
 import { loadCriteria } from "./research-criteria.js";
 import { generateReport } from "./research-report.js";
 
-type ScenarioFn = (
+export type ScenarioFn = (
   baseConfig: Partial<SimulationConfig>,
   pricePoints: PricePoint[],
   outputDir?: string,
-) => SimulationResult[];
+  threadCount?: number,
+) => Promise<SimulationResult[]>;
 
 function mergeConfig(overrides: Partial<SimulationConfig>): SimulationConfig {
   return { ...DEFAULT_CONFIG, ...overrides };
@@ -55,51 +56,192 @@ function runOne(
 }
 
 /**
- * Run multiple configs as a scenario batch, writing chunked output if outputDir is provided.
+ * Run multiple configs as a scenario batch.
+ * Uses a Bun Worker pool when threadCount > 1 and there are multiple configs.
  */
-function runBatch(
+async function runBatch(
   configs: SimulationConfig[],
   pricePoints: PricePoint[],
   outputDir?: string,
-): SimulationResult[] {
+  threadCount = 1,
+): Promise<SimulationResult[]> {
   if (outputDir) mkdirSync(outputDir, { recursive: true });
 
-  const results: SimulationResult[] = [];
-  const metas: ScenarioMeta[] = [];
+  let results: SimulationResult[];
+  let metas: (ScenarioMeta | undefined)[];
 
-  for (let i = 0; i < configs.length; i++) {
-    const { result, meta } = runOne(configs[i], pricePoints, outputDir, i);
-    results.push(result);
-    if (meta) metas.push(meta);
+  if (threadCount > 1 && configs.length > 1) {
+    ({ results, metas } = await runBatchParallel(configs, pricePoints, threadCount, outputDir));
+  } else {
+    results = [];
+    metas = [];
+    for (let i = 0; i < configs.length; i++) {
+      const { result, meta } = runOne(configs[i], pricePoints, outputDir, i);
+      results.push(result);
+      metas.push(meta);
+    }
   }
 
-  if (outputDir && metas.length > 0) {
-    writeIndex(outputDir, metas);
+  if (outputDir) {
+    const validMetas = metas.filter((m): m is ScenarioMeta => m !== undefined);
+    if (validMetas.length > 0) writeIndex(outputDir, validMetas);
   }
 
   return results;
 }
 
+/**
+ * Distribute simulations across Bun Workers using a work-stealing pool.
+ * Each worker gets its own copy of pricePoints on init, then runs simulations
+ * sequentially. Workers write chunk files directly to their scenario directories.
+ * Renders a live multi-line ANSI progress display.
+ */
+async function runBatchParallel(
+  configs: SimulationConfig[],
+  pricePoints: PricePoint[],
+  threadCount: number,
+  outputDir?: string,
+): Promise<{ results: SimulationResult[]; metas: (ScenarioMeta | undefined)[] }> {
+  const workerCount = Math.min(threadCount, configs.length);
+  console.log(`  Spawning ${workerCount} workers for ${configs.length} simulations...\n`);
+
+  const workerURL = new URL("../sim/worker.ts", import.meta.url);
+  const workers: Worker[] = [];
+
+  // Initialize workers: each receives a copy of pricePoints
+  await Promise.all(
+    Array.from({ length: workerCount }, () =>
+      new Promise<void>((resolve, reject) => {
+        const w = new Worker(workerURL);
+        workers.push(w);
+        w.onmessage = (e) => { if (e.data.type === "ready") resolve(); };
+        w.onerror = (e) => reject(e);
+        w.postMessage({ type: "init", pricePoints });
+      })
+    )
+  );
+
+  // Per-worker display state
+  const workerState: { label: string; pct: number }[] = Array.from(
+    { length: workerCount },
+    () => ({ label: "idle", pct: 0 }),
+  );
+  const workerIndexMap = new Map<Worker, number>();
+  workers.forEach((w, i) => workerIndexMap.set(w, i));
+
+  // ANSI multi-line progress renderer
+  let linesPrinted = 0;
+  let lastRedraw = 0;
+  const REDRAW_MS = 150;
+
+  function redraw(force = false) {
+    const now = Date.now();
+    if (!force && now - lastRedraw < REDRAW_MS) return;
+    lastRedraw = now;
+
+    // Move cursor up to overwrite previous output
+    if (linesPrinted > 0) process.stdout.write(`\x1B[${linesPrinted}A`);
+
+    let lines = 0;
+    for (let i = 0; i < workerCount; i++) {
+      const ws = workerState[i];
+      const bar = progressBar(ws.pct, 20);
+      process.stdout.write(`\x1B[2K  Worker ${String(i + 1).padStart(2)}: ${bar} ${ws.label}\n`);
+      lines++;
+    }
+    const overallPct = ((completed / configs.length) * 100).toFixed(0);
+    const overallBar = progressBar((completed / configs.length) * 100, 20);
+    process.stdout.write(`\x1B[2K  Overall: ${overallBar} ${completed}/${configs.length} simulations\n`);
+    lines++;
+    linesPrinted = lines;
+  }
+
+  // Work-stealing: assign tasks as workers become free
+  const results: SimulationResult[] = new Array(configs.length);
+  const metas: (ScenarioMeta | undefined)[] = new Array(configs.length);
+  let nextTask = 0;
+  let completed = 0;
+
+  redraw(true);
+
+  await new Promise<void>((resolveAll, rejectAll) => {
+    function assignNext(worker: Worker) {
+      const wi = workerIndexMap.get(worker)!;
+      if (nextTask >= configs.length) {
+        workerState[wi] = { label: "done", pct: 100 };
+        redraw(true);
+        return;
+      }
+      const idx = nextTask++;
+      workerState[wi] = { label: truncate(configs[idx].label, 50), pct: 0 };
+      redraw(true);
+      worker.postMessage({
+        type: "run",
+        config: configs[idx],
+        scenarioIndex: idx,
+        outputDir,
+      });
+    }
+
+    for (const w of workers) {
+      w.onerror = (e) => rejectAll(e);
+      w.onmessage = (event) => {
+        const msg = event.data;
+        const wi = workerIndexMap.get(w)!;
+        if (msg.type === "progress") {
+          workerState[wi].pct = msg.pct;
+          redraw();
+        } else if (msg.type === "done") {
+          results[msg.scenarioIndex] = msg.result;
+          metas[msg.scenarioIndex] = msg.meta;
+          completed++;
+          if (completed === configs.length) {
+            redraw(true);
+            resolveAll();
+          } else {
+            assignNext(w);
+          }
+        }
+      };
+      assignNext(w);
+    }
+  });
+
+  // Final newline after progress display
+  console.log();
+
+  for (const w of workers) w.terminate();
+  return { results, metas };
+}
+
+function progressBar(pct: number, width: number): string {
+  const filled = Math.round((pct / 100) * width);
+  return "[" + "#".repeat(filled) + "-".repeat(width - filled) + "]" + ` ${pct.toFixed(0).padStart(3)}%`;
+}
+
+function truncate(s: string, max: number): string {
+  return s.length <= max ? s : s.slice(0, max - 1) + "\u2026";
+}
+
 export const scenarios: Record<string, ScenarioFn> = {
   /** Baseline: 100% honest */
-  honest(overrides, pricePoints, outputDir) {
+  async honest(overrides, pricePoints, outputDir, threadCount) {
     console.log(`\n[Scenario: honest]`);
     const config = mergeConfig({ ...overrides, validatorMix: {}, label: "honest (100%)" });
-    return runBatch([config], pricePoints, outputDir);
+    return runBatch([config], pricePoints, outputDir, threadCount);
   },
 
   /** Sweep malicious fraction from 0% to 50% */
-  "sweep-malicious"(overrides, pricePoints, outputDir) {
+  async "sweep-malicious"(overrides, pricePoints, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3, 0.4, 0.49, 0.5];
     const configs = fractions.map((frac) => {
       const label = `${(frac * 100).toFixed(0)}% malicious`;
-      console.log(`\n[Scenario: sweep-malicious — ${label}]`);
       return mergeConfig({ ...overrides, validatorMix: { malicious: frac }, label });
     });
-    return runBatch(configs, pricePoints, outputDir);
+    return runBatch(configs, pricePoints, outputDir, threadCount);
   },
 
-  "sweep-malicious-and-epsilon"(overrides, pricePoints, outputDir) {
+  async "sweep-malicious-and-epsilon"(overrides, pricePoints, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3];
     const epsilons = [(DEFAULT_CONFIG.epsilon as number) / 5, DEFAULT_CONFIG.epsilon, (DEFAULT_CONFIG.epsilon as number) * 5];
     const configs: SimulationConfig[] = [];
@@ -107,14 +249,13 @@ export const scenarios: Record<string, ScenarioFn> = {
     for (const frac of fractions) {
       for (const epsilon of epsilons) {
         const label = `${(frac * 100).toFixed(0)}% malicious, epsilon=${(epsilon as number).toFixed(6)}`;
-        console.log(`\n[Scenario: sweep-malicious-and-epsilon — ${label}]`);
         configs.push(mergeConfig({ ...overrides, validatorMix: { malicious: frac }, epsilon, label }));
       }
     }
-    return runBatch(configs, pricePoints, outputDir);
+    return runBatch(configs, pricePoints, outputDir, threadCount);
   },
 
-  "sweep-pushy-and-epsilon"(overrides, pricePoints, outputDir) {
+  async "sweep-pushy-and-epsilon"(overrides, pricePoints, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3];
     const epsilons = [(DEFAULT_CONFIG.epsilon as number) / 5, DEFAULT_CONFIG.epsilon, (DEFAULT_CONFIG.epsilon as number) * 5];
     const configs: SimulationConfig[] = [];
@@ -122,15 +263,14 @@ export const scenarios: Record<string, ScenarioFn> = {
     for (const frac of fractions) {
       for (const epsilon of epsilons) {
         const label = `${(frac * 100).toFixed(0)}% pushy, epsilon=${(epsilon as number).toFixed(6)}`;
-        console.log(`\n[Scenario: sweep-pushy-and-epsilon — ${label}]`);
         configs.push(mergeConfig({ ...overrides, validatorMix: { pushy: frac }, epsilon, label }));
       }
     }
-    return runBatch(configs, pricePoints, outputDir);
+    return runBatch(configs, pricePoints, outputDir, threadCount);
   },
 
   /** Vary epsilon to find optimal value */
-  "epsilon-sweep"(overrides, pricePoints, outputDir) {
+  async "epsilon-sweep"(overrides, pricePoints, outputDir, threadCount) {
     const multipliers = [0.25, 0.5, 1, 2, 4];
     const autoConfig = mergeConfig(overrides);
     const maxDelta = maxBlockDelta(pricePoints);
@@ -139,28 +279,27 @@ export const scenarios: Record<string, ScenarioFn> = {
     const configs = multipliers.map((mult) => {
       const eps = baseEpsilon * mult;
       const label = `epsilon=${eps.toFixed(6)} (${mult}x)`;
-      console.log(`\n[Scenario: epsilon-sweep — ${label}]`);
       return mergeConfig({ ...overrides, epsilon: eps, label });
     });
-    return runBatch(configs, pricePoints, outputDir);
+    return runBatch(configs, pricePoints, outputDir, threadCount);
   },
 
   /** Stress test: 49% malicious */
-  stress(overrides, pricePoints, outputDir) {
+  async stress(overrides, pricePoints, outputDir, threadCount) {
     console.log(`\n[Scenario: stress]`);
     const config = mergeConfig({
       ...overrides,
       validatorMix: { malicious: 0.49 },
       label: "stress (49% malicious)",
     });
-    return runBatch([config], pricePoints, outputDir);
+    return runBatch([config], pricePoints, outputDir, threadCount);
   },
 
   /**
    * Research: grid search over epsilon multipliers × adversary mixes.
    * Scores each combination and produces a report recommending the optimal epsilon.
    */
-  research(overrides, pricePoints, outputDir) {
+  async research(overrides, pricePoints, outputDir, threadCount) {
     console.log(`\n[Scenario: research]`);
     const criteria = loadCriteria();
     const base = mergeConfig({ ...overrides, convergenceThreshold: criteria.convergenceThreshold });
@@ -216,7 +355,7 @@ export const scenarios: Record<string, ScenarioFn> = {
 
     console.log(`  Grid: ${multipliers.length} epsilons x ${mixes.length} mixes = ${configs.length} simulations`);
 
-    const results = runBatch(configs, pricePoints, outputDir);
+    const results = await runBatch(configs, pricePoints, outputDir, threadCount);
 
     // Generate report
     const reportPath = outputDir

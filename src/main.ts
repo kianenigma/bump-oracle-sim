@@ -1,6 +1,7 @@
 import { parseArgs } from "util";
 import { mkdirSync, existsSync, statSync, rmSync } from "fs";
 import { join } from "path";
+import { cpus } from "os";
 import { DEFAULT_CONFIG, CANDLE_INTERVAL } from "./config.js";
 import type { SimulationConfig, SimulationResult, ScenarioMeta, ValidatorMix } from "./types.js";
 import { fetchCandles } from "./data/fetcher.js";
@@ -28,6 +29,7 @@ const { values: args } = parseArgs({
     port: { type: "string", default: "3000" },
     data: { type: "string" },
     "no-open": { type: "boolean", default: false },
+    threads: { type: "string", default: String(cpus().length) },
     force: { type: "boolean", default: false },
     help: { type: "boolean", default: false },
   },
@@ -55,6 +57,7 @@ Options:
   --port <number>               Server port (default: 3000)
   --data <path>                 Serve existing .simdata directory without re-running simulation
   --no-open                     Don't auto-open browser
+  --threads <number>            Worker threads for batch scenarios (default: CPU count)
   --force                       Overwrite existing output directory
   --help                        Show this help
 `);
@@ -141,13 +144,15 @@ const baseOverrides: Partial<SimulationConfig> = {
 
 ensureOutputDir(outputDir, !!args.force);
 
+const threadCount = parseInt(args.threads!);
+
 if (args.scenario) {
   const scenarioFn = scenarios[args.scenario];
   if (!scenarioFn) {
     console.error(`Unknown scenario: ${args.scenario}. Available: ${listScenarios().join(", ")}`);
     process.exit(1);
   }
-  scenarioFn(baseOverrides, pricePoints, outputDir);
+  await scenarioFn(baseOverrides, pricePoints, outputDir, threadCount);
 } else {
   // Single simulation
   const mix = parseMix(args.mix!);
