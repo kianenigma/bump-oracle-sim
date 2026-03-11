@@ -4,10 +4,9 @@ export const DEFAULT_CONFIG: SimulationConfig = {
   startDate: "2025-01-01",
   endDate: "2025-01-07",
   validatorCount: 300,
-  maliciousFraction: 0,
+  validatorMix: {}, // 100% honest by default
   epsilon: 1 / 300 / 10, // price can move at most a 0.1$ per block
   seed: 42,
-  authorAlwaysHonest: true,
   jitterStdDev: 0.001, // 0.1% price jitter
   convergenceThreshold: 0.5, // 0.5% deviation threshold for convergence
   label: "default",

@@ -56,3 +56,44 @@ export class MaliciousValidator implements ValidatorAgent {
     return mask;
   }
 }
+
+/**
+ * Malicious validator that uses this strategy:
+ * - produceBump: do the right thing (honest bump)
+ * - producePrice: select the correct direction (towards the real price), but maximally push (use ALL possible bumps in that direction)
+ */
+export class PushyMaliciousValidator implements ValidatorAgent {
+  readonly index: number;
+  readonly isHonest = false;
+  private endpoint: PriceEndpoint;
+  private rng: () => number;
+  private jitterStdDev: number;
+
+  constructor(index: number, endpoint: PriceEndpoint, rng: () => number, jitterStdDev: number) {
+    this.index = index;
+    this.endpoint = endpoint;
+    this.rng = rng;
+    this.jitterStdDev = jitterStdDev;
+  }
+
+  // Honest (correct) bump direction based on real price with jitter
+  produceBump(lastPrice: number, blockIndex: number): Bump {
+    const price = this.endpoint.getJitteredPrice(blockIndex, this.rng, this.jitterStdDev);
+    return price >= lastPrice ? Bump.Up : Bump.Down;
+  }
+
+  // Maximally pushes price in the direction of the true price: select all bumps in the correct direction
+  producePrice(
+    bumps: BumpSubmission[],
+    lastPrice: number,
+    epsilon: number,
+    blockIndex: number
+  ): boolean[] {
+    const targetPrice = this.endpoint.getJitteredPrice(blockIndex, this.rng, this.jitterStdDev);
+    const diff = targetPrice - lastPrice;
+    const direction = diff >= 0 ? Bump.Up : Bump.Down;
+
+    // Activate all bumps in the correct direction, regardless of neededBumps
+    return bumps.map(b => b.bump === direction);
+  }
+}

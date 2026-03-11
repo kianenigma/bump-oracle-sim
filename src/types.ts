@@ -36,14 +36,18 @@ export interface BlockMetrics {
   deviationPct: number; // percentage deviation
 }
 
+// Maps validator class name to fraction of total validators (0.0 - 1.0).
+// "honest" is implicit: its fraction = 1 - sum(all other fractions).
+// Example: { malicious: 0.2, pushy: 0.1 } means 70% honest, 20% malicious, 10% pushy.
+export type ValidatorMix = Record<string, number>;
+
 export interface SimulationConfig {
   startDate: string; // YYYY-MM-DD
   endDate: string;
   validatorCount: number;
-  maliciousFraction: number; // 0.0 - 1.0
+  validatorMix: ValidatorMix; // fractions for non-honest validator types
   epsilon: number | "auto";
   seed: number;
-  authorAlwaysHonest: boolean;
   jitterStdDev: number; // price jitter std dev as fraction (e.g. 0.001 = 0.1%)
   convergenceThreshold: number; // deviation % threshold for convergence (default 0.1)
   label: string;
@@ -65,6 +69,7 @@ export interface SimulationSummary {
   convergenceRate: number; // fraction of blocks where deviation < threshold
   convergenceThreshold: number; // the threshold used (in %)
   deviationIntegral: number; // integral of deviationPct over time (%-seconds)
+  maxDeviationRate: number; // max(d(deviationPct)/dt) — peak rate of deviation change (%/s)
 }
 
 export interface CacheMetadata {

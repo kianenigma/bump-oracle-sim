@@ -1,6 +1,6 @@
 import { parseArgs } from "util";
 import { DEFAULT_CONFIG, CANDLE_INTERVAL } from "./config.js";
-import type { SimulationConfig, SimulationResult, SimDataFile } from "./types.js";
+import type { SimulationConfig, SimulationResult, SimDataFile, ValidatorMix } from "./types.js";
 import { fetchCandles } from "./data/fetcher.js";
 import { interpolateToBlocks } from "./data/interpolator.js";
 import { runSimulation } from "./sim/engine.js";
@@ -16,12 +16,11 @@ const { values: args } = parseArgs({
     "end-date": { type: "string", default: DEFAULT_CONFIG.endDate },
     epsilon: { type: "string", default: DEFAULT_CONFIG.epsilon.toString() },
     validators: { type: "string", default: String(DEFAULT_CONFIG.validatorCount) },
-    malicious: { type: "string", default: String(DEFAULT_CONFIG.maliciousFraction) },
+    mix: { type: "string", default: "" },
     seed: { type: "string", default: String(DEFAULT_CONFIG.seed) },
     output: { type: "string", default: "output.simdata" },
     scenario: { type: "string" },
     "fetch-only": { type: "boolean", default: false },
-    "author-always-honest": { type: "boolean", default: DEFAULT_CONFIG.authorAlwaysHonest },
     jitter: { type: "string", default: String(DEFAULT_CONFIG.jitterStdDev) },
     "convergence-threshold": { type: "string", default: String(DEFAULT_CONFIG.convergenceThreshold) },
     downsampling: { type: "string", default: "auto" },
@@ -45,12 +44,11 @@ Options:
   --end-date <YYYY-MM-DD>      End date (default: ${DEFAULT_CONFIG.endDate})
   --epsilon <number>      Price epsilon per bump (default: ${DEFAULT_CONFIG.epsilon})
   --validators <number>        Number of validators (default: ${DEFAULT_CONFIG.validatorCount})
-  --malicious <fraction>       Fraction of malicious validators 0-1 (default: 0)
+  --mix <spec>                 Validator mix, e.g. "malicious=0.2,pushy=0.1" (rest are honest)
   --seed <number>              Random seed (default: ${DEFAULT_CONFIG.seed})
   --output <path>              Output file (default: output.simdata)
   --scenario <name>            Named scenario (use --list-scenarios to see options)
   --fetch-only                 Only fetch and cache price data, don't simulate
-  --author-always-honest       Block author is always honest (default: true)
   --jitter <fraction>          Price jitter std dev as fraction (default: ${DEFAULT_CONFIG.jitterStdDev})
   --convergence-threshold <%>  Convergence threshold in % (default: ${DEFAULT_CONFIG.convergenceThreshold})
   --downsampling <none|auto>   Downsample data for HTML export (default: auto)
@@ -67,6 +65,21 @@ Options:
 if (args["list-scenarios"]) {
   console.log("Available scenarios:", listScenarios().join(", "));
   process.exit(0);
+}
+
+// Parse --mix "malicious=0.2,pushy=0.1" into ValidatorMix
+function parseMix(mixStr: string): ValidatorMix {
+  if (!mixStr) return {};
+  const mix: ValidatorMix = {};
+  for (const part of mixStr.split(",")) {
+    const [name, val] = part.split("=");
+    if (!name || val === undefined) {
+      console.error(`Invalid --mix format: "${part}". Expected "name=fraction".`);
+      process.exit(1);
+    }
+    mix[name.trim()] = parseFloat(val.trim());
+  }
+  return mix;
 }
 
 // ── Mode: serve existing .simdata file ──
@@ -108,7 +121,6 @@ const baseOverrides: Partial<SimulationConfig> = {
   endDate,
   validatorCount: parseInt(args.validators!),
   seed: parseInt(args.seed!),
-  authorAlwaysHonest: args["author-always-honest"]!,
   jitterStdDev: parseFloat(args.jitter!),
   epsilon: args.epsilon === "auto" ? "auto" : parseFloat(args.epsilon!),
   convergenceThreshold: parseFloat(args["convergence-threshold"]!),
@@ -122,11 +134,13 @@ if (args.scenario) {
   }
   results = scenarioFn(baseOverrides, pricePoints);
 } else {
+  const mix = parseMix(args.mix!);
+  const mixDesc = Object.entries(mix).map(([k, v]) => `${(v * 100).toFixed(0)}% ${k}`).join(", ") || "honest";
   const config: SimulationConfig = {
     ...DEFAULT_CONFIG,
     ...baseOverrides,
-    maliciousFraction: parseFloat(args.malicious!),
-    label: `${(parseFloat(args.malicious!) * 100).toFixed(0)}% malicious`,
+    validatorMix: mix,
+    label: mixDesc,
   };
   console.log(`\n[Single simulation]`);
   results = [runSimulation(config, pricePoints)];
