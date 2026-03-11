@@ -9,6 +9,7 @@ export const DEFAULT_CONFIG: SimulationConfig = {
   seed: 42,
   authorAlwaysHonest: true,
   jitterStdDev: 0.001, // 0.1% price jitter
+  convergenceThreshold: 0.5, // 0.5% deviation threshold for convergence
   label: "default",
 };
 

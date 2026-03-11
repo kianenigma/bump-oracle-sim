@@ -6,3 +6,4 @@ dist/
 *.simdata
 bun.lockb
 bun.lock
+.DS_Store

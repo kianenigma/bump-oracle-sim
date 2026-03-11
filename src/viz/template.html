@@ -422,7 +422,8 @@
           <div class="row"><span class="label">Total blocks</span><span class="value">${s.totalBlocks.toLocaleString()}</span></div>
           <div class="row"><span class="label">Mean dev %</span><span class="value">${s.meanDeviationPct.toFixed(4)}%</span></div>
           <div class="row"><span class="label">Max dev %</span><span class="value">${s.maxDeviationPct.toFixed(4)}%</span></div>
-          <div class="row"><span class="label">Convergence</span><span class="value">${(s.convergenceRate*100).toFixed(1)}%</span></div>
+          <div class="row"><span class="label">Convergence (<${s.convergenceThreshold}%)</span><span class="value">${(s.convergenceRate*100).toFixed(1)}%</span></div>
+          <div class="row"><span class="label">Dev integral</span><span class="value">${s.deviationIntegral.toFixed(2)} %-s</span></div>
           <div class="row"><span class="label">Epsilon</span><span class="value">${s.epsilon.toFixed(6)}</span></div>
         `;
       } else {
@@ -434,7 +435,8 @@
             <strong>${label}</strong>
             <div class="row"><span class="label">Mean dev</span><span class="value">${s.meanDeviationPct.toFixed(4)}%</span></div>
             <div class="row"><span class="label">Max dev</span><span class="value">${s.maxDeviationPct.toFixed(4)}%</span></div>
-            <div class="row"><span class="label">Convergence</span><span class="value">${(s.convergenceRate*100).toFixed(1)}%</span></div>
+            <div class="row"><span class="label">Convergence (<${s.convergenceThreshold}%)</span><span class="value">${(s.convergenceRate*100).toFixed(1)}%</span></div>
+            <div class="row"><span class="label">Dev integral</span><span class="value">${s.deviationIntegral.toFixed(2)} %-s</span></div>
           </div>`;
         });
         summaryEl.innerHTML = html;
@@ -730,7 +732,8 @@
             <div class="row"><span class="label">Total blocks</span><span class="value">${s.totalBlocks.toLocaleString()}</span></div>
             <div class="row"><span class="label">Mean dev %</span><span class="value">${s.meanDeviationPct.toFixed(4)}%</span></div>
             <div class="row"><span class="label">Max dev %</span><span class="value">${s.maxDeviationPct.toFixed(4)}%</span></div>
-            <div class="row"><span class="label">Convergence</span><span class="value">${(s.convergenceRate*100).toFixed(1)}%</span></div>
+            <div class="row"><span class="label">Convergence (<${s.convergenceThreshold}%)</span><span class="value">${(s.convergenceRate*100).toFixed(1)}%</span></div>
+            <div class="row"><span class="label">Dev integral</span><span class="value">${s.deviationIntegral.toFixed(2)} %-s</span></div>
             <div class="row"><span class="label">Epsilon</span><span class="value">${s.epsilon.toFixed(6)}</span></div>
           `;
         } else {
@@ -742,7 +745,8 @@
               <strong>${label}</strong>
               <div class="row"><span class="label">Mean dev</span><span class="value">${s.meanDeviationPct.toFixed(4)}%</span></div>
               <div class="row"><span class="label">Max dev</span><span class="value">${s.maxDeviationPct.toFixed(4)}%</span></div>
-              <div class="row"><span class="label">Convergence</span><span class="value">${(s.convergenceRate*100).toFixed(1)}%</span></div>
+              <div class="row"><span class="label">Convergence (<${s.convergenceThreshold}%)</span><span class="value">${(s.convergenceRate*100).toFixed(1)}%</span></div>
+              <div class="row"><span class="label">Dev integral</span><span class="value">${s.deviationIntegral.toFixed(2)} %-s</span></div>
             </div>`;
           });
           summaryEl.innerHTML = html;

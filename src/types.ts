@@ -45,6 +45,7 @@ export interface SimulationConfig {
   seed: number;
   authorAlwaysHonest: boolean;
   jitterStdDev: number; // price jitter std dev as fraction (e.g. 0.001 = 0.1%)
+  convergenceThreshold: number; // deviation % threshold for convergence (default 0.1)
   label: string;
 }
 
@@ -61,7 +62,9 @@ export interface SimulationSummary {
   meanDeviationPct: number;
   maxDeviationPct: number;
   epsilon: number;
-  convergenceRate: number; // fraction of blocks where deviation < 1%
+  convergenceRate: number; // fraction of blocks where deviation < threshold
+  convergenceThreshold: number; // the threshold used (in %)
+  deviationIntegral: number; // integral of deviationPct over time (%-seconds)
 }
 
 export interface CacheMetadata {

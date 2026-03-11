@@ -33,7 +33,7 @@ export const scenarios: Record<string, ScenarioFn> = {
   },
 
   "sweep-malicious-and-epsilon"(overrides, pricePoints) {
-    const fractions = [0, 0.1, 0.3, 0.49];
+    const fractions = [0, 0.1, 0.2, 0.3];
     const epsilons = [(DEFAULT_CONFIG.epsilon as number) / 5, DEFAULT_CONFIG.epsilon, (DEFAULT_CONFIG.epsilon as number) * 5];
     const results: SimulationResult[] = [];
 

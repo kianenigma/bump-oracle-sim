@@ -23,6 +23,7 @@ const { values: args } = parseArgs({
     "fetch-only": { type: "boolean", default: false },
     "author-always-honest": { type: "boolean", default: DEFAULT_CONFIG.authorAlwaysHonest },
     jitter: { type: "string", default: String(DEFAULT_CONFIG.jitterStdDev) },
+    "convergence-threshold": { type: "string", default: String(DEFAULT_CONFIG.convergenceThreshold) },
     downsampling: { type: "string", default: "auto" },
     "list-scenarios": { type: "boolean", default: false },
     "export-html": { type: "string" },
@@ -51,6 +52,7 @@ Options:
   --fetch-only                 Only fetch and cache price data, don't simulate
   --author-always-honest       Block author is always honest (default: true)
   --jitter <fraction>          Price jitter std dev as fraction (default: ${DEFAULT_CONFIG.jitterStdDev})
+  --convergence-threshold <%>  Convergence threshold in % (default: ${DEFAULT_CONFIG.convergenceThreshold})
   --downsampling <none|auto>   Downsample data for HTML export (default: auto)
   --list-scenarios             List available named scenarios
   --export-html <path>         Export self-contained HTML file (old behavior)
@@ -109,6 +111,7 @@ const baseOverrides: Partial<SimulationConfig> = {
   authorAlwaysHonest: args["author-always-honest"]!,
   jitterStdDev: parseFloat(args.jitter!),
   epsilon: args.epsilon === "auto" ? "auto" : parseFloat(args.epsilon!),
+  convergenceThreshold: parseFloat(args["convergence-threshold"]!),
 };
 
 if (args.scenario) {
