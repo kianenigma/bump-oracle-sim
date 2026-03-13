@@ -22,15 +22,16 @@ function nextTF(tf: number): number {
   return TIMEFRAMES[TIMEFRAMES.length - 1];
 }
 
-function buildMetaResponse(index: SimDataIndex): ApiMetaResponse {
+function buildMetaResponse(index: SimDataIndex, filterIndices?: number[]): ApiMetaResponse {
+  const indices = filterIndices ?? index.scenarios.map((_, i) => i);
   return {
-    scenarioCount: index.scenarioCount,
-    scenarios: index.scenarios.map((s, i) => ({
+    scenarioCount: indices.length,
+    scenarios: indices.map((i) => ({
       index: i,
-      config: s.config,
-      summary: s.summary,
-      timeRange: s.timeRange,
-      blockCount: s.blockCount,
+      config: index.scenarios[i].config,
+      summary: index.scenarios[i].summary,
+      timeRange: index.scenarios[i].timeRange,
+      blockCount: index.scenarios[i].blockCount,
     })),
   };
 }
@@ -79,7 +80,8 @@ async function buildDataResponse(
   from: number,
   to: number,
   tf: number,
-  scenarioFilter: string
+  scenarioFilter: string,
+  allowedIndices?: number[],
 ): Promise<ApiDataResponse> {
   const requestedTF = tf;
 
@@ -95,23 +97,27 @@ async function buildDataResponse(
     tf = nextTF(tf);
   }
 
-  // Load real price from first scenario
-  const firstData = await loadScenarioRange(outputDir, 0, index.scenarios[0], paddedFrom, paddedTo);
-  const realOhlc = aggregateOHLC(firstData.timestamps, firstData.realPrices, paddedFrom, paddedTo, tf);
-  const realLine = aggregateLine(firstData.timestamps, firstData.realPrices, paddedFrom, paddedTo, tf);
-
   // Determine which scenarios to include
   let scenarioIndices: number[];
   if (scenarioFilter === "all") {
-    scenarioIndices = index.scenarios.map((_, i) => i);
+    scenarioIndices = allowedIndices ?? index.scenarios.map((_, i) => i);
   } else {
     const idx = parseInt(scenarioFilter);
-    scenarioIndices = isNaN(idx) ? index.scenarios.map((_, i) => i) : [idx];
+    if (!isNaN(idx) && (!allowedIndices || allowedIndices.includes(idx))) {
+      scenarioIndices = [idx];
+    } else {
+      scenarioIndices = allowedIndices ?? index.scenarios.map((_, i) => i);
+    }
   }
 
+  // Load real price from first available scenario
+  const firstIdx = scenarioIndices[0];
+  const firstData = await loadScenarioRange(outputDir, firstIdx, index.scenarios[firstIdx], paddedFrom, paddedTo);
+  const realOhlc = aggregateOHLC(firstData.timestamps, firstData.realPrices, paddedFrom, paddedTo, tf);
+  const realLine = aggregateLine(firstData.timestamps, firstData.realPrices, paddedFrom, paddedTo, tf);
+
   const oracles = await Promise.all(scenarioIndices.map(async (idx) => {
-    // Reuse firstData for scenario 0
-    const data = idx === 0
+    const data = idx === firstIdx
       ? firstData
       : await loadScenarioRange(outputDir, idx, index.scenarios[idx], paddedFrom, paddedTo);
     return {
@@ -136,11 +142,12 @@ async function buildDataResponse(
 export async function startServer(
   outputDir: string,
   port: number,
-  openBrowser: boolean
+  openBrowser: boolean,
+  filterIndices?: number[],
 ): Promise<void> {
   const index = await loadIndex(outputDir);
   const templateHtml = await Bun.file(TEMPLATE_PATH).text();
-  const metaResponse = JSON.stringify(buildMetaResponse(index));
+  const metaResponse = JSON.stringify(buildMetaResponse(index, filterIndices));
 
   const server = Bun.serve({
     port,
@@ -175,7 +182,7 @@ export async function startServer(
           });
         }
 
-        const result = await buildDataResponse(outputDir, index, from, to, tf, scenario);
+        const result = await buildDataResponse(outputDir, index, from, to, tf, scenario, filterIndices);
         return new Response(JSON.stringify(result), {
           headers: {
             "Content-Type": "application/json",

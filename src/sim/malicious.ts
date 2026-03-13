@@ -6,6 +6,10 @@ import type { PriceEndpoint } from "./price-endpoint.js";
 // How many blocks behind the DelayedValidator reads its price (60s at 6s blocks)
 const DELAY_BLOCKS = 10;
 
+// TODO: validator with extra jitter
+// TODO: Bump(2x,4x,8x)
+// TODO: allow onchain to receive a coefficient as well.
+
 /**
  * Malicious validator that uses an inverse strategy:
  * - produceBump: returns the opposite direction of what an honest validator would

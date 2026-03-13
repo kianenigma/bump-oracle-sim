@@ -1,6 +1,7 @@
 import { join } from "path";
 import type { SimulationResult } from "../types.js";
 import { scoreSimulation, scoreEpsilons, type ResearchCriteria, type EpsilonScore } from "./research-criteria.js";
+import { formatMix } from "../mix.js";
 
 interface DetailRow {
   epsilon: number;
@@ -112,10 +113,4 @@ export function generateReport(
 
   Bun.write(outputPath, JSON.stringify(report, null, 2));
   console.log(`Report saved to ${outputPath}`);
-}
-
-function formatMix(mix: Record<string, number>): string {
-  const entries = Object.entries(mix);
-  if (entries.length === 0) return "0% (baseline)";
-  return entries.map(([k, v]) => `${(v * 100).toFixed(0)}% ${k}`).join(", ");
 }

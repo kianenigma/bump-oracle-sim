@@ -1,4 +1,5 @@
-import type { SimulationConfig, SimulationResult, BlockMetrics, SimulationSummary, PricePoint, ValidatorMix } from "../types.js";
+import type { SimulationConfig, SimulationResult, BlockMetrics, SimulationSummary, PricePoint } from "../types.js";
+import { mixFraction, mixJitter } from "../mix.js";
 import { mulberry32 } from "../rng.js";
 import { PriceEndpoint } from "./price-endpoint.js";
 import { HonestValidator, type ValidatorAgent } from "./validator.js";
@@ -48,15 +49,17 @@ export function runSimulation(
   const mix = config.validatorMix;
 
   // Calculate counts for each non-honest type
-  const typeCounts: { name: string; count: number; ctor: ValidatorCtor }[] = [];
+  const typeCounts: { name: string; count: number; ctor: ValidatorCtor; jitter: number }[] = [];
   let nonHonestTotal = 0;
-  for (const [name, fraction] of Object.entries(mix)) {
+  for (const [name, entry] of Object.entries(mix)) {
+    if (name === "honest") continue; // honest entry is jitter-only, not a type
     const ctor = VALIDATOR_REGISTRY[name];
     if (!ctor) {
       throw new Error(`Unknown validator type "${name}". Available: ${Object.keys(VALIDATOR_REGISTRY).join(", ")}`);
     }
+    const fraction = mixFraction(entry);
     const count = Math.floor(config.validatorCount * fraction);
-    typeCounts.push({ name, count, ctor });
+    typeCounts.push({ name, count, ctor, jitter: mixJitter(entry, config.jitterStdDev) });
     nonHonestTotal += count;
   }
 
@@ -67,16 +70,17 @@ export function runSimulation(
 
   let nextIndex = 0;
 
-  // Honest validators first
+  // Honest validators first (use per-type jitter if "honest" key is in the mix)
+  const honestJitter = mix["honest"] ? mixJitter(mix["honest"], config.jitterStdDev) : config.jitterStdDev;
   for (let i = 0; i < honestCount; i++) {
-    validators.push(new HonestValidator(nextIndex, endpoint, mulberry32(config.seed + nextIndex + 1), config.jitterStdDev));
+    validators.push(new HonestValidator(nextIndex, endpoint, mulberry32(config.seed + nextIndex + 1), honestJitter));
     nextIndex++;
   }
 
-  // Non-honest types
-  for (const { name, count, ctor } of typeCounts) {
+  // Non-honest types (each with its own jitter)
+  for (const { name, count, ctor, jitter } of typeCounts) {
     for (let i = 0; i < count; i++) {
-      validators.push(new ctor(nextIndex, endpoint, mulberry32(config.seed + nextIndex + 1), config.jitterStdDev));
+      validators.push(new ctor(nextIndex, endpoint, mulberry32(config.seed + nextIndex + 1), jitter));
       nextIndex++;
     }
   }

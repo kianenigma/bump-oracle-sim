@@ -1,5 +1,6 @@
 import type { SimulationSummary, SimulationResult } from "../types.js";
 import { BLOCK_TIME_SECONDS } from "../config.js";
+import { isBaselineMix, hasAdversaryAtFraction } from "../mix.js";
 
 export interface ResearchCriteria {
   // Weights (0-1). Higher = more important in the composite score.
@@ -116,16 +117,14 @@ export function scoreEpsilons(
   const scores: EpsilonScore[] = [];
 
   for (const [epsilon, group] of byEpsilon) {
-    // Baseline: the run with empty validator mix (0% malicious)
-    const baseline = group.find(r => Object.keys(r.config.validatorMix).length === 0);
+    // Baseline: the run with no non-honest validators
+    const baseline = group.find(r => isBaselineMix(r.config.validatorMix));
     const baselineScore = baseline ? scoreSimulation(baseline.summary, criteria) : 0;
 
     // Worst score among 33% adversarial runs
     let worstScore33 = 1;
     for (const r of group) {
-      const mix = r.config.validatorMix;
-      const fractions = Object.values(mix);
-      if (fractions.length === 1 && Math.abs(fractions[0] - 0.33) < 0.01) {
+      if (hasAdversaryAtFraction(r.config.validatorMix, 0.33)) {
         const s = scoreSimulation(r.summary, criteria);
         if (s < worstScore33) worstScore33 = s;
       }

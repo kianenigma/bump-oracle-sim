@@ -7,6 +7,7 @@ import { maxBlockDelta } from "../data/interpolator.js";
 import { ChunkWriter, writeIndex } from "../viz/writer.js";
 import { loadCriteria } from "./research-criteria.js";
 import { generateReport } from "./research-report.js";
+import { formatMix } from "../mix.js";
 
 export type ScenarioFn = (
   baseConfig: Partial<SimulationConfig>,
@@ -264,7 +265,7 @@ export const scenarios: Record<string, ScenarioFn> = {
     const configs: SimulationConfig[] = [];
 
     for (const mix of mixes) {
-      const label = Object.entries(mix).map(([k, v]) => `${(v * 100).toFixed(0)}% ${k}`).join(", ") || "baseline";
+      const label = formatMix(mix);
       configs.push(mergeConfig({ ...overrides, validatorMix: mix, label }));
     }
 
@@ -325,6 +326,27 @@ export const scenarios: Record<string, ScenarioFn> = {
     return runBatch([config], pricePoints, outputDir, threadCount);
   },
 
+  /** For all malicious variants, show 49% and 50% */
+  async "edge-malicious"(overrides, pricePoints, outputDir, threadCount) {
+    const mixes: ValidatorMix[] = [
+      { malicious: 0.49 },
+      { malicious: 0.50 },
+      { pushy: 0.49 },
+      { pushy: 0.50 },
+      { noop: 0.49 },
+      { noop: 0.50 },
+      { delayed: 0.49 },
+      { delayed: 0.50 },
+      { drift: 0.49 },
+      { drift: 0.50 },
+    ];
+    const configs: SimulationConfig[] = [];
+    for (const mix of mixes) {
+      configs.push(mergeConfig({ ...overrides, validatorMix: mix, label: formatMix(mix) }));
+  }
+    return runBatch(configs, pricePoints, outputDir, threadCount);
+  },
+
   /**
    * Research: grid search over epsilon multipliers × adversary mixes.
    * Scores each combination and produces a report recommending the optimal epsilon.
@@ -371,7 +393,7 @@ export const scenarios: Record<string, ScenarioFn> = {
     for (const mult of multipliers) {
       const eps = autoEpsilon * mult;
       for (const mix of mixes) {
-        const mixDesc = Object.entries(mix).map(([k, v]) => `${(v * 100).toFixed(0)}% ${k}`).join(", ") || "baseline";
+        const mixDesc = formatMix(mix);
         const label = `eps=${eps.toFixed(6)} (${mult}x), ${mixDesc}`;
         configs.push(mergeConfig({
           ...overrides,

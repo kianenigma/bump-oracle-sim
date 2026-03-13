@@ -36,10 +36,15 @@ export interface BlockMetrics {
   deviationPct: number; // percentage deviation
 }
 
-// Maps validator class name to fraction of total validators (0.0 - 1.0).
+// Per-type entry: plain number = fraction with default jitter, or object for custom jitter.
+// Example: 0.33 or { fraction: 0.33, jitter: 0.005 }
+export type ValidatorMixEntry = number | { fraction?: number; jitter?: number };
+
+// Maps validator type name to its config.
 // "honest" is implicit: its fraction = 1 - sum(all other fractions).
-// Example: { malicious: 0.2, pushy: 0.1 } means 70% honest, 20% malicious, 10% pushy.
-export type ValidatorMix = Record<string, number>;
+// A "honest" key is allowed to override jitter only (fraction is ignored).
+// Example: { malicious: 0.2, pushy: { fraction: 0.1, jitter: 0.005 } }
+export type ValidatorMix = Record<string, ValidatorMixEntry>;
 
 export interface SimulationConfig {
   startDate: string; // YYYY-MM-DD

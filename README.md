@@ -53,6 +53,9 @@ Options:
   --scenario <name>             Run a named scenario
   --output <path>               Output directory (default: output.simdata)
   --data <path>                 Serve an existing .simdata directory without re-running sim
+  --label <substring>           Filter scenarios by label (case-insensitive substring, use with --data)
+  --index <N>                   Filter to a single scenario by index (use with --data)
+  --reanalyze                   Re-run scoring/report on existing --data without re-simulating
   --fetch-only                  Only fetch and cache price data, don't simulate
   --threads <number>            Worker threads for batch scenarios (default: CPU count)
   --port <number>               Server port (default: 3000)
@@ -153,9 +156,30 @@ bun run src/main.ts --scenario research --start-date 2021-12-03 --end-date 2021-
 # Use fewer threads
 bun run src/main.ts --scenario research --start-date 2021-12-03 --end-date 2021-12-13 --no-open --threads 4
 
-# Serve results for visual inspection afterward
+# Serve all results for visual inspection afterward
 bun run src/main.ts --data research_2021-12-03_2021-12-13.simdata
+
+# Serve a single scenario by index
+bun run src/main.ts --data research_2021-12-03_2021-12-13.simdata --index 42
+
+# Serve all scenarios matching a label (case-insensitive substring)
+bun run src/main.ts --data research_2021-12-03_2021-12-13.simdata --label "1.0x"
+bun run src/main.ts --data research_2021-12-03_2021-12-13.simdata --label baseline
 ```
+
+### Re-analyzing with different weights
+
+After running the research scenario once, you can re-run the scoring and report generation instantly (no re-simulation) with different criteria weights via environment variables:
+
+```bash
+# Re-analyze with higher resilience weight
+WEIGHT_RESILIENCE=0.8 bun run src/main.ts --data research_2021-12-03_2021-12-13.simdata --reanalyze
+
+# Re-analyze with stricter max deviation threshold
+MAX_ACCEPTABLE_DEVIATION=5 bun run src/main.ts --data research_2021-12-03_2021-12-13.simdata --reanalyze
+```
+
+This reads all configs and summaries from the existing `index.json`, applies the current criteria, and overwrites `research_report.json` with the new results.
 
 ### Report output
 

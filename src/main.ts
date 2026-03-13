@@ -3,13 +3,16 @@ import { mkdirSync, existsSync, statSync, rmSync } from "fs";
 import { join } from "path";
 import { cpus } from "os";
 import { DEFAULT_CONFIG, CANDLE_INTERVAL } from "./config.js";
-import type { SimulationConfig, SimulationResult, ScenarioMeta, ValidatorMix } from "./types.js";
+import type { SimulationConfig, SimulationResult, ScenarioMeta } from "./types.js";
+import { parseMixCli, formatMix } from "./mix.js";
 import { fetchCandles } from "./data/fetcher.js";
 import { interpolateToBlocks } from "./data/interpolator.js";
 import { runSimulation } from "./sim/engine.js";
-import { ChunkWriter, writeIndex } from "./viz/writer.js";
+import { ChunkWriter, writeIndex, loadIndex } from "./viz/writer.js";
 import { startServer } from "./viz/server.js";
 import { scenarios, listScenarios } from "./analysis/scenarios.js";
+import { loadCriteria } from "./analysis/research-criteria.js";
+import { generateReport } from "./analysis/research-report.js";
 
 const { values: args } = parseArgs({
   args: Bun.argv.slice(2),
@@ -28,6 +31,9 @@ const { values: args } = parseArgs({
     "list-scenarios": { type: "boolean", default: false },
     port: { type: "string", default: "3000" },
     data: { type: "string" },
+    label: { type: "string" },
+    index: { type: "string" },
+    reanalyze: { type: "boolean", default: false },
     "no-open": { type: "boolean", default: false },
     threads: { type: "string", default: String(cpus().length) },
     force: { type: "boolean", default: false },
@@ -56,6 +62,9 @@ Options:
   --list-scenarios              List available named scenarios
   --port <number>               Server port (default: 3000)
   --data <path>                 Serve existing .simdata directory without re-running simulation
+  --label <substring>           Filter scenarios by label (case-insensitive substring, use with --data)
+  --index <N>                   Filter to a single scenario by index (use with --data)
+  --reanalyze                   Re-run scoring/report on existing --data without re-simulating
   --no-open                     Don't auto-open browser
   --threads <number>            Worker threads for batch scenarios (default: CPU count)
   --force                       Overwrite existing output directory
@@ -69,20 +78,6 @@ if (args["list-scenarios"]) {
   process.exit(0);
 }
 
-// Parse --mix "malicious=0.2,pushy=0.1" into ValidatorMix
-function parseMix(mixStr: string): ValidatorMix {
-  if (!mixStr) return {};
-  const mix: ValidatorMix = {};
-  for (const part of mixStr.split(",")) {
-    const [name, val] = part.split("=");
-    if (!name || val === undefined) {
-      console.error(`Invalid --mix format: "${part}". Expected "name=fraction".`);
-      process.exit(1);
-    }
-    mix[name.trim()] = parseFloat(val.trim());
-  }
-  return mix;
-}
 
 /** Ensure outputDir is ready. Error if it already exists (unless --force). */
 function ensureOutputDir(dir: string, force: boolean): void {
@@ -97,11 +92,82 @@ function ensureOutputDir(dir: string, force: boolean): void {
   mkdirSync(dir, { recursive: true });
 }
 
+// ── Mode: re-run analysis on existing results ──
+if (args.reanalyze) {
+  if (!args.data) {
+    console.error("Error: --reanalyze requires --data <path>");
+    process.exit(1);
+  }
+  const idx = await loadIndex(args.data);
+  const criteria = loadCriteria();
+
+  // Reconstruct SimulationResult[] from index
+  const results = idx.scenarios.map((s) => ({ config: s.config, summary: s.summary }));
+
+  // Read autoEpsilon from existing report, or derive from stored epsilons
+  const reportPath = join(args.data, "research_report.json");
+  let autoEpsilon: number;
+  if (existsSync(reportPath)) {
+    const prev = JSON.parse(await Bun.file(reportPath).text());
+    autoEpsilon = prev.autoEpsilon;
+  } else {
+    // Fallback: assume 1.0x multiplier exists — find the most common epsilon among baseline runs
+    const baselines = results.filter((r) => Object.keys(r.config.validatorMix).length === 0);
+    const epsilons = baselines.map((r) => r.config.epsilon as number);
+    autoEpsilon = epsilons.length > 0 ? epsilons[Math.floor(epsilons.length / 2)] : 0.0001;
+    console.log(`  Warning: no previous research_report.json found, inferred autoEpsilon=${autoEpsilon.toFixed(6)}`);
+  }
+
+  // Reconstruct multiplier map
+  const uniqueEpsilons = [...new Set(results.map((r) => r.config.epsilon as number))];
+  const epsilonMultipliers = new Map<number, number>();
+  for (const eps of uniqueEpsilons) {
+    epsilonMultipliers.set(eps, eps / autoEpsilon);
+  }
+
+  console.log(`\nRe-analyzing ${results.length} simulations from ${args.data}...`);
+  console.log(`  Auto-epsilon: ${autoEpsilon.toFixed(6)}`);
+  generateReport(results, epsilonMultipliers, criteria, autoEpsilon, reportPath);
+  process.exit(0);
+}
+
 // ── Mode: serve existing .simdata directory ──
 if (args.data) {
   console.log(`\nLoading simulation data from ${args.data}...`);
   const port = parseInt(args.port!);
-  await startServer(args.data, port, !args["no-open"]);
+
+  // Resolve --label / --index filters
+  let filterIndices: number[] | undefined;
+  if (args.label || args.index) {
+    const idx = await loadIndex(args.data);
+    if (args.index) {
+      const i = parseInt(args.index);
+      if (isNaN(i) || i < 0 || i >= idx.scenarioCount) {
+        console.error(`Error: index ${args.index} out of range (0..${idx.scenarioCount - 1})`);
+        process.exit(1);
+      }
+      filterIndices = [i];
+      console.log(`  Filtered to scenario #${i}: "${idx.scenarios[i].config.label}"`);
+    } else if (args.label) {
+      const needle = args.label.toLowerCase();
+      filterIndices = [];
+      for (let i = 0; i < idx.scenarioCount; i++) {
+        if (idx.scenarios[i].config.label.toLowerCase().includes(needle)) {
+          filterIndices.push(i);
+        }
+      }
+      if (filterIndices.length === 0) {
+        console.error(`Error: no scenarios match label "${args.label}". Use --data without --label to list all.`);
+        process.exit(1);
+      }
+      console.log(`  Matched ${filterIndices.length} scenario(s) for "${args.label}":`);
+      for (const i of filterIndices) {
+        console.log(`    #${i}: "${idx.scenarios[i].config.label}"`);
+      }
+    }
+  }
+
+  await startServer(args.data, port, !args["no-open"], filterIndices);
   process.exit(0);
 }
 
@@ -155,8 +221,8 @@ if (args.scenario) {
   await scenarioFn(baseOverrides, pricePoints, outputDir, threadCount);
 } else {
   // Single simulation
-  const mix = parseMix(args.mix!);
-  const mixDesc = Object.entries(mix).map(([k, v]) => `${(v * 100).toFixed(0)}% ${k}`).join(", ") || "honest";
+  const mix = parseMixCli(args.mix!);
+  const mixDesc = formatMix(mix);
   const config: SimulationConfig = {
     ...DEFAULT_CONFIG,
     ...baseOverrides,
