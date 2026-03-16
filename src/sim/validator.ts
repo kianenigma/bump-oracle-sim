@@ -18,6 +18,22 @@ export interface ValidatorAgent {
   ): boolean[];
 }
 
+/**
+ * Computes the number of bumps that minimizes |absDiff - n * epsilon|.
+ * Only rounds up when doing so STRICTLY reduces deviation (ties prefer fewer bumps).
+ * This avoids unnecessary price movements caused by jitter noise.
+ */
+export function optimalBumpCount(absDiff: number, epsilon: number, maxBumps: number): number {
+  if (epsilon <= 0 || maxBumps <= 0) return 0;
+  const base = Math.floor(absDiff / epsilon);
+  if (base >= maxBumps) return maxBumps;
+
+  const baseDev = absDiff - base * epsilon;       // deviation with `base` bumps
+  const nextDev = (base + 1) * epsilon - absDiff; // deviation with `base + 1` bumps
+
+  return nextDev < baseDev ? Math.min(base + 1, maxBumps) : base;
+}
+
 export class HonestValidator implements ValidatorAgent {
   readonly index: number;
   readonly isHonest = true;
@@ -46,10 +62,7 @@ export class HonestValidator implements ValidatorAgent {
     const targetPrice = this.endpoint.getJitteredPrice(blockIndex, this.rng, this.jitterStdDev);
     const diff = targetPrice - lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
-    const neededBumps = Math.min(
-      Math.round(Math.abs(diff) / epsilon),
-      bumps.length
-    );
+    const neededBumps = optimalBumpCount(Math.abs(diff), epsilon, bumps.length);
 
     // Activate bumps in the desired direction, up to neededBumps
     const mask = new Array(bumps.length).fill(false);

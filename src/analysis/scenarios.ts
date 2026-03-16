@@ -358,7 +358,7 @@ export const scenarios: Record<string, ScenarioFn> = {
 
     // Compute auto epsilon
     const maxDelta = maxBlockDelta(pricePoints);
-    const autoEpsilon = maxDelta / base.validatorCount || 0.0001;
+    const autoEpsilon = 1 / base.validatorCount / 10;
     console.log(`  Auto-epsilon base: ${autoEpsilon.toFixed(6)}`);
 
     // Grid dimensions

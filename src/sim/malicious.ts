@@ -1,12 +1,13 @@
 import { Bump } from "../types.js";
 import type { BumpSubmission } from "../types.js";
-import type { ValidatorAgent } from "./validator.js";
+import { optimalBumpCount, type ValidatorAgent } from "./validator.js";
 import type { PriceEndpoint } from "./price-endpoint.js";
 
 // How many blocks behind the DelayedValidator reads its price (60s at 6s blocks)
 const DELAY_BLOCKS = 10;
 
 // TODO: validator with extra jitter
+// TODO: 2 new bad validators: copy-pasta,
 // TODO: Bump(2x,4x,8x)
 // TODO: allow onchain to receive a coefficient as well.
 
@@ -169,10 +170,7 @@ export class DelayedValidator implements ValidatorAgent {
     const targetPrice = this.endpoint.getJitteredPrice(this.staleIndex(blockIndex), this.rng, this.jitterStdDev);
     const diff = targetPrice - lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
-    const neededBumps = Math.min(
-      Math.round(Math.abs(diff) / epsilon),
-      bumps.length
-    );
+    const neededBumps = optimalBumpCount(Math.abs(diff), epsilon, bumps.length);
 
     const mask = new Array(bumps.length).fill(false);
     let activated = 0;
