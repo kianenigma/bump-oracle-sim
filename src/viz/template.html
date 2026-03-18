@@ -74,6 +74,7 @@
     #chart-tab.hidden, #stats-tab.hidden { display: none !important; }
     #price-chart { flex: 3; position: relative; min-height: 0; }
     #deviation-chart { flex: 1; border-top: 1px solid var(--border); position: relative; min-height: 0; }
+    .chart-label { position: absolute; top: 8px; left: 12px; font-size: 11px; color: var(--text-muted); z-index: 2; pointer-events: none; font-weight: 500; letter-spacing: 0.3px; }
 
     .drag-select { position: fixed; background: rgba(128,128,128,0.12); border-left: 2px solid rgba(128,128,128,0.6); border-right: 2px solid rgba(128,128,128,0.6); pointer-events: none; z-index: 50; }
 
@@ -227,8 +228,8 @@
     </div>
 
     <div id="chart-tab" style="flex:1;min-width:0;">
-      <div id="price-chart"></div>
-      <div id="deviation-chart"></div>
+      <div id="price-chart"><span class="chart-label">Price</span></div>
+      <div id="deviation-chart"><span class="chart-label">Deviation %</span></div>
     </div>
 
     <div id="stats-tab" class="hidden" style="flex:1;min-width:0;">
