@@ -156,6 +156,33 @@
     #stats-table tbody tr:nth-child(even) { background: var(--table-stripe); }
     #stats-table tbody tr:hover { background: var(--table-hover); }
     #stats-table td.num { text-align: left; font-variant-numeric: tabular-nums; }
+
+    /* Research tab */
+    #research-tab { padding: 20px 24px; overflow-y: auto; min-height: 0; }
+    #research-tab.hidden { display: none !important; }
+    .research-section { margin-bottom: 24px; }
+    .research-section h2 { font-size: 14px; font-weight: 600; margin-bottom: 10px; color: var(--text); }
+    .research-card {
+      background: var(--bg-surface); border: 1px solid var(--border); border-radius: 6px;
+      padding: 14px 18px; margin-bottom: 12px;
+    }
+    .research-card h3 { font-size: 12px; font-weight: 600; margin-bottom: 8px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    .research-kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 16px; font-size: 12px; }
+    .research-kv dt { color: var(--text-muted); }
+    .research-kv dd { color: var(--text); font-variant-numeric: tabular-nums; }
+    .research-highlight { color: #22c55e; font-weight: 600; }
+    #research-ranking { width: 100%; border-collapse: collapse; font-size: 12px; }
+    #research-ranking th { position: sticky; top: 0; background: var(--bg-surface); border-bottom: 2px solid var(--border); padding: 8px 10px; text-align: left; font-weight: 600; white-space: nowrap; }
+    #research-ranking td { padding: 6px 10px; border-bottom: 1px solid var(--border-light); white-space: nowrap; font-variant-numeric: tabular-nums; }
+    #research-ranking tbody tr:nth-child(even) { background: var(--table-stripe); }
+    #research-ranking tbody tr:hover { background: var(--table-hover); }
+    #research-ranking tbody tr:first-child td { font-weight: 600; }
+    .criteria-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+    .criteria-item { background: var(--bg-elevated); border-radius: 4px; padding: 8px 12px; font-size: 12px; display: flex; justify-content: space-between; }
+    .criteria-item .label { color: var(--text-muted); }
+    .criteria-item .value { color: var(--text); font-weight: 500; font-variant-numeric: tabular-nums; }
+    #fit-chart-container { position: relative; width: 100%; max-width: 700px; aspect-ratio: 7/4; }
+    #fit-chart { width: 100%; height: 100%; }
   </style>
 </head>
 <body>
@@ -170,6 +197,7 @@
       <div id="loading-bar"><div class="spinner-sm"></div><span>Loading...</span></div>
       <button class="tab-btn active" data-tab="chart">Chart</button>
       <button class="tab-btn" data-tab="stats">Stats</button>
+      <button class="tab-btn" data-tab="research" id="research-tab-btn" style="display:none;">Research</button>
       <button id="theme-toggle" title="Toggle light/dark theme">Light</button>
     </div>
   </div>
@@ -241,6 +269,25 @@
         <thead><tr id="stats-header"></tr></thead>
         <tbody id="stats-body"></tbody>
       </table>
+    </div>
+
+    <div id="research-tab" class="hidden" style="flex:1;min-width:0;">
+      <div class="research-section" id="research-conclusion"></div>
+      <div class="research-section" id="research-fit-section" style="display:none;">
+        <h2>Score vs Epsilon (Quadratic Fit)</h2>
+        <div id="fit-chart-container"><canvas id="fit-chart"></canvas></div>
+      </div>
+      <div class="research-section" id="research-ranking-section">
+        <h2>Epsilon Ranking</h2>
+        <table id="research-ranking">
+          <thead><tr id="research-ranking-header"></tr></thead>
+          <tbody id="research-ranking-body"></tbody>
+        </table>
+      </div>
+      <div class="research-section" id="research-criteria-section">
+        <h2>Scoring Criteria</h2>
+        <div class="criteria-grid" id="research-criteria-grid"></div>
+      </div>
     </div>
   </div>
 
@@ -315,6 +362,7 @@
       html.dataset.theme = isDark ? 'light' : 'dark';
       document.getElementById('theme-toggle').textContent = isDark ? 'Dark' : 'Light';
       applyChartTheme();
+      if (cachedResearchData) drawFitChart(cachedResearchData.ranking, cachedResearchData.interpolated);
     });
 
     // ── Tab switching ──
@@ -326,12 +374,16 @@
 
         document.getElementById('chart-tab').classList.toggle('hidden', currentTab !== 'chart');
         document.getElementById('stats-tab').classList.toggle('hidden', currentTab !== 'stats');
+        document.getElementById('research-tab').classList.toggle('hidden', currentTab !== 'research');
         document.getElementById('toolbar-tf').style.display = currentTab === 'chart' ? '' : 'none';
         document.getElementById('series-selector').style.display = currentTab === 'chart' ? '' : 'none';
 
         if (currentTab === 'chart') {
           priceChart.applyOptions({ width: priceChartEl.clientWidth, height: priceChartEl.clientHeight });
           devChart.applyOptions({ width: devChartEl.clientWidth, height: devChartEl.clientHeight });
+        }
+        if (currentTab === 'research' && cachedResearchData && cachedResearchData.interpolated) {
+          drawFitChart(cachedResearchData.ranking, cachedResearchData.interpolated);
         }
       });
     });
@@ -491,6 +543,234 @@
     }
 
     document.getElementById('stats-search').addEventListener('input', renderStatsRows);
+
+    // ── Research report rendering ──
+    let cachedResearchData = null;
+
+    function buildResearchTab(report) {
+      // Conclusion card
+      const conclusionEl = document.getElementById('research-conclusion');
+      const c = report.conclusion;
+      const interp = report.interpolated;
+      let conclusionHtml = `<div class="research-card"><h3>Optimal Epsilon</h3><dl class="research-kv">`;
+      conclusionHtml += `<dt>Epsilon</dt><dd class="research-highlight">${c.optimalEpsilon.toFixed(6)} (${c.multiplier.toFixed(2)}x auto)</dd>`;
+      conclusionHtml += `<dt>Composite Score</dt><dd class="research-highlight">${c.compositeScore.toFixed(3)}</dd>`;
+      conclusionHtml += `<dt>Auto-Epsilon Base</dt><dd>${report.autoEpsilon.toFixed(6)}</dd>`;
+      if (interp) {
+        conclusionHtml += `<dt>Method</dt><dd>${interp.method}</dd>`;
+      }
+      conclusionHtml += `</dl></div>`;
+      conclusionEl.innerHTML = conclusionHtml;
+
+      // Ranking table
+      const cols = [
+        { key: 'rank', label: '#' },
+        { key: 'epsilon', label: 'Epsilon' },
+        { key: 'multiplier', label: 'Multiplier' },
+        { key: 'compositeScore', label: 'Score' },
+        { key: 'baselineScore', label: 'Baseline' },
+        { key: 'worstScore33', label: 'Worst @33%' },
+        { key: 'resilienceGap', label: 'Gap' },
+      ];
+      const headerRow = document.getElementById('research-ranking-header');
+      headerRow.innerHTML = cols.map(c => `<th>${c.label}</th>`).join('');
+
+      const tbody = document.getElementById('research-ranking-body');
+      tbody.innerHTML = '';
+      report.ranking.forEach((r, i) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = [
+          `<td>${i + 1}</td>`,
+          `<td>${r.epsilon.toFixed(6)}</td>`,
+          `<td>${r.multiplier.toFixed(1)}x</td>`,
+          `<td>${r.compositeScore.toFixed(3)}</td>`,
+          `<td>${r.baselineScore.toFixed(3)}</td>`,
+          `<td>${r.worstScore33.toFixed(3)}</td>`,
+          `<td>${r.resilienceGap.toFixed(3)}</td>`,
+        ].join('');
+        tbody.appendChild(tr);
+      });
+
+      // Criteria grid
+      const grid = document.getElementById('research-criteria-grid');
+      const crit = report.criteria;
+      const items = [
+        ['Max Deviation', crit.weightMaxDeviation],
+        ['Convergence', crit.weightConvergence],
+        ['Mean Deviation', crit.weightMeanDeviation],
+        ['Integral', crit.weightIntegral],
+        ['Recovery', crit.weightRecovery],
+        ['P95', crit.weightP95],
+        ['P99', crit.weightP99],
+        ['Resilience', crit.weightResilience],
+        ['Max Acceptable Dev %', crit.maxAcceptableDeviation],
+        ['Conv. Threshold %', crit.convergenceThreshold],
+      ];
+      grid.innerHTML = items.map(([label, val]) =>
+        `<div class="criteria-item"><span class="label">${label}</span><span class="value">${typeof val === 'number' ? val : val}</span></div>`
+      ).join('');
+
+      // Fit chart: only mark visible; actual drawing deferred to tab switch (canvas needs layout dimensions)
+      if (interp && interp.coefficients) {
+        document.getElementById('research-fit-section').style.display = '';
+      }
+    }
+
+    function drawFitChart(ranking, interp) {
+      const canvas = document.getElementById('fit-chart');
+      const container = document.getElementById('fit-chart-container');
+      const dpr = window.devicePixelRatio || 1;
+      const w = container.clientWidth;
+      const h = container.clientHeight;
+      canvas.width = w * dpr;
+      canvas.height = h * dpr;
+      canvas.style.width = w + 'px';
+      canvas.style.height = h + 'px';
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+
+      const isDark = document.documentElement.dataset.theme === 'dark';
+      const bgColor = isDark ? '#1b1d23' : '#f7f7f5';
+      const gridColor = isDark ? '#2a2d34' : '#e0dfda';
+      const textColor = isDark ? '#8b8d94' : '#6b6b68';
+      const pointColor = isDark ? '#d4d4d8' : '#3c3c3a';
+      const curveColor = '#22c55e';
+      const optimumColor = '#eab308';
+
+      // Data
+      const points = ranking.map(r => ({ x: r.multiplier, y: r.compositeScore })).sort((a, b) => a.x - b.x);
+      const [a, b, c] = interp.coefficients;
+
+      // Compute axis bounds
+      const xMin = Math.min(...points.map(p => p.x)) * 0.8;
+      const xMax = Math.max(...points.map(p => p.x)) * 1.1;
+      const allY = points.map(p => p.y);
+      // Sample curve to get Y range
+      for (let t = 0; t <= 1; t += 0.01) {
+        const xv = xMin + t * (xMax - xMin);
+        allY.push(a * xv * xv + b * xv + c);
+      }
+      const yMinRaw = Math.min(...allY);
+      const yMaxRaw = Math.max(...allY);
+      const yPad = (yMaxRaw - yMinRaw) * 0.15 || 0.05;
+      const yMin = Math.max(0, yMinRaw - yPad);
+      const yMax = Math.min(1, yMaxRaw + yPad);
+
+      // Chart area with padding for axes
+      const pad = { top: 20, right: 20, bottom: 40, left: 55 };
+      const cw = w - pad.left - pad.right;
+      const ch = h - pad.top - pad.bottom;
+      const toX = (v) => pad.left + ((v - xMin) / (xMax - xMin)) * cw;
+      const toY = (v) => pad.top + (1 - (v - yMin) / (yMax - yMin)) * ch;
+
+      // Background
+      ctx.fillStyle = bgColor;
+      ctx.fillRect(0, 0, w, h);
+
+      // Grid lines
+      ctx.strokeStyle = gridColor;
+      ctx.lineWidth = 1;
+      const yTicks = 5;
+      for (let i = 0; i <= yTicks; i++) {
+        const yv = yMin + (i / yTicks) * (yMax - yMin);
+        const py = toY(yv);
+        ctx.beginPath(); ctx.moveTo(pad.left, py); ctx.lineTo(w - pad.right, py); ctx.stroke();
+        ctx.fillStyle = textColor;
+        ctx.font = '10px -apple-system, sans-serif';
+        ctx.textAlign = 'right';
+        ctx.fillText(yv.toFixed(3), pad.left - 6, py + 3);
+      }
+      const xTicks = points.length;
+      for (const p of points) {
+        const px = toX(p.x);
+        ctx.strokeStyle = gridColor;
+        ctx.beginPath(); ctx.moveTo(px, pad.top); ctx.lineTo(px, h - pad.bottom); ctx.stroke();
+        ctx.fillStyle = textColor;
+        ctx.font = '10px -apple-system, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(p.x.toFixed(1) + 'x', px, h - pad.bottom + 14);
+      }
+
+      // Axis labels
+      ctx.fillStyle = textColor;
+      ctx.font = '11px -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('Epsilon Multiplier', pad.left + cw / 2, h - 4);
+      ctx.save();
+      ctx.translate(12, pad.top + ch / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.fillText('Composite Score', 0, 0);
+      ctx.restore();
+
+      // Quadratic curve
+      ctx.strokeStyle = curveColor;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      const steps = 200;
+      for (let i = 0; i <= steps; i++) {
+        const xv = xMin + (i / steps) * (xMax - xMin);
+        const yv = a * xv * xv + b * xv + c;
+        const px = toX(xv), py = toY(yv);
+        if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+      }
+      ctx.stroke();
+
+      // Optimum vertical line
+      ctx.strokeStyle = optimumColor;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 4]);
+      const optX = toX(interp.multiplier);
+      ctx.beginPath(); ctx.moveTo(optX, pad.top); ctx.lineTo(optX, h - pad.bottom); ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Optimum label
+      ctx.fillStyle = optimumColor;
+      ctx.font = 'bold 10px -apple-system, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText(interp.multiplier.toFixed(2) + 'x', optX, pad.top - 6);
+
+      // Data points
+      for (const p of points) {
+        const px = toX(p.x), py = toY(p.y);
+        ctx.fillStyle = bgColor;
+        ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = pointColor;
+        ctx.beginPath(); ctx.arc(px, py, 4, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // Legend
+      const lx = pad.left + 10, ly = pad.top + 12;
+      ctx.font = '10px -apple-system, sans-serif';
+      // Points
+      ctx.fillStyle = pointColor;
+      ctx.beginPath(); ctx.arc(lx, ly, 3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = textColor; ctx.textAlign = 'left';
+      ctx.fillText('Grid scores', lx + 8, ly + 3);
+      // Curve
+      ctx.strokeStyle = curveColor; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(lx - 6, ly + 16); ctx.lineTo(lx + 6, ly + 16); ctx.stroke();
+      ctx.fillStyle = textColor;
+      ctx.fillText('Quadratic fit', lx + 8, ly + 19);
+      // Optimum
+      ctx.strokeStyle = optimumColor; ctx.lineWidth = 1.5; ctx.setLineDash([4, 3]);
+      ctx.beginPath(); ctx.moveTo(lx - 6, ly + 32); ctx.lineTo(lx + 6, ly + 32); ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = textColor;
+      ctx.fillText('Interpolated optimum (' + interp.estimatedScore.toFixed(3) + ')', lx + 8, ly + 35);
+    }
+
+    async function loadResearchReport() {
+      try {
+        const res = await fetch('/api/research');
+        if (!res.ok) return;
+        const report = await res.json();
+        cachedResearchData = report;
+        document.getElementById('research-tab-btn').style.display = '';
+        buildResearchTab(report);
+      } catch (e) {
+        // No research data — tab stays hidden
+      }
+    }
 
     // ── Scenario sidebar ──
 
@@ -979,6 +1259,7 @@
         }
 
         buildStatsTable(serverMeta.scenarios.map(sc => ({ config: sc.config, summary: sc.summary })));
+        await loadResearchReport();
 
         let minFrom = Infinity, maxTo = -Infinity;
         for (const sc of serverMeta.scenarios) {

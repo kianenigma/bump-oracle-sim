@@ -22,6 +22,7 @@ interface InterpolatedOptimum {
   multiplier: number;
   estimatedScore: number;
   method: string;
+  coefficients: [number, number, number];
 }
 
 interface ResearchReport {
@@ -190,6 +191,7 @@ function fitQuadraticOptimum(
     multiplier: optimalMult,
     estimatedScore: optimalScore,
     method: "quadratic fit",
+    coefficients: coeffs,
   };
 }
 

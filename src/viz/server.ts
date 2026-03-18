@@ -1,4 +1,5 @@
 import { join } from "path";
+import { existsSync } from "fs";
 import type {
   SimDataIndex,
   ScenarioMeta,
@@ -194,6 +195,9 @@ export async function startServer(
   const templateHtml = await Bun.file(TEMPLATE_PATH).text();
   const metaResponse = JSON.stringify(buildMetaResponse(index, filterIndices, timeConstraint));
 
+  const reportPath = join(outputDir, "research_report.json");
+  const researchJson = existsSync(reportPath) ? await Bun.file(reportPath).text() : null;
+
   const server = Bun.serve({
     port,
     async fetch(req) {
@@ -207,6 +211,18 @@ export async function startServer(
 
       if (url.pathname === "/api/meta") {
         return new Response(metaResponse, {
+          headers: {
+            "Content-Type": "application/json",
+            "Access-Control-Allow-Origin": "*",
+          },
+        });
+      }
+
+      if (url.pathname === "/api/research") {
+        if (!researchJson) {
+          return new Response("Not Found", { status: 404 });
+        }
+        return new Response(researchJson, {
           headers: {
             "Content-Type": "application/json",
             "Access-Control-Allow-Origin": "*",
