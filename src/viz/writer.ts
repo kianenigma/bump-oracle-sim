@@ -19,6 +19,7 @@ export class ChunkWriter {
   private deviationPcts: number[] = [];
   private firstTimestamp = 0;
   private lastTimestamp = 0;
+  private chunkTimeRanges: Array<{ from: number; to: number }> = [];
 
   constructor(dir: string) {
     mkdirSync(dir, { recursive: true });
@@ -44,7 +45,7 @@ export class ChunkWriter {
     }
   }
 
-  finish(): { blockCount: number; chunkCount: number; timeRange: { from: number; to: number } } {
+  finish(): { blockCount: number; chunkCount: number; timeRange: { from: number; to: number }; chunkTimeRanges: Array<{ from: number; to: number }> } {
     if (this.timestamps.length > 0) {
       this.flushChunk();
     }
@@ -52,6 +53,7 @@ export class ChunkWriter {
       blockCount: this.totalBlocks,
       chunkCount: this.chunkIndex,
       timeRange: { from: this.firstTimestamp, to: this.lastTimestamp },
+      chunkTimeRanges: this.chunkTimeRanges,
     };
   }
 
@@ -65,6 +67,11 @@ export class ChunkWriter {
       oraclePrices: this.oraclePrices,
       deviationPcts: this.deviationPcts,
     };
+
+    this.chunkTimeRanges.push({
+      from: this.timestamps[0],
+      to: this.timestamps[this.timestamps.length - 1],
+    });
 
     const path = join(this.dir, `blocks_${this.chunkIndex}.json`);
     writeChunkStreaming(path, chunk);
@@ -129,10 +136,16 @@ export async function loadIndex(outputDir: string): Promise<SimDataIndex> {
   return Bun.file(indexPath).json();
 }
 
-/**
- * Load a specific chunk file for a scenario.
- */
-export async function loadChunk(outputDir: string, scenarioIndex: number, chunkIndex: number): Promise<BlockChunk> {
-  const path = join(outputDir, `scenario_${scenarioIndex}`, `blocks_${chunkIndex}.json`);
+export async function loadChunk(outputDir: string, scenarioDir: string, chunkIndex: number): Promise<BlockChunk> {
+  const path = join(outputDir, scenarioDir, `blocks_${chunkIndex}.json`);
   return Bun.file(path).json();
+}
+
+export function scenarioDirName(label: string, index: number): string {
+  const slug = label
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 80);
+  return slug ? `${slug}_${index}` : `scenario_${index}`;
 }

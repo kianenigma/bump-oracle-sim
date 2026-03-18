@@ -116,6 +116,10 @@ export interface ScenarioMeta {
   blockCount: number;
   chunkCount: number;
   timeRange: { from: number; to: number };
+  /** Per-chunk time ranges for fast chunk skipping (absent in legacy .simdata dirs). */
+  chunkTimeRanges?: Array<{ from: number; to: number }>;
+  /** Directory name within the .simdata dir (absent in legacy dirs → falls back to scenario_<idx>). */
+  dir?: string;
 }
 
 export interface SimDataIndex {

@@ -34,7 +34,8 @@
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); }
+    html, body { height: 100%; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); display: flex; flex-direction: column; }
 
     #header { padding: 10px 24px; background: var(--bg-surface); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
     #header-left { display: flex; align-items: center; gap: 16px; }
@@ -69,11 +70,10 @@
     .series-selector .sel-link:hover { color: var(--text); }
     .series-selector .sel-sep { font-size: 10px; color: var(--text-dim); }
 
-    /* Tab content */
-    #chart-tab { display: flex; flex-direction: column; height: calc(100vh - 100px); }
+    #chart-tab { display: flex; flex-direction: column; min-height: 0; }
     #chart-tab.hidden, #stats-tab.hidden { display: none !important; }
-    #price-chart { flex: 3; position: relative; }
-    #deviation-chart { flex: 1; border-top: 1px solid var(--border); position: relative; }
+    #price-chart { flex: 3; position: relative; min-height: 0; }
+    #deviation-chart { flex: 1; border-top: 1px solid var(--border); position: relative; min-height: 0; }
 
     .drag-select { position: fixed; background: rgba(128,128,128,0.12); border-left: 2px solid rgba(128,128,128,0.6); border-right: 2px solid rgba(128,128,128,0.6); pointer-events: none; z-index: 50; }
 
@@ -88,8 +88,58 @@
     .spinner { width: 24px; height: 24px; border: 3px solid var(--border); border-top-color: var(--text); border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 12px; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* ── Stats tab ── */
-    #stats-tab { padding: 20px 24px; overflow-y: auto; height: calc(100vh - 100px); }
+    #loading-bar {
+      display: none; align-items: center; gap: 6px;
+      padding: 2px 10px; border-radius: 4px;
+      background: rgba(234,179,8,0.15); border: 1px solid rgba(234,179,8,0.4);
+      font-size: 11px; color: #eab308; font-weight: 500;
+    }
+    #loading-bar.visible { display: flex; }
+    #loading-bar .spinner-sm {
+      width: 12px; height: 12px; border: 2px solid rgba(234,179,8,0.3);
+      border-top-color: #eab308; border-radius: 50%; animation: spin 0.8s linear infinite;
+      flex-shrink: 0;
+    }
+
+    #sidebar {
+      width: 240px; min-width: 240px; background: var(--bg-surface); border-right: 1px solid var(--border);
+      display: flex; flex-direction: column; overflow: hidden; transition: width 0.15s, min-width 0.15s;
+    }
+    #sidebar.collapsed { width: 0; min-width: 0; border-right: none; }
+    #sidebar-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 8px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+    }
+    #sidebar-header span { font-size: 11px; font-weight: 600; white-space: nowrap; }
+    #sidebar-actions { display: flex; gap: 6px; align-items: center; }
+    #sidebar-actions .sel-link { font-size: 10px; color: var(--text-muted); cursor: pointer; text-decoration: underline; user-select: none; }
+    #sidebar-actions .sel-link:hover { color: var(--text); }
+    #sidebar-actions .sel-sep { font-size: 10px; color: var(--text-dim); }
+    #sidebar-search {
+      margin: 6px 8px; padding: 4px 8px; font-size: 11px; border-radius: 4px;
+      background: var(--input-bg); border: 1px solid var(--input-border); color: var(--text); outline: none;
+    }
+    #sidebar-search::placeholder { color: var(--text-dim); }
+    #sidebar-search:focus { border-color: var(--text-muted); }
+    #scenario-list { flex: 1; overflow-y: auto; padding: 4px 0; }
+    #scenario-list label {
+      display: flex; align-items: center; gap: 6px; padding: 3px 10px; font-size: 11px; cursor: pointer;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    #scenario-list label:hover { background: var(--hover-bg); }
+    #scenario-list label input { cursor: pointer; flex-shrink: 0; }
+    #scenario-list label .sc-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+    #scenario-list label .sc-name { overflow: hidden; text-overflow: ellipsis; }
+
+    #sidebar-toggle {
+      background: var(--accent-bg); color: var(--text-muted); border: 1px solid var(--border);
+      border-radius: 4px; padding: 3px 7px; font-size: 11px; cursor: pointer; white-space: nowrap;
+    }
+    #sidebar-toggle:hover { background: var(--hover-bg); color: var(--text); }
+
+    #main-area { display: flex; flex: 1; overflow: hidden; min-height: 0; }
+
+    #stats-tab { padding: 20px 24px; overflow-y: auto; min-height: 0; }
     #stats-filter { display: flex; gap: 12px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
     #stats-filter input { background: var(--input-bg); border: 1px solid var(--input-border); border-radius: 4px; padding: 6px 10px; font-size: 13px; color: var(--text); outline: none; width: 300px; }
     #stats-filter input::placeholder { color: var(--text-dim); }
@@ -116,13 +166,13 @@
       <div id="config-info"></div>
     </div>
     <div id="header-right">
+      <div id="loading-bar"><div class="spinner-sm"></div><span>Loading...</span></div>
       <button class="tab-btn active" data-tab="chart">Chart</button>
       <button class="tab-btn" data-tab="stats">Stats</button>
       <button id="theme-toggle" title="Toggle light/dark theme">Light</button>
     </div>
   </div>
 
-  <!-- Chart toolbar (only visible when chart tab is active) -->
   <div class="toolbar" id="toolbar-tf">
     <div class="toolbar-group">
       <span class="toolbar-label">Timeframe:</span>
@@ -157,30 +207,63 @@
 
   <div class="series-selector" id="series-selector">
     <span style="font-size:11px;color:var(--text-muted);">Series:</span>
+    <div id="series-checkboxes" style="display:contents;"></div>
+    <span style="margin-left:auto;"></span>
+    <button id="sidebar-toggle" style="display:none;" title="Toggle scenario panel">Scenarios &#9656;</button>
   </div>
 
-  <!-- Chart tab -->
-  <div id="chart-tab">
-    <div id="price-chart"></div>
-    <div id="deviation-chart"></div>
-  </div>
-
-  <!-- Stats tab -->
-  <div id="stats-tab" class="hidden">
-    <div id="stats-filter">
-      <input type="text" id="stats-search" placeholder="Filter rows... (e.g. epsilon=0.000333 or 10% malicious)">
-      <span class="filter-hint">Type to filter, click column headers to sort</span>
+  <div id="main-area">
+    <div id="sidebar" class="collapsed">
+      <div id="sidebar-header">
+        <span>Scenarios</span>
+        <div id="sidebar-actions">
+          <span class="sel-link" id="sc-all">All</span>
+          <span class="sel-sep">/</span>
+          <span class="sel-link" id="sc-none">None</span>
+        </div>
+      </div>
+      <input type="text" id="sidebar-search" placeholder="Filter...">
+      <div id="scenario-list"></div>
     </div>
-    <table id="stats-table">
-      <thead><tr id="stats-header"></tr></thead>
-      <tbody id="stats-body"></tbody>
-    </table>
+
+    <div id="chart-tab" style="flex:1;min-width:0;">
+      <div id="price-chart"></div>
+      <div id="deviation-chart"></div>
+    </div>
+
+    <div id="stats-tab" class="hidden" style="flex:1;min-width:0;">
+      <div id="stats-filter">
+        <input type="text" id="stats-search" placeholder="Filter rows... (e.g. epsilon=0.000333 or 10% malicious)">
+        <span class="filter-hint">Type to filter, click column headers to sort</span>
+      </div>
+      <table id="stats-table">
+        <thead><tr id="stats-header"></tr></thead>
+        <tbody id="stats-body"></tbody>
+      </table>
+    </div>
   </div>
 
   <script>
     // ── Always server mode ──
 
-    const COLORS = ['#2962FF','#FF6D00','#00C853','#D500F9','#FF1744','#00E5FF','#FFEA00','#69F0AE'];
+    function generateColors(n) {
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const hue = (i * 137.508) % 360;
+        const s = 0.75, l = 0.58;
+        const a = s * Math.min(l, 1 - l);
+        const f = (k) => {
+          const t = (k + hue / 30) % 12;
+          return l - a * Math.max(Math.min(t - 3, 9 - t, 1), -1);
+        };
+        const r = Math.round(f(0) * 255);
+        const g = Math.round(f(8) * 255);
+        const b = Math.round(f(4) * 255);
+        out.push('#' + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1));
+      }
+      return out;
+    }
+    let COLORS = generateColors(32);
     const REAL_COLOR = '#888888';
 
     // ── State ──
@@ -188,16 +271,19 @@
     let currentView = 'candle';
     let currentTab = 'chart';
 
-    // Server mode state
     let serverMeta = null;
     let bufferedFrom = 0;
     let bufferedTo = 0;
     let bufferedTF = 0;
+    let bufferedScenarios = '';
     let lastServerData = null;
     let lastServerView = null;
     let fetchController = null;
     let fetchDebounceTimer = null;
     let totalTimeRange = null;
+    let activeScenarios = new Set();
+    let isInitialLoad = true;
+    const scenarioColorMap = new Map();
 
     // ── Theme ──
     function getThemeChartOptions() {
@@ -251,8 +337,15 @@
 
     // ── Loading overlay ──
     const loadingEl = document.getElementById('loading-overlay');
-    function showLoading() { loadingEl.classList.remove('hidden'); }
-    function hideLoading() { loadingEl.classList.add('hidden'); }
+    const loadingBar = document.getElementById('loading-bar');
+    function showLoading() {
+      if (isInitialLoad) loadingEl.classList.remove('hidden');
+      else loadingBar.classList.add('visible');
+    }
+    function hideLoading() {
+      loadingEl.classList.add('hidden');
+      loadingBar.classList.remove('visible');
+    }
 
 
     // ══════════════════════════════════════════════
@@ -395,6 +488,121 @@
 
     document.getElementById('stats-search').addEventListener('input', renderStatsRows);
 
+    // ── Scenario sidebar ──
+
+    let allScenarioEntries = [];
+
+    const sidebarEl = document.getElementById('sidebar');
+    const sidebarToggleBtn = document.getElementById('sidebar-toggle');
+    const scenarioListEl = document.getElementById('scenario-list');
+    const sidebarSearchEl = document.getElementById('sidebar-search');
+
+    sidebarToggleBtn.addEventListener('click', () => {
+      sidebarEl.classList.toggle('collapsed');
+      sidebarToggleBtn.textContent = sidebarEl.classList.contains('collapsed') ? 'Scenarios \u25B8' : '\u25C2 Scenarios';
+      setTimeout(() => {
+        priceChart.applyOptions({ width: priceChartEl.clientWidth });
+        devChart.applyOptions({ width: devChartEl.clientWidth });
+      }, 160);
+    });
+
+    document.getElementById('sc-all').addEventListener('click', () => toggleAllScenarios(true));
+    document.getElementById('sc-none').addEventListener('click', () => toggleAllScenarios(false));
+    sidebarSearchEl.addEventListener('input', filterScenarioList);
+
+    function buildScenarioSelector(scenarios) {
+      if (scenarios.length <= 1) {
+        sidebarToggleBtn.style.display = 'none';
+        sidebarEl.classList.add('collapsed');
+        return;
+      }
+
+      sidebarToggleBtn.style.display = '';
+      sidebarEl.classList.remove('collapsed');
+      sidebarToggleBtn.textContent = '\u25C2 Scenarios';
+
+      scenarioListEl.innerHTML = '';
+      allScenarioEntries = [];
+      scenarioColorMap.clear();
+
+      for (const sc of scenarios) {
+        const idx = scenarios.indexOf(sc);
+        const color = COLORS[idx % COLORS.length];
+        scenarioColorMap.set(sc.index, color);
+        const lbl = document.createElement('label');
+        lbl.title = sc.config.label || `Scenario ${sc.index}`;
+
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.checked = activeScenarios.has(sc.index);
+        cb.addEventListener('change', () => onScenarioToggle(sc.index, cb.checked));
+
+        const dot = document.createElement('span');
+        dot.className = 'sc-dot';
+        dot.style.background = color;
+
+        const name = document.createElement('span');
+        name.className = 'sc-name';
+        name.textContent = sc.config.label || `Scenario ${sc.index}`;
+
+        lbl.appendChild(cb);
+        lbl.appendChild(dot);
+        lbl.appendChild(name);
+        scenarioListEl.appendChild(lbl);
+        allScenarioEntries.push({ el: lbl, cb, label: (sc.config.label || '').toLowerCase(), index: sc.index });
+      }
+    }
+
+    function filterScenarioList() {
+      const q = sidebarSearchEl.value.toLowerCase();
+      for (const entry of allScenarioEntries) {
+        entry.el.style.display = (!q || entry.label.includes(q)) ? '' : 'none';
+      }
+    }
+
+    function onScenarioToggle(idx, enabled) {
+      if (enabled) activeScenarios.add(idx);
+      else activeScenarios.delete(idx);
+
+      if (activeScenarios.size === 0) {
+        clearPriceSeries();
+        clearDevSeries();
+        rebuildSeriesSelector();
+        return;
+      }
+
+      bufferedTF = 0;
+      const range = getVisibleTimeRange();
+      const from = range ? range.from : totalTimeRange.from;
+      const to = range ? range.to : totalTimeRange.to;
+      fetchData(from, to, currentTF, false);
+    }
+
+    function toggleAllScenarios(enabled) {
+      if (!serverMeta) return;
+      const visible = allScenarioEntries.filter(e => e.el.style.display !== 'none');
+      const targets = visible.length > 0 && visible.length < allScenarioEntries.length ? visible : allScenarioEntries;
+
+      if (enabled) {
+        for (const e of targets) { activeScenarios.add(e.index); e.cb.checked = true; }
+      } else {
+        for (const e of targets) { activeScenarios.delete(e.index); e.cb.checked = false; }
+      }
+
+      if (activeScenarios.size === 0) {
+        clearPriceSeries();
+        clearDevSeries();
+        rebuildSeriesSelector();
+        return;
+      }
+
+      bufferedTF = 0;
+      const range = getVisibleTimeRange();
+      const from = range ? range.from : totalTimeRange.from;
+      const to = range ? range.to : totalTimeRange.to;
+      fetchData(from, to, currentTF, false);
+    }
+
     // ── Charts ──
     const priceChartEl = document.getElementById('price-chart');
     const t = getThemeChartOptions();
@@ -431,43 +639,42 @@
 
     // ── Series selector checkboxes ──
     function rebuildSeriesSelector() {
-      const el = document.getElementById('series-selector');
-      while (el.children.length > 1) el.removeChild(el.lastChild);
+      const el = document.getElementById('series-checkboxes');
+      el.innerHTML = '';
 
-      if (activePriceSeries.length > 0) {
-        const rp = activePriceSeries[0];
-        addSelectorCheckbox(el, rp.label, rp.color, [rp]);
+      const hasSidebar = serverMeta && serverMeta.scenarios.length > 1;
+      if (!hasSidebar) {
+        for (let i = 0; i < activeDevSeries.length; i++) {
+          const priceSeries = activePriceSeries[1 + i];
+          const devSeries = activeDevSeries[i];
+          if (!priceSeries || !devSeries) continue;
+          const displayLabel = priceSeries.label.replace(/^Oracle: /, '');
+          addSelectorCheckbox(el, displayLabel, priceSeries.color, [priceSeries, devSeries]);
+        }
+
+        const allLink = document.createElement('span');
+        allLink.className = 'sel-link';
+        allLink.textContent = 'All';
+        allLink.addEventListener('click', () => setAllSeriesVisibility(true));
+
+        const sep = document.createElement('span');
+        sep.className = 'sel-sep';
+        sep.textContent = '/';
+
+        const noneLink = document.createElement('span');
+        noneLink.className = 'sel-link';
+        noneLink.textContent = 'None';
+        noneLink.addEventListener('click', () => setAllSeriesVisibility(false));
+
+        el.appendChild(allLink);
+        el.appendChild(sep);
+        el.appendChild(noneLink);
       }
-
-      for (let i = 0; i < activeDevSeries.length; i++) {
-        const priceSeries = activePriceSeries[1 + i];
-        const devSeries = activeDevSeries[i];
-        if (!priceSeries || !devSeries) continue;
-        const displayLabel = priceSeries.label.replace(/^Oracle: /, '');
-        addSelectorCheckbox(el, displayLabel, priceSeries.color, [priceSeries, devSeries]);
-      }
-
-      const allLink = document.createElement('span');
-      allLink.className = 'sel-link';
-      allLink.textContent = 'All';
-      allLink.addEventListener('click', () => setAllSeriesVisibility(true));
-
-      const sep = document.createElement('span');
-      sep.className = 'sel-sep';
-      sep.textContent = '/';
-
-      const noneLink = document.createElement('span');
-      noneLink.className = 'sel-link';
-      noneLink.textContent = 'None';
-      noneLink.addEventListener('click', () => setAllSeriesVisibility(false));
-
-      el.appendChild(allLink);
-      el.appendChild(sep);
-      el.appendChild(noneLink);
     }
 
     function setAllSeriesVisibility(visible) {
       for (const entry of activePriceSeries) {
+        if (entry.label === 'Real Price') continue;
         seriesVisibility[entry.label] = visible;
         entry.series.applyOptions({ visible });
         if (!visible && entry.priceLine) {
@@ -481,7 +688,7 @@
           entry.priceLine.applyOptions({ axisLabelVisible: false });
         }
       }
-      document.querySelectorAll('#series-selector input[type="checkbox"]').forEach(cb => {
+      document.querySelectorAll('#series-checkboxes input[type="checkbox"]').forEach(cb => {
         cb.checked = visible;
       });
     }
@@ -549,24 +756,23 @@
       lastServerView = currentView;
 
       const rpLabel = 'Real Price';
-      const rpVisible = seriesVisibility[rpLabel] !== false;
       if (isCandle) {
         const s = priceChart.addCandlestickSeries({
           upColor: '#5c6b73', downColor: '#5c6b73',
           wickUpColor: '#888', wickDownColor: '#888',
           borderUpColor: '#888', borderDownColor: '#888',
-          visible: rpVisible, lastValueVisible: false, priceLineVisible: false,
+          lastValueVisible: false, priceLineVisible: false,
         });
         s.setData(data.realPrice.ohlc);
         activePriceSeries.push({ series: s, label: rpLabel, color: REAL_COLOR, kind: 'candle' });
       } else {
-        const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, visible: rpVisible, lastValueVisible: false, priceLineVisible: false });
+        const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, lastValueVisible: false, priceLineVisible: false });
         s.setData(data.realPrice.line);
         activePriceSeries.push({ series: s, label: rpLabel, color: REAL_COLOR, kind: 'line' });
       }
 
       data.oracles.forEach((oracle, idx) => {
-        const color = COLORS[idx % COLORS.length];
+        const color = scenarioColorMap.get(oracle.index) || COLORS[idx % COLORS.length];
         const oLabel = `Oracle: ${oracle.label}`;
         const visible = seriesVisibility[oLabel] !== false;
 
@@ -593,14 +799,23 @@
       rebuildSeriesSelector();
     }
 
+    function activeScenarioParam() {
+      if (!serverMeta) return 'all';
+      const allIndices = serverMeta.scenarios.map(s => s.index);
+      if (activeScenarios.size === allIndices.length) return 'all';
+      return [...activeScenarios].join(',');
+    }
+
     async function fetchData(from, to, tf, fitContent) {
       if (fetchController) fetchController.abort();
       fetchController = new AbortController();
 
+      const scenarioParam = activeScenarioParam();
+
       showLoading();
       try {
         const params = new URLSearchParams({
-          scenario: 'all',
+          scenario: scenarioParam,
           from: String(from),
           to: String(to),
           tf: String(tf),
@@ -611,6 +826,7 @@
         bufferedFrom = data.from;
         bufferedTo = data.to;
         bufferedTF = data.tf;
+        bufferedScenarios = scenarioParam;
         lastServerData = data;
 
         if (data.tf !== data.requestedTF) {
@@ -651,6 +867,7 @@
         transitionLock = false;
       } finally {
         hideLoading();
+        isInitialLoad = false;
       }
     }
 
@@ -720,7 +937,9 @@
       const range = getViewportTimeRange();
       if (!range) return;
 
+      const scenariosMatch = bufferedScenarios === activeScenarioParam();
       if (
+        scenariosMatch &&
         bufferedTF === currentTF &&
         range.from >= bufferedFrom &&
         range.to <= bufferedTo
@@ -740,7 +959,6 @@
         const res = await fetch('/api/meta');
         serverMeta = await res.json();
 
-        // Populate header
         const configEl = document.getElementById('config-info');
         if (serverMeta.scenarios.length === 1) {
           const c = serverMeta.scenarios[0].config;
@@ -756,10 +974,8 @@
             `<span>${serverMeta.scenarios[0].config.startDate} to ${serverMeta.scenarios[0].config.endDate}</span>`;
         }
 
-        // Build stats table
         buildStatsTable(serverMeta.scenarios.map(sc => ({ config: sc.config, summary: sc.summary })));
 
-        // Compute total time range from all scenarios
         let minFrom = Infinity, maxTo = -Infinity;
         for (const sc of serverMeta.scenarios) {
           if (sc.timeRange.from < minFrom) minFrom = sc.timeRange.from;
@@ -767,12 +983,19 @@
         }
         totalTimeRange = { from: minFrom, to: maxTo };
 
+        activeScenarios.clear();
+        if (serverMeta.scenarios.length < 10) {
+          for (const sc of serverMeta.scenarios) activeScenarios.add(sc.index);
+        } else {
+          activeScenarios.add(serverMeta.scenarios[0].index);
+        }
+
+        COLORS = generateColors(Math.max(32, serverMeta.scenarios.length));
+        buildScenarioSelector(serverMeta.scenarios);
         updateTFButtonStates();
 
-        // Initial data fetch (full range)
         await fetchData(totalTimeRange.from, totalTimeRange.to, currentTF, true);
 
-        // Subscribe to viewport changes for on-demand loading
         priceChart.timeScale().subscribeVisibleTimeRangeChange(onViewportChange);
       } catch (e) {
         console.error('Failed to initialize:', e);

@@ -1,6 +1,6 @@
 import { join } from "path";
 import { runSimulation } from "./engine.js";
-import { ChunkWriter } from "../viz/writer.js";
+import { ChunkWriter, scenarioDirName } from "../viz/writer.js";
 import type { PricePoint, SimulationConfig, ScenarioMeta } from "../types.js";
 
 declare var self: Worker;
@@ -21,9 +21,10 @@ self.onmessage = (event: MessageEvent) => {
     const scenarioIndex: number = msg.scenarioIndex;
     const outputDir: string | undefined = msg.outputDir;
 
+    const dirName = scenarioDirName(config.label, scenarioIndex);
     let writer: ChunkWriter | undefined;
     if (outputDir) {
-      writer = new ChunkWriter(join(outputDir, `scenario_${scenarioIndex}`));
+      writer = new ChunkWriter(join(outputDir, dirName));
     }
 
     const onProgress = (pct: number) => {
@@ -41,6 +42,8 @@ self.onmessage = (event: MessageEvent) => {
         blockCount: info.blockCount,
         chunkCount: info.chunkCount,
         timeRange: info.timeRange,
+        chunkTimeRanges: info.chunkTimeRanges,
+        dir: dirName,
       };
     }
 

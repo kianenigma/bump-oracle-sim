@@ -4,7 +4,7 @@ import type { SimulationConfig, SimulationResult, PricePoint, ScenarioMeta, Vali
 import { DEFAULT_CONFIG } from "../config.js";
 import { runSimulation, type BlockSink } from "../sim/engine.js";
 import { maxBlockDelta } from "../data/interpolator.js";
-import { ChunkWriter, writeIndex } from "../viz/writer.js";
+import { ChunkWriter, writeIndex, scenarioDirName } from "../viz/writer.js";
 import { loadCriteria } from "./research-criteria.js";
 import { generateReport } from "./research-report.js";
 import { formatMix } from "../mix.js";
@@ -33,9 +33,9 @@ function runOne(
   let sink: BlockSink | undefined;
   let writer: ChunkWriter | undefined;
 
+  const dirName = scenarioDirName(config.label, scenarioIndex);
   if (outputDir) {
-    const scenarioDir = join(outputDir, `scenario_${scenarioIndex}`);
-    writer = new ChunkWriter(scenarioDir);
+    writer = new ChunkWriter(join(outputDir, dirName));
     sink = writer.sink;
   }
 
@@ -50,6 +50,8 @@ function runOne(
       blockCount: info.blockCount,
       chunkCount: info.chunkCount,
       timeRange: info.timeRange,
+      chunkTimeRanges: info.chunkTimeRanges,
+      dir: dirName,
     };
   }
 

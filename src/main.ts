@@ -8,7 +8,7 @@ import { parseMixCli, formatMix } from "./mix.js";
 import { fetchCandles } from "./data/fetcher.js";
 import { interpolateToBlocks } from "./data/interpolator.js";
 import { runSimulation } from "./sim/engine.js";
-import { ChunkWriter, writeIndex, loadIndex } from "./viz/writer.js";
+import { ChunkWriter, writeIndex, loadIndex, scenarioDirName } from "./viz/writer.js";
 import { startServer } from "./viz/server.js";
 import { scenarios, listScenarios } from "./analysis/scenarios.js";
 import { loadCriteria } from "./analysis/research-criteria.js";
@@ -33,6 +33,8 @@ const { values: args } = parseArgs({
     data: { type: "string" },
     label: { type: "string" },
     index: { type: "string" },
+    from: { type: "string" },
+    to: { type: "string" },
     reanalyze: { type: "boolean", default: false },
     "no-open": { type: "boolean", default: false },
     threads: { type: "string", default: String(cpus().length) },
@@ -64,6 +66,8 @@ Options:
   --data <path>                 Serve existing .simdata directory without re-running simulation
   --label <substring>           Filter scenarios by label (case-insensitive substring, use with --data)
   --index <N>                   Filter to a single scenario by index (use with --data)
+  --from <YYYY-MM-DD>           View time range start (use with --data)
+  --to <YYYY-MM-DD>             View time range end (use with --data)
   --reanalyze                   Re-run scoring/report on existing --data without re-simulating
   --no-open                     Don't auto-open browser
   --threads <number>            Worker threads for batch scenarios (default: CPU count)
@@ -167,7 +171,19 @@ if (args.data) {
     }
   }
 
-  await startServer(args.data, port, !args["no-open"], filterIndices);
+  let timeConstraint: { from: number; to: number } | undefined;
+  if (args.from || args.to) {
+    const tcFrom = args.from ? Math.floor(new Date(args.from + "T00:00:00Z").getTime() / 1000) : 0;
+    const tcTo = args.to ? Math.floor(new Date(args.to + "T23:59:59Z").getTime() / 1000) : Math.floor(Date.now() / 1000);
+    if (isNaN(tcFrom) || isNaN(tcTo)) {
+      console.error("Error: invalid --from or --to date format (expected YYYY-MM-DD)");
+      process.exit(1);
+    }
+    timeConstraint = { from: tcFrom, to: tcTo };
+    console.log(`  Time constraint: ${args.from ?? "start"} to ${args.to ?? "now"}`);
+  }
+
+  await startServer(args.data, port, !args["no-open"], filterIndices, timeConstraint);
   process.exit(0);
 }
 
@@ -230,8 +246,8 @@ if (args.scenario) {
     label: mixDesc,
   };
   console.log(`\n[Single simulation]`);
-  const scenarioDir = join(outputDir, "scenario_0");
-  const writer = new ChunkWriter(scenarioDir);
+  const dirName = scenarioDirName(config.label, 0);
+  const writer = new ChunkWriter(join(outputDir, dirName));
   const result = runSimulation(config, pricePoints, writer.sink);
   const info = writer.finish();
 
@@ -241,6 +257,8 @@ if (args.scenario) {
     blockCount: info.blockCount,
     chunkCount: info.chunkCount,
     timeRange: info.timeRange,
+    chunkTimeRanges: info.chunkTimeRanges,
+    dir: dirName,
   };
   writeIndex(outputDir, [meta]);
 }
