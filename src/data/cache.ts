@@ -1,7 +1,7 @@
 import { join } from "path";
 import type { Candle } from "../types.js";
 
-const CACHE_DIR = join(import.meta.dir, "../../data");
+const CACHE_DIR = join(import.meta.dir, "../../price-data");
 const CACHE_PATH = join(CACHE_DIR, "dot_usdt_1m_cache.json");
 
 export interface ConsolidatedCache {

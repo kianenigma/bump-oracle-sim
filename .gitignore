@@ -1,5 +1,5 @@
 node_modules/
-./data
+price-data/
 dist/
 *.html
 !src/viz/template.html
