@@ -8,6 +8,9 @@ export interface ResearchCriteria {
   weightMeanDeviation: number;
   weightMaxDeviation: number;
   weightIntegral: number;
+  weightRecovery: number;
+  weightP95: number;
+  weightP99: number;
   weightResilience: number;
 
   // Hard thresholds
@@ -30,6 +33,12 @@ export const DEFAULT_CRITERIA: ResearchCriteria = {
   // The integral of the deviation over time.
   // We give it a moderate weight of 0.3
   weightIntegral: 0.3,
+  // How quickly the oracle recovers after a deviation spike.
+  // Penalizes long consecutive streaks above the convergence threshold.
+  weightRecovery: 0.2,
+  // 95th and 99th percentile of deviation — more robust than max, less noisy than mean.
+  weightP95: 0.2,
+  weightP99: 0.3,
   // This is a measure of "how much the system is able to resist adversarial mixes".
   // Since our scenario is running with 33% malicious validators, we expect the system to behave good with this degree of maliciousness.
   weightResilience: 0.5,
@@ -63,6 +72,9 @@ export function loadCriteria(): ResearchCriteria {
   c.weightMeanDeviation = env("WEIGHT_MEAN_DEVIATION") ?? c.weightMeanDeviation;
   c.weightMaxDeviation = env("WEIGHT_MAX_DEVIATION") ?? c.weightMaxDeviation;
   c.weightIntegral = env("WEIGHT_INTEGRAL") ?? c.weightIntegral;
+  c.weightRecovery = env("WEIGHT_RECOVERY") ?? c.weightRecovery;
+  c.weightP95 = env("WEIGHT_P95") ?? c.weightP95;
+  c.weightP99 = env("WEIGHT_P99") ?? c.weightP99;
   c.weightResilience = env("WEIGHT_RESILIENCE") ?? c.weightResilience;
   c.maxAcceptableDeviation = env("MAX_ACCEPTABLE_DEVIATION") ?? c.maxAcceptableDeviation;
   c.convergenceThreshold = env("CONVERGENCE_THRESHOLD") ?? c.convergenceThreshold;
@@ -89,12 +101,26 @@ export function scoreSimulation(summary: SimulationSummary, criteria: ResearchCr
   const integralCeiling = summary.totalBlocks * BLOCK_TIME_SECONDS * maxDev;
   const integral = 1 - clamp(summary.deviationIntegral / integralCeiling, 0, 1);
 
+  // Recovery: normalize consecutive blocks by total blocks (1 = never stuck, 0 = stuck entire sim)
+  const recovery = 1 - clamp(summary.maxConsecutiveBlocksAboveThreshold / summary.totalBlocks, 0, 1);
+
+  // Percentile scores: same normalization as maxDev
+  const p95Score = 1 - clamp(summary.p95DeviationPct / maxDev, 0, 1);
+  const p99Score = 1 - clamp(summary.p99DeviationPct / maxDev, 0, 1);
+
+  const totalWeight =
+    criteria.weightConvergence + criteria.weightMeanDeviation + criteria.weightMaxDeviation +
+    criteria.weightIntegral + criteria.weightRecovery + criteria.weightP95 + criteria.weightP99;
+
   return (
     criteria.weightConvergence * convergence +
     criteria.weightMeanDeviation * meanDev +
     criteria.weightMaxDeviation * maxDevScore +
-    criteria.weightIntegral * integral
-  ) / (criteria.weightConvergence + criteria.weightMeanDeviation + criteria.weightMaxDeviation + criteria.weightIntegral);
+    criteria.weightIntegral * integral +
+    criteria.weightRecovery * recovery +
+    criteria.weightP95 * p95Score +
+    criteria.weightP99 * p99Score
+  ) / totalWeight;
 }
 
 /**

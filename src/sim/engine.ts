@@ -106,6 +106,9 @@ export function runSimulation(
   let converged = 0;
   let deviationIntegral = 0;
   let maxDeviationRate = 0;
+  let consecAbove = 0;
+  let maxConsecAbove = 0;
+  const allDeviationPcts = new Float64Array(totalBlocks);
   let prevBlock: BlockMetrics | null = null;
 
   if (!quiet) console.log(`  Running ${totalBlocks.toLocaleString()} blocks (${parts.join(", ")})...`);
@@ -128,8 +131,15 @@ export function runSimulation(
     sumDevPct += m.deviationPct;
     if (m.deviation > maxDev) maxDev = m.deviation;
     if (m.deviationPct > maxDevPct) maxDevPct = m.deviationPct;
-    if (m.deviationPct < convergenceThreshold) converged++;
+    if (m.deviationPct < convergenceThreshold) {
+      converged++;
+      consecAbove = 0;
+    } else {
+      consecAbove++;
+      if (consecAbove > maxConsecAbove) maxConsecAbove = consecAbove;
+    }
 
+    allDeviationPcts[i] = m.deviationPct;
     if (sink) sink(m);
     prevBlock = m;
 
@@ -157,6 +167,9 @@ export function runSimulation(
     convergenceThreshold,
     deviationIntegral,
     maxDeviationRate,
+    maxConsecutiveBlocksAboveThreshold: maxConsecAbove,
+    p95DeviationPct: percentile(allDeviationPcts, 0.95),
+    p99DeviationPct: percentile(allDeviationPcts, 0.99),
   };
 
   if (!quiet) {
@@ -167,4 +180,12 @@ export function runSimulation(
   }
 
   return { config: { ...config, epsilon }, summary };
+}
+
+/** Compute the p-th percentile (0-1) of a Float64Array by sorting a copy. */
+function percentile(arr: Float64Array, p: number): number {
+  if (arr.length === 0) return 0;
+  const sorted = arr.slice().sort();
+  const idx = Math.min(Math.floor(p * sorted.length), sorted.length - 1);
+  return sorted[idx];
 }

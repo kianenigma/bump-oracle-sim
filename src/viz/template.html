@@ -369,8 +369,11 @@
       { key: 'totalBlocks', label: 'Total Blocks', type: 'number', getter: sc => sc.summary.totalBlocks },
       { key: 'meanDevPct', label: 'Mean Dev %', type: 'number', getter: sc => sc.summary.meanDeviationPct },
       { key: 'maxDevPct', label: 'Max Dev %', type: 'number', getter: sc => sc.summary.maxDeviationPct },
+      { key: 'p95DevPct', label: 'P95 Dev %', type: 'number', getter: sc => sc.summary.p95DeviationPct ?? 0 },
+      { key: 'p99DevPct', label: 'P99 Dev %', type: 'number', getter: sc => sc.summary.p99DeviationPct ?? 0 },
       { key: 'convergence', label: 'Convergence %', type: 'number', getter: sc => sc.summary.convergenceRate * 100 },
       { key: 'convThreshold', label: 'Conv. Threshold', type: 'number', getter: sc => sc.summary.convergenceThreshold },
+      { key: 'maxConsecAbove', label: 'Max Consec. Above', type: 'number', getter: sc => sc.summary.maxConsecutiveBlocksAboveThreshold ?? 0 },
       { key: 'devIntegral', label: 'Dev Integral (%-s)', type: 'number', getter: sc => sc.summary.deviationIntegral },
       { key: 'maxDevRate', label: 'Max Dev Rate (%/s)', type: 'number', getter: sc => sc.summary.maxDeviationRate },
     ];
@@ -384,7 +387,7 @@
       if (typeof val !== 'number') return val;
       // Smart formatting based on magnitude
       if (col.key === 'epsilon' || col.key === 'jitter') return val.toFixed(6);
-      if (col.key === 'meanDevPct' || col.key === 'maxDevPct') return val.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
+      if (col.key === 'meanDevPct' || col.key === 'maxDevPct' || col.key === 'p95DevPct' || col.key === 'p99DevPct') return val.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 });
       if (col.key === 'convergence') return val.toLocaleString(undefined, { minimumFractionDigits: 1, maximumFractionDigits: 1 });
       if (col.key === 'convThreshold') return val.toFixed(2);
       if (col.key === 'devIntegral') return val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });

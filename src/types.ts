@@ -83,6 +83,12 @@ export interface SimulationSummary {
   deviationIntegral: number;
   /// The maximum rate of deviation change.
   maxDeviationRate: number;
+  /// Longest consecutive streak of blocks where deviationPct >= convergenceThreshold.
+  maxConsecutiveBlocksAboveThreshold: number;
+  /// 95th percentile of deviationPct across all blocks.
+  p95DeviationPct: number;
+  /// 99th percentile of deviationPct across all blocks.
+  p99DeviationPct: number;
 }
 
 export interface CacheMetadata {
