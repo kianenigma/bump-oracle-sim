@@ -1,10 +1,12 @@
 import { join } from "path";
-import type { SimulationResult } from "../types.js";
+import { epsilonValue, epsilonMode as getEpsilonMode } from "../types.js";
+import type { SimulationResult, EpsilonMode } from "../types.js";
 import { scoreSimulation, scoreEpsilons, type ResearchCriteria, type EpsilonScore } from "./research-criteria.js";
 import { formatMix } from "../mix.js";
 
 interface DetailRow {
   epsilon: number;
+  epsilonMode: EpsilonMode;
   multiplier: number;
   mix: string;
   convergenceRate: number;
@@ -31,7 +33,7 @@ interface ResearchReport {
   ranking: EpsilonScore[];
   details: DetailRow[];
   interpolated: InterpolatedOptimum | null;
-  conclusion: { optimalEpsilon: number; multiplier: number; compositeScore: number };
+  conclusion: { optimalEpsilon: number; epsilonMode: EpsilonMode; multiplier: number; compositeScore: number };
 }
 
 /**
@@ -49,11 +51,13 @@ export function generateReport(
   // Build detail rows
   const details: DetailRow[] = [];
   for (const r of results) {
-    const eps = r.config.epsilon as number;
+    const eps = epsilonValue(r.config.epsilon);
+    const mode = getEpsilonMode(r.config.epsilon);
     const mult = epsilonMultipliers.get(eps) ?? 0;
     const mix = formatMix(r.config.validatorMix);
     details.push({
       epsilon: eps,
+      epsilonMode: mode,
       multiplier: mult,
       mix,
       convergenceRate: r.summary.convergenceRate,
@@ -89,8 +93,9 @@ export function generateReport(
   console.log(`\nEPSILON RANKING (by composite score):`);
   for (let i = 0; i < ranking.length; i++) {
     const r = ranking[i];
+    const modeTag = r.epsilonMode === "ratio" ? " [ratio]" : "";
     console.log(
-      `  #${i + 1}  eps=${r.epsilon.toFixed(6)} (${r.multiplier.toFixed(1)}x)` +
+      `  #${i + 1}  eps=${r.epsilon.toFixed(6)}${modeTag} (${r.multiplier.toFixed(1)}x)` +
       `  score=${r.compositeScore.toFixed(3)}` +
       `  baseline=${r.baselineScore.toFixed(2)}` +
       `  worst@33%=${r.worstScore33.toFixed(2)}` +
@@ -106,14 +111,15 @@ export function generateReport(
 
   console.log(`\nDETAIL TABLE:`);
   console.log(
-    `  ${"epsilon".padEnd(14)} ${"mix".padEnd(22)} ${"convRate".padEnd(10)} ${"meanDev%".padEnd(10)} ` +
+    `  ${"epsilon".padEnd(14)} ${"mode".padEnd(6)} ${"mix".padEnd(22)} ${"convRate".padEnd(10)} ${"meanDev%".padEnd(10)} ` +
     `${"maxDev%".padEnd(10)} ${"p95%".padEnd(8)} ${"p99%".padEnd(8)} ${"maxConsec".padEnd(10)} ` +
     `${"integral".padEnd(12)} ${"score".padEnd(8)}`
   );
-  console.log(`  ${"-".repeat(112)}`);
+  console.log(`  ${"-".repeat(120)}`);
   for (const d of details) {
     console.log(
       `  ${d.epsilon.toFixed(6).padEnd(14)} ` +
+      `${d.epsilonMode.padEnd(6)} ` +
       `${d.mix.padEnd(22)} ` +
       `${(d.convergenceRate * 100).toFixed(1).padStart(6)}%   ` +
       `${d.meanDeviationPct.toFixed(4).padStart(8)}  ` +
@@ -126,8 +132,11 @@ export function generateReport(
     );
   }
 
-  const conclusionEps = interpolated ?? { epsilon: best.epsilon, multiplier: best.multiplier };
-  console.log(`\nCONCLUSION: Optimal epsilon = ${conclusionEps.epsilon.toFixed(6)} (${conclusionEps.multiplier.toFixed(2)}x auto-epsilon)`);
+  const conclusionEps = interpolated
+    ? { epsilon: interpolated.epsilon, multiplier: interpolated.multiplier, mode: best.epsilonMode }
+    : { epsilon: best.epsilon, multiplier: best.multiplier, mode: best.epsilonMode };
+  const modeLabel = conclusionEps.mode === "ratio" ? " [ratio]" : "";
+  console.log(`\nCONCLUSION: Optimal epsilon = ${conclusionEps.epsilon.toFixed(6)}${modeLabel} (${conclusionEps.multiplier.toFixed(2)}x)`);
   if (interpolated) {
     console.log(`  (interpolated from quadratic fit; grid best was ${best.multiplier.toFixed(1)}x)`);
   }
@@ -142,6 +151,7 @@ export function generateReport(
     interpolated,
     conclusion: {
       optimalEpsilon: conclusionEps.epsilon,
+      epsilonMode: conclusionEps.mode,
       multiplier: conclusionEps.multiplier,
       compositeScore: interpolated?.estimatedScore ?? best.compositeScore,
     },

@@ -1,4 +1,5 @@
-import type { SimulationSummary, SimulationResult } from "../types.js";
+import { epsilonValue, epsilonMode as getEpsilonMode } from "../types.js";
+import type { SimulationSummary, SimulationResult, EpsilonMode } from "../types.js";
 import { BLOCK_TIME_SECONDS } from "../config.js";
 import { isBaselineMix, hasAdversaryAtFraction } from "../mix.js";
 
@@ -48,6 +49,7 @@ export const DEFAULT_CRITERIA: ResearchCriteria = {
 
 export interface EpsilonScore {
   epsilon: number;
+  epsilonMode: EpsilonMode;
   multiplier: number;
   baselineScore: number;
   worstScore33: number;
@@ -132,22 +134,26 @@ export function scoreEpsilons(
   epsilonMultipliers: Map<number, number>,
   criteria: ResearchCriteria,
 ): EpsilonScore[] {
-  // Group results by epsilon
-  const byEpsilon = new Map<number, SimulationResult[]>();
+  // Group results by epsilon key (mode:value) to avoid collisions between abs and ratio
+  const byEpsilonKey = new Map<string, SimulationResult[]>();
   for (const r of results) {
-    const eps = r.config.epsilon as number;
-    if (!byEpsilon.has(eps)) byEpsilon.set(eps, []);
-    byEpsilon.get(eps)!.push(r);
+    const mode = getEpsilonMode(r.config.epsilon);
+    const eps = epsilonValue(r.config.epsilon);
+    const key = `${mode}:${eps}`;
+    if (!byEpsilonKey.has(key)) byEpsilonKey.set(key, []);
+    byEpsilonKey.get(key)!.push(r);
   }
 
   const scores: EpsilonScore[] = [];
 
-  for (const [epsilon, group] of byEpsilon) {
-    // Baseline: the run with no non-honest validators
+  for (const [key, group] of byEpsilonKey) {
+    const [modeStr, epsStr] = key.split(":");
+    const mode = modeStr as EpsilonMode;
+    const epsilon = parseFloat(epsStr);
+
     const baseline = group.find(r => isBaselineMix(r.config.validatorMix));
     const baselineScore = baseline ? scoreSimulation(baseline.summary, criteria) : 0;
 
-    // Worst score among 33% adversarial runs
     let worstScore33 = 1;
     for (const r of group) {
       if (hasAdversaryAtFraction(r.config.validatorMix, 0.33)) {
@@ -155,7 +161,7 @@ export function scoreEpsilons(
         if (s < worstScore33) worstScore33 = s;
       }
     }
-    if (worstScore33 === 1) worstScore33 = baselineScore; // no 33% runs found
+    if (worstScore33 === 1) worstScore33 = baselineScore;
 
     const resilienceGap = baselineScore - worstScore33;
     const wR = criteria.weightResilience;
@@ -163,6 +169,7 @@ export function scoreEpsilons(
 
     scores.push({
       epsilon,
+      epsilonMode: mode,
       multiplier: epsilonMultipliers.get(epsilon) ?? 0,
       baselineScore,
       worstScore33,

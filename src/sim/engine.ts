@@ -1,4 +1,4 @@
-import type { SimulationConfig, SimulationResult, BlockMetrics, SimulationSummary, PricePoint } from "../types.js";
+import type { SimulationConfig, SimulationResult, BlockMetrics, SimulationSummary, PricePoint, EpsilonMode } from "../types.js";
 import { mixFraction, mixJitter } from "../mix.js";
 import { mulberry32 } from "../rng.js";
 import { PriceEndpoint } from "./price-endpoint.js";
@@ -33,15 +33,22 @@ export function runSimulation(
   const rng = mulberry32(config.seed);
   const endpoint = new PriceEndpoint(pricePoints);
 
-  // Calculate epsilon
+  // Resolve epsilon spec into a numeric value + mode
   let epsilon: number;
+  let epsilonMode: EpsilonMode;
   if (config.epsilon === "auto") {
     const maxDelta = maxBlockDelta(pricePoints);
     epsilon = maxDelta / config.validatorCount;
     if (epsilon === 0) epsilon = 0.0001; // safety floor
+    epsilonMode = "abs";
     if (!quiet) console.log(`  Auto epsilon: ${epsilon.toFixed(6)} (maxDelta=${maxDelta.toFixed(4)}, validators=${config.validatorCount})`);
+  } else if (typeof config.epsilon === "object" && "ratio" in config.epsilon) {
+    epsilon = config.epsilon.ratio;
+    epsilonMode = "ratio";
+    if (!quiet) console.log(`  Ratio epsilon: ${(epsilon * 100).toFixed(4)}% per bump`);
   } else {
     epsilon = config.epsilon;
+    epsilonMode = "abs";
   }
 
   // Create validators from mix
@@ -93,7 +100,7 @@ export function runSimulation(
 
   // Initialize chain
   const initialPrice = pricePoints[0].price;
-  const chain = new Chain(initialPrice, epsilon, validators, endpoint, rng);
+  const chain = new Chain(initialPrice, epsilon, epsilonMode, validators, endpoint, rng);
 
   // Run simulation with incremental summary computation
   const totalBlocks = endpoint.totalBlocks;
@@ -163,6 +170,7 @@ export function runSimulation(
     meanDeviationPct: sumDevPct / totalBlocks,
     maxDeviationPct: maxDevPct,
     epsilon,
+    epsilonMode,
     convergenceRate: converged / totalBlocks,
     convergenceThreshold,
     deviationIntegral,
@@ -179,7 +187,8 @@ export function runSimulation(
     console.log(`  Max deviation rate: ${summary.maxDeviationRate.toFixed(6)} %/s`);
   }
 
-  return { config: { ...config, epsilon }, summary };
+  const resolvedEpsilon = epsilonMode === "ratio" ? { ratio: epsilon } : epsilon;
+  return { config: { ...config, epsilon: resolvedEpsilon }, summary };
 }
 
 /** Compute the p-th percentile (0-1) of a Float64Array by sorting a copy. */

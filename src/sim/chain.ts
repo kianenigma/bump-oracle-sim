@@ -1,5 +1,5 @@
 import { Bump } from "../types.js";
-import type { BumpSubmission, BlockMetrics } from "../types.js";
+import type { BumpSubmission, BlockMetrics, EpsilonMode } from "../types.js";
 import type { ValidatorAgent } from "./validator.js";
 import type { PriceEndpoint } from "./price-endpoint.js";
 
@@ -7,6 +7,7 @@ export class Chain {
   block: number = 0;
   lastPrice: number;
   epsilon: number;
+  epsilonMode: EpsilonMode;
 
   private validators: ValidatorAgent[];
   private endpoint: PriceEndpoint;
@@ -15,12 +16,14 @@ export class Chain {
   constructor(
     initialPrice: number,
     epsilon: number,
+    epsilonMode: EpsilonMode,
     validators: ValidatorAgent[],
     endpoint: PriceEndpoint,
     rng: () => number
   ) {
     this.lastPrice = initialPrice;
     this.epsilon = epsilon;
+    this.epsilonMode = epsilonMode;
     this.validators = validators;
     this.endpoint = endpoint;
     this.rng = rng;
@@ -31,6 +34,11 @@ export class Chain {
     const realPrice = this.endpoint.getRealPrice(blockIndex);
     const timestamp = this.endpoint.getTimestamp(blockIndex);
 
+    // Compute effective epsilon for this block
+    const effectiveEps = this.epsilonMode === "ratio"
+      ? this.lastPrice * this.epsilon
+      : this.epsilon;
+
     // 1. All validators produce bumps
     const bumps: BumpSubmission[] = this.validators.map((v) => ({
       validatorIndex: v.index,
@@ -40,8 +48,8 @@ export class Chain {
     // 2. Pick a random author from ALL validators (proportional to mix)
     const author = this.validators[Math.floor(this.rng() * this.validators.length)];
 
-    // 3. Author selects which bumps to activate
-    const mask = author.producePrice(bumps, this.lastPrice, this.epsilon, blockIndex);
+    // 3. Author selects which bumps to activate (receives effectiveEps so it's mode-agnostic)
+    const mask = author.producePrice(bumps, this.lastPrice, effectiveEps, blockIndex);
 
     // 4. Calculate net bumps from activated submissions
     let netBumps = 0;
@@ -54,7 +62,7 @@ export class Chain {
     }
 
     // 5. Update price
-    this.lastPrice += netBumps * this.epsilon;
+    this.lastPrice += netBumps * effectiveEps;
 
     const deviation = Math.abs(realPrice - this.lastPrice);
     const deviationPct = realPrice !== 0 ? (deviation / realPrice) * 100 : 0;

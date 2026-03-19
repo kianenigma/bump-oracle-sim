@@ -3,7 +3,8 @@ import { mkdirSync, existsSync, statSync, rmSync } from "fs";
 import { join } from "path";
 import { cpus } from "os";
 import { DEFAULT_CONFIG, CANDLE_INTERVAL } from "./config.js";
-import type { SimulationConfig, SimulationResult, ScenarioMeta } from "./types.js";
+import { epsilonValue } from "./types.js";
+import type { SimulationConfig, SimulationResult, ScenarioMeta, EpsilonSpec } from "./types.js";
 import { parseMixCli, formatMix } from "./mix.js";
 import { fetchCandles } from "./data/fetcher.js";
 import { interpolateToBlocks } from "./data/interpolator.js";
@@ -52,7 +53,7 @@ Usage: bun run src/main.ts [options]
 Options:
   --start-date <YYYY-MM-DD>    Start date (default: ${DEFAULT_CONFIG.startDate})
   --end-date <YYYY-MM-DD>      End date (default: ${DEFAULT_CONFIG.endDate})
-  --epsilon <number>            Price epsilon per bump (default: ${DEFAULT_CONFIG.epsilon})
+  --epsilon <value>              Epsilon: number (absolute), "auto", or "ratio:0.01" (default: ${DEFAULT_CONFIG.epsilon})
   --validators <number>         Number of validators (default: ${DEFAULT_CONFIG.validatorCount})
   --mix <spec>                  Validator mix, e.g. "malicious=0.2,pushy=0.1" (rest are honest)
   --seed <number>               Random seed (default: ${DEFAULT_CONFIG.seed})
@@ -82,6 +83,18 @@ if (args["list-scenarios"]) {
   process.exit(0);
 }
 
+
+function parseEpsilonArg(raw: string): EpsilonSpec {
+  if (raw === "auto") return "auto";
+  if (raw.startsWith("ratio:")) {
+    const val = parseFloat(raw.slice(6));
+    if (isNaN(val)) { console.error(`Invalid ratio epsilon: "${raw}"`); process.exit(1); }
+    return { ratio: val };
+  }
+  const val = parseFloat(raw);
+  if (isNaN(val)) { console.error(`Invalid epsilon: "${raw}"`); process.exit(1); }
+  return val;
+}
 
 /** Ensure outputDir is ready. Error if it already exists (unless --force). */
 function ensureOutputDir(dir: string, force: boolean): void {
@@ -117,13 +130,13 @@ if (args.reanalyze) {
   } else {
     // Fallback: assume 1.0x multiplier exists — find the most common epsilon among baseline runs
     const baselines = results.filter((r) => Object.keys(r.config.validatorMix).length === 0);
-    const epsilons = baselines.map((r) => r.config.epsilon as number);
+    const epsilons = baselines.map((r) => epsilonValue(r.config.epsilon));
     autoEpsilon = epsilons.length > 0 ? epsilons[Math.floor(epsilons.length / 2)] : 0.0001;
     console.log(`  Warning: no previous research_report.json found, inferred autoEpsilon=${autoEpsilon.toFixed(6)}`);
   }
 
   // Reconstruct multiplier map
-  const uniqueEpsilons = [...new Set(results.map((r) => r.config.epsilon as number))];
+  const uniqueEpsilons = [...new Set(results.map((r) => epsilonValue(r.config.epsilon)))];
   const epsilonMultipliers = new Map<number, number>();
   for (const eps of uniqueEpsilons) {
     epsilonMultipliers.set(eps, eps / autoEpsilon);
@@ -220,7 +233,7 @@ const baseOverrides: Partial<SimulationConfig> = {
   validatorCount: parseInt(args.validators!),
   seed: parseInt(args.seed!),
   jitterStdDev: parseFloat(args.jitter!),
-  epsilon: args.epsilon === "auto" ? "auto" : parseFloat(args.epsilon!),
+  epsilon: parseEpsilonArg(args.epsilon!),
   convergenceThreshold: parseFloat(args["convergence-threshold"]!),
 };
 

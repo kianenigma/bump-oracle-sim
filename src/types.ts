@@ -46,12 +46,31 @@ export type ValidatorMixEntry = number | { fraction?: number; jitter?: number };
 // Example: { malicious: 0.2, pushy: { fraction: 0.1, jitter: 0.005 } }
 export type ValidatorMix = Record<string, ValidatorMixEntry>;
 
+// Epsilon specification: how much the oracle price moves per activated bump.
+// - number: absolute step size (e.g. 0.00033)
+// - "auto": auto-compute from price data
+// - { ratio: number }: per-bump fraction of current oracle price (e.g. 0.0001 = 0.01% per bump)
+export type EpsilonSpec = number | "auto" | { ratio: number };
+
+export type EpsilonMode = "abs" | "ratio";
+
+export function epsilonValue(spec: EpsilonSpec): number {
+  if (spec === "auto") return 0;
+  if (typeof spec === "number") return spec;
+  return spec.ratio;
+}
+
+export function epsilonMode(spec: EpsilonSpec): EpsilonMode {
+  if (typeof spec === "object" && "ratio" in spec) return "ratio";
+  return "abs";
+}
+
 export interface SimulationConfig {
   startDate: string; // YYYY-MM-DD
   endDate: string;
   validatorCount: number;
   validatorMix: ValidatorMix; // fractions for non-honest validator types
-  epsilon: number | "auto";
+  epsilon: EpsilonSpec;
   seed: number;
   jitterStdDev: number; // price jitter std dev as fraction (e.g. 0.001 = 0.1%)
   convergenceThreshold: number; // deviation % threshold for convergence (default 0.1)
@@ -66,8 +85,10 @@ export interface SimulationResult {
 export interface SimulationSummary {
   /// Total number of blocks in the simulation
   totalBlocks: number;
-  /// The epsilon used in the simulation
+  /// The resolved epsilon value used in the simulation (absolute step, or per-bump ratio)
   epsilon: number;
+  /// Whether epsilon is an absolute step ("abs") or a fraction of oracle price ("ratio")
+  epsilonMode: EpsilonMode;
   /// The threshold used for convergence (in %), and the convergance itself.
   ///
   /// If set to 1%, blocks in which deviation was less than 1% are counted as converged.

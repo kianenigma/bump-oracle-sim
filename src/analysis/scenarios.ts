@@ -1,6 +1,7 @@
 import { join } from "path";
 import { mkdirSync } from "fs";
-import type { SimulationConfig, SimulationResult, PricePoint, ScenarioMeta, ValidatorMix } from "../types.js";
+import { epsilonValue } from "../types.js";
+import type { SimulationConfig, SimulationResult, PricePoint, ScenarioMeta, ValidatorMix, EpsilonSpec } from "../types.js";
 import { DEFAULT_CONFIG } from "../config.js";
 import { runSimulation, type BlockSink } from "../sim/engine.js";
 import { maxBlockDelta } from "../data/interpolator.js";
@@ -226,6 +227,27 @@ function truncate(s: string, max: number): string {
   return s.length <= max ? s : s.slice(0, max - 1) + "\u2026";
 }
 
+const RESEARCH_MULTIPLIERS = [0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
+
+const RESEARCH_MIXES: ValidatorMix[] = [
+  {},
+  { malicious: 0.1 },
+  { malicious: 0.2 },
+  { malicious: 0.33 },
+  { pushy: 0.1 },
+  { pushy: 0.2 },
+  { pushy: 0.33 },
+  { noop: 0.1 },
+  { noop: 0.2 },
+  { noop: 0.33 },
+  { delayed: 0.1 },
+  { delayed: 0.2 },
+  { delayed: 0.33 },
+  { drift: 0.1 },
+  { drift: 0.2 },
+  { drift: 0.33 },
+];
+
 export const scenarios: Record<string, ScenarioFn> = {
   /** Baseline: 100% honest */
   async honest(overrides, pricePoints, outputDir, threadCount) {
@@ -276,12 +298,13 @@ export const scenarios: Record<string, ScenarioFn> = {
 
   async "sweep-malicious-and-epsilon"(overrides, pricePoints, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3];
-    const epsilons = [(DEFAULT_CONFIG.epsilon as number) / 5, DEFAULT_CONFIG.epsilon, (DEFAULT_CONFIG.epsilon as number) * 5];
+    const base = epsilonValue(DEFAULT_CONFIG.epsilon);
+    const epsilons: EpsilonSpec[] = [base / 5, DEFAULT_CONFIG.epsilon, base * 5];
     const configs: SimulationConfig[] = [];
 
     for (const frac of fractions) {
       for (const epsilon of epsilons) {
-        const label = `${(frac * 100).toFixed(0)}% malicious, epsilon=${(epsilon as number).toFixed(6)}`;
+        const label = `${(frac * 100).toFixed(0)}% malicious, epsilon=${epsilonValue(epsilon).toFixed(6)}`;
         configs.push(mergeConfig({ ...overrides, validatorMix: { malicious: frac }, epsilon, label }));
       }
     }
@@ -290,12 +313,13 @@ export const scenarios: Record<string, ScenarioFn> = {
 
   async "sweep-pushy-and-epsilon"(overrides, pricePoints, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3];
-    const epsilons = [(DEFAULT_CONFIG.epsilon as number) / 5, DEFAULT_CONFIG.epsilon, (DEFAULT_CONFIG.epsilon as number) * 5];
+    const base = epsilonValue(DEFAULT_CONFIG.epsilon);
+    const epsilons: EpsilonSpec[] = [base / 5, DEFAULT_CONFIG.epsilon, base * 5];
     const configs: SimulationConfig[] = [];
 
     for (const frac of fractions) {
       for (const epsilon of epsilons) {
-        const label = `${(frac * 100).toFixed(0)}% pushy, epsilon=${(epsilon as number).toFixed(6)}`;
+        const label = `${(frac * 100).toFixed(0)}% pushy, epsilon=${epsilonValue(epsilon).toFixed(6)}`;
         configs.push(mergeConfig({ ...overrides, validatorMix: { pushy: frac }, epsilon, label }));
       }
     }
@@ -349,48 +373,22 @@ export const scenarios: Record<string, ScenarioFn> = {
     return runBatch(configs, pricePoints, outputDir, threadCount);
   },
 
-  /**
-   * Research: grid search over epsilon multipliers × adversary mixes.
-   * Scores each combination and produces a report recommending the optimal epsilon.
-   */
-  async research(overrides, pricePoints, outputDir, threadCount) {
-    console.log(`\n[Scenario: research]`);
+  async "research-absolute-eps"(overrides, pricePoints, outputDir, threadCount) {
+    console.log(`\n[Scenario: research-absolute-eps]`);
     const criteria = loadCriteria();
     const base = mergeConfig({ ...overrides, convergenceThreshold: criteria.convergenceThreshold });
 
-    // Compute auto epsilon
-    const maxDelta = maxBlockDelta(pricePoints);
     const autoEpsilon = 1 / base.validatorCount / 10;
     console.log(`  Auto-epsilon base: ${autoEpsilon.toFixed(6)}`);
 
-    // Grid dimensions
-    const multipliers = [0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
-    const mixes: ValidatorMix[] = [
-      {},                   // 0% (baseline)
-      { malicious: 0.1 },
-      { malicious: 0.2 },
-      { malicious: 0.33 },
-      { pushy: 0.1 },
-      { pushy: 0.2 },
-      { pushy: 0.33 },
-      { noop: 0.1 },
-      { noop: 0.2 },
-      { noop: 0.33 },
-      { delayed: 0.1 },
-      { delayed: 0.2 },
-      { delayed: 0.33 },
-      { drift: 0.1 },
-      { drift: 0.2 },
-      { drift: 0.33 },
-    ];
+    const multipliers = RESEARCH_MULTIPLIERS;
+    const mixes = RESEARCH_MIXES;
 
-    // Build epsilon -> multiplier lookup
     const epsilonMultipliers = new Map<number, number>();
     for (const mult of multipliers) {
       epsilonMultipliers.set(autoEpsilon * mult, mult);
     }
 
-    // Build all configs
     const configs: SimulationConfig[] = [];
     for (const mult of multipliers) {
       const eps = autoEpsilon * mult;
@@ -411,11 +409,55 @@ export const scenarios: Record<string, ScenarioFn> = {
 
     const results = await runBatch(configs, pricePoints, outputDir, threadCount);
 
-    // Generate report
     const reportPath = outputDir
       ? join(outputDir, "research_report.json")
       : "research_report.json";
     generateReport(results, epsilonMultipliers, criteria, autoEpsilon, reportPath);
+
+    return results;
+  },
+
+  async "research-ratio-eps"(overrides, pricePoints, outputDir, threadCount) {
+    console.log(`\n[Scenario: research-ratio-eps]`);
+    const criteria = loadCriteria();
+    const base = mergeConfig({ ...overrides, convergenceThreshold: criteria.convergenceThreshold });
+
+    // 1% collective move / validatorCount = per-bump ratio
+    const autoRatio = 0.01 / base.validatorCount;
+    console.log(`  Auto-ratio base: ${(autoRatio * 100).toFixed(6)}% per bump (1% collective / ${base.validatorCount} validators)`);
+
+    const multipliers = RESEARCH_MULTIPLIERS;
+    const mixes = RESEARCH_MIXES;
+
+    const epsilonMultipliers = new Map<number, number>();
+    for (const mult of multipliers) {
+      epsilonMultipliers.set(autoRatio * mult, mult);
+    }
+
+    const configs: SimulationConfig[] = [];
+    for (const mult of multipliers) {
+      const ratio = autoRatio * mult;
+      for (const mix of mixes) {
+        const mixDesc = formatMix(mix);
+        const label = `ratio=${(ratio * 100).toFixed(4)}% (${mult}x), ${mixDesc}`;
+        configs.push(mergeConfig({
+          ...overrides,
+          epsilon: { ratio },
+          validatorMix: mix,
+          convergenceThreshold: criteria.convergenceThreshold,
+          label,
+        }));
+      }
+    }
+
+    console.log(`  Grid: ${multipliers.length} ratios x ${mixes.length} mixes = ${configs.length} simulations`);
+
+    const results = await runBatch(configs, pricePoints, outputDir, threadCount);
+
+    const reportPath = outputDir
+      ? join(outputDir, "research_report.json")
+      : "research_report.json";
+    generateReport(results, epsilonMultipliers, criteria, autoRatio, reportPath);
 
     return results;
   },
