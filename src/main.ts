@@ -4,7 +4,7 @@ import { join } from "path";
 import { cpus } from "os";
 import { DEFAULT_CONFIG, CANDLE_INTERVAL } from "./config.js";
 import { epsilonValue } from "./types.js";
-import type { SimulationConfig, SimulationResult, ScenarioMeta, EpsilonSpec } from "./types.js";
+import type { SimulationConfig, SimulationResult, ScenarioMeta, EpsilonSpec, AggregatorConfig } from "./types.js";
 import { parseMixCli, formatMix } from "./mix.js";
 import { fetchCandles } from "./data/fetcher.js";
 import { interpolateToBlocks } from "./data/interpolator.js";
@@ -40,6 +40,8 @@ const { values: args } = parseArgs({
     "no-open": { type: "boolean", default: false },
     threads: { type: "string", default: String(cpus().length) },
     force: { type: "boolean", default: false },
+    aggregator: { type: "string" },
+    "trimmed-mean-k": { type: "string", default: "0.1" },
     help: { type: "boolean", default: false },
   },
 });
@@ -73,6 +75,8 @@ Options:
   --no-open                     Don't auto-open browser
   --threads <number>            Worker threads for batch scenarios (default: CPU count)
   --force                       Overwrite existing output directory
+  --aggregator <mode>           Aggregation rule: "nudge" (default), "median", or "trimmed-mean"
+  --trimmed-mean-k <fraction>   Fraction trimmed from each tail when using trimmed-mean (default: 0.1)
   --help                        Show this help
 `);
   process.exit(0);
@@ -83,6 +87,15 @@ if (args["list-scenarios"]) {
   process.exit(0);
 }
 
+
+function parseAggregatorArg(raw: string | undefined, k: number): AggregatorConfig | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === "nudge") return { kind: "nudge" };
+  if (raw === "median") return { kind: "median" };
+  if (raw === "trimmed-mean") return { kind: "trimmed-mean", k };
+  console.error(`Invalid --aggregator: "${raw}". Expected: nudge, median, trimmed-mean.`);
+  process.exit(1);
+}
 
 function parseEpsilonArg(raw: string): EpsilonSpec {
   if (raw === "auto") return "auto";
@@ -227,6 +240,7 @@ if (userSetOutput) {
   outputDir = args.output!;
 }
 
+const aggregatorOverride = parseAggregatorArg(args.aggregator, parseFloat(args["trimmed-mean-k"]!));
 const baseOverrides: Partial<SimulationConfig> = {
   startDate,
   endDate,
@@ -235,6 +249,7 @@ const baseOverrides: Partial<SimulationConfig> = {
   jitterStdDev: parseFloat(args.jitter!),
   epsilon: parseEpsilonArg(args.epsilon!),
   convergenceThreshold: parseFloat(args["convergence-threshold"]!),
+  ...(aggregatorOverride ? { aggregator: aggregatorOverride } : {}),
 };
 
 ensureOutputDir(outputDir, !!args.force);

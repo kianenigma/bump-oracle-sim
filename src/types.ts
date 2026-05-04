@@ -22,6 +22,54 @@ export interface BumpSubmission {
   bump: Bump;
 }
 
+// ── Aggregator selection ──
+//
+// AggregatorMode is the bare tag (used in summaries, labels, registries).
+// AggregatorConfig is the *configured* form including any per-aggregator
+// parameters. They are kept separate so SimulationSummary stays a flat enum
+// while config can carry parameters cleanly.
+//
+// Behaviors:
+//   "nudge"        : current design — validators emit Up/Down, author picks subset,
+//                    runtime applies (net × ε). Only mode that uses ε.
+//   "median"       : validators submit absolute price quotes, runtime takes the
+//                    median. Robust to outliers up to <50% adversarial.
+//   "trimmed-mean" : validators submit absolute price quotes, runtime drops the
+//                    top k% and bottom k% by value, then averages the rest.
+//                    Smooths jitter better than median; weaker outlier rejection.
+export type AggregatorMode = "nudge" | "median" | "trimmed-mean";
+
+export type AggregatorConfig =
+  | { kind: "nudge" }
+  | { kind: "median" }
+  | { kind: "trimmed-mean"; k: number };  // k = fraction trimmed from each tail (e.g. 0.1 = drop top 10% + bottom 10%)
+
+export function aggregatorMode(cfg: AggregatorConfig): AggregatorMode {
+  return cfg.kind;
+}
+
+// ── Malicious validator parameters ───────────────────────────────────────────
+// All knobs that govern adversarial behavior. Surfaced on SimulationConfig so
+// scenarios can vary them and so they show up in stdout / UI alongside the
+// rest of the run config.
+export interface MaliciousParams {
+  /** How many blocks behind DelayedValidator reads its price (default 10 = 60s at 6s blocks). */
+  delayBlocks: number;
+  /** PushyMaliciousValidator quote-mode outlier magnitude, as a fraction of real price (default 0.05 = 5%). */
+  pushyQuoteBias: number;
+  /** DriftValidator quote-mode per-block multiplicative bias (default 0.001 = 0.1% per block). */
+  driftQuoteStep: number;
+}
+
+// What a single validator submits per block. Aggregators consume an array of these.
+// - "nudge"  : signed direction only (current behavior)
+// - "quote"  : absolute price (used by median / trimmed-mean)
+// - "abstain": validator opted not to submit (used by NoopValidator under non-nudge aggregators)
+export type Submission =
+  | { kind: "nudge"; validatorIndex: number; bump: Bump }
+  | { kind: "quote"; validatorIndex: number; price: number }
+  | { kind: "abstain"; validatorIndex: number };
+
 export interface BlockMetrics {
   block: number;
   timestamp: number;
@@ -75,6 +123,10 @@ export interface SimulationConfig {
   jitterStdDev: number; // price jitter std dev as fraction (e.g. 0.001 = 0.1%)
   convergenceThreshold: number; // deviation % threshold for convergence (default 0.1)
   label: string;
+  /** Aggregation rule + per-aggregator parameters. Defaults to { kind: "nudge" }. */
+  aggregator?: AggregatorConfig;
+  /** Per-validator-type adversarial knobs. Defaults to DEFAULT_MALICIOUS_PARAMS in config.ts. */
+  maliciousParams?: MaliciousParams;
 }
 
 export interface SimulationResult {
@@ -85,7 +137,10 @@ export interface SimulationResult {
 export interface SimulationSummary {
   /// Total number of blocks in the simulation
   totalBlocks: number;
-  /// The resolved epsilon value used in the simulation (absolute step, or per-bump ratio)
+  /// Aggregation rule that produced this run (recorded so labels/charts are unambiguous).
+  aggregator: AggregatorMode;
+  /// The resolved epsilon value used in the simulation (absolute step, or per-bump ratio).
+  /// Only meaningful when aggregator === "nudge"; ignored for "median" / "trimmed-mean".
   epsilon: number;
   /// Whether epsilon is an absolute step ("abs") or a fraction of oracle price ("ratio")
   epsilonMode: EpsilonMode;

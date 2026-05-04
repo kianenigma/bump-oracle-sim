@@ -1,21 +1,27 @@
 import { Bump } from "../types.js";
-import type { BumpSubmission } from "../types.js";
+import type { BumpSubmission, MaliciousParams, Submission } from "../types.js";
 import type { PriceEndpoint } from "./price-endpoint.js";
 
 export interface ValidatorAgent {
   readonly index: number;
   readonly isHonest: boolean;
 
-  /** Produce a bump (Up or Down) based on the validator's view of the price */
+  /** Produce a bump (Up or Down) based on the validator's view of the price.
+   *  Used only by the "nudge" aggregator. */
   produceBump(lastPrice: number, blockIndex: number): Bump;
 
-  /** As block author, select which bumps to activate. Returns a boolean mask. */
+  /** As block author, select which bumps to activate. Returns a boolean mask.
+   *  Used only by the "nudge" aggregator. */
   producePrice(
     bumps: BumpSubmission[],
     lastPrice: number,
     epsilon: number,
     blockIndex: number
   ): boolean[];
+
+  /** Submit an absolute price quote (or abstain) for runtime aggregation.
+   *  Used by the "median" and "trimmed-mean" aggregators. */
+  produceQuote(lastPrice: number, blockIndex: number): Submission;
 }
 
 /**
@@ -41,7 +47,7 @@ export class HonestValidator implements ValidatorAgent {
   private rng: () => number;
   private jitterStdDev: number;
 
-  constructor(index: number, endpoint: PriceEndpoint, rng: () => number, jitterStdDev: number) {
+  constructor(index: number, endpoint: PriceEndpoint, rng: () => number, jitterStdDev: number, _params: MaliciousParams) {
     this.index = index;
     this.endpoint = endpoint;
     this.rng = rng;
@@ -77,5 +83,11 @@ export class HonestValidator implements ValidatorAgent {
     }
 
     return mask;
+  }
+
+  // Honest quote = the validator's locally jittered observation of the real price.
+  produceQuote(_lastPrice: number, blockIndex: number): Submission {
+    const price = this.endpoint.getJitteredPrice(blockIndex, this.rng, this.jitterStdDev);
+    return { kind: "quote", validatorIndex: this.index, price };
   }
 }

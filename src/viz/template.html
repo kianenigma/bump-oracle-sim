@@ -408,16 +408,31 @@
     // Column definitions: { key, label, type: 'string'|'number', getter: (scenario) => value }
     const STATS_COLUMNS = [
       { key: 'label', label: 'Label', type: 'string', getter: sc => sc.config.label || 'default' },
+      { key: 'aggregator', label: 'Aggregator', type: 'string', getter: sc => {
+        const a = sc.config.aggregator;
+        if (!a) return 'nudge';
+        return a.kind === 'trimmed-mean' ? `trimmed-mean(k=${a.k})` : a.kind;
+      }},
       { key: 'validators', label: 'Validators', type: 'number', getter: sc => sc.config.validatorCount },
       { key: 'validatorMix', label: 'Validator Mix', type: 'string', getter: sc => {
         const mix = sc.config.validatorMix || {};
-        const parts = Object.entries(mix).map(([k, v]) => `${(v*100).toFixed(0)}% ${k}`);
-        const honestPct = 100 - Object.values(mix).reduce((a, b) => a + b, 0) * 100;
+        const fracOf = v => typeof v === 'number' ? v : (v && v.fraction) || 0;
+        const parts = Object.entries(mix).map(([k, v]) => `${(fracOf(v)*100).toFixed(0)}% ${k}`);
+        const honestPct = 100 - Object.values(mix).reduce((a, v) => a + fracOf(v), 0) * 100;
         return `${honestPct.toFixed(0)}% honest` + (parts.length ? ', ' + parts.join(', ') : '');
       }},
       { key: 'epsilon', label: 'Epsilon', type: 'number', getter: sc => typeof sc.config.epsilon === 'number' ? sc.config.epsilon : 0 },
       { key: 'seed', label: 'Seed', type: 'number', getter: sc => sc.config.seed },
       { key: 'jitter', label: 'Jitter', type: 'number', getter: sc => sc.config.jitterStdDev },
+      { key: 'maliciousParams', label: 'Malicious Params', type: 'string', getter: sc => {
+        const mp = sc.config.maliciousParams; if (!mp) return '—';
+        const present = new Set(Object.keys(sc.config.validatorMix || {}));
+        const parts = [];
+        if (present.has('delayed')) parts.push(`delay=${mp.delayBlocks}b`);
+        if (present.has('pushy'))   parts.push(`pushyBias=${(mp.pushyQuoteBias*100).toFixed(2)}%`);
+        if (present.has('drift'))   parts.push(`driftStep=${(mp.driftQuoteStep*100).toFixed(3)}%`);
+        return parts.length ? parts.join(', ') : '—';
+      }},
       { key: 'totalBlocks', label: 'Total Blocks', type: 'number', getter: sc => sc.summary.totalBlocks },
       { key: 'meanDevPct', label: 'Mean Dev %', type: 'number', getter: sc => sc.summary.meanDeviationPct },
       { key: 'maxDevPct', label: 'Max Dev %', type: 'number', getter: sc => sc.summary.maxDeviationPct },
@@ -814,7 +829,40 @@
         const color = COLORS[idx % COLORS.length];
         scenarioColorMap.set(sc.index, color);
         const lbl = document.createElement('label');
-        lbl.title = sc.config.label || `Scenario ${sc.index}`;
+        // Rich tooltip: full config snapshot so hovering a scenario reveals
+        // exactly what was simulated (matches the stdout block from engine.ts).
+        lbl.title = (() => {
+          const c = sc.config;
+          const aggCfg = c.aggregator;
+          const aggStr = !aggCfg ? 'nudge'
+            : aggCfg.kind === 'trimmed-mean' ? `trimmed-mean(k=${aggCfg.k})`
+            : aggCfg.kind;
+          const fracOf = v => typeof v === 'number' ? v : (v && v.fraction) || 0;
+          const mix = c.validatorMix || {};
+          const mixParts = Object.entries(mix).map(([k, v]) => `${(fracOf(v)*100).toFixed(1)}% ${k}`);
+          const honestPct = 100 - Object.values(mix).reduce((a, v) => a + fracOf(v), 0) * 100;
+          const mixStr = `${honestPct.toFixed(1)}% honest` + (mixParts.length ? ', ' + mixParts.join(', ') : '');
+          const epsStr = typeof c.epsilon === 'number' ? c.epsilon.toFixed(6) : JSON.stringify(c.epsilon);
+          const mp = c.maliciousParams;
+          const malParts = [];
+          if (mp) {
+            const present = new Set(Object.keys(mix));
+            if (present.has('delayed')) malParts.push(`delayBlocks=${mp.delayBlocks}`);
+            if (present.has('pushy'))   malParts.push(`pushyQuoteBias=${(mp.pushyQuoteBias*100).toFixed(2)}%`);
+            if (present.has('drift'))   malParts.push(`driftQuoteStep=${(mp.driftQuoteStep*100).toFixed(3)}%`);
+          }
+          const lines = [
+            c.label,
+            `aggregator   : ${aggStr}`,
+            `range        : ${c.startDate} → ${c.endDate}`,
+            `validators   : ${c.validatorCount} (${mixStr})`,
+            `epsilon      : ${epsStr}${aggCfg && aggCfg.kind !== 'nudge' ? ' (ignored)' : ''}`,
+            `jitter stddev: ${(c.jitterStdDev*100).toFixed(3)}%`,
+          ];
+          if (malParts.length) lines.push(`malicious    : ${malParts.join(', ')}`);
+          lines.push(`seed         : ${c.seed}`);
+          return lines.join('\n');
+        })();
 
         const cb = document.createElement('input');
         cb.type = 'checkbox';
@@ -1039,18 +1087,22 @@
       const isCandle = currentView === 'candle';
       lastServerView = currentView;
 
+      // lastValueVisible: true causes the right-axis to always label the latest
+      // value of each series, so the current price is visible even when the
+      // crosshair is not on the chart. priceLineVisible stays false to avoid
+      // dashed horizontal clutter across the plot area.
       const rpLabel = 'Real Price';
       if (isCandle) {
         const s = priceChart.addCandlestickSeries({
           upColor: '#5c6b73', downColor: '#5c6b73',
           wickUpColor: '#888', wickDownColor: '#888',
           borderUpColor: '#888', borderDownColor: '#888',
-          lastValueVisible: false, priceLineVisible: false,
+          lastValueVisible: true, priceLineVisible: false,
         });
         s.setData(data.realPrice.ohlc);
         activePriceSeries.push({ series: s, label: rpLabel, color: REAL_COLOR, kind: 'candle' });
       } else {
-        const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, lastValueVisible: false, priceLineVisible: false });
+        const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, lastValueVisible: true, priceLineVisible: false });
         s.setData(data.realPrice.line);
         activePriceSeries.push({ series: s, label: rpLabel, color: REAL_COLOR, kind: 'line' });
       }
@@ -1065,17 +1117,17 @@
             upColor: color + 'CC', downColor: color + '66',
             wickUpColor: color, wickDownColor: color,
             borderUpColor: color, borderDownColor: color,
-            visible, lastValueVisible: false, priceLineVisible: false,
+            visible, lastValueVisible: true, priceLineVisible: false,
           });
           s.setData(oracle.ohlc);
           activePriceSeries.push({ series: s, label: oLabel, color, kind: 'candle' });
         } else {
-          const s = priceChart.addLineSeries({ color, lineWidth: 2, visible, lastValueVisible: false, priceLineVisible: false });
+          const s = priceChart.addLineSeries({ color, lineWidth: 2, visible, lastValueVisible: true, priceLineVisible: false });
           s.setData(oracle.line);
           activePriceSeries.push({ series: s, label: oLabel, color, kind: 'line' });
         }
 
-        const ds = devChart.addLineSeries({ color, lineWidth: 1, visible, lastValueVisible: false, priceLineVisible: false });
+        const ds = devChart.addLineSeries({ color, lineWidth: 1, visible, lastValueVisible: true, priceLineVisible: false });
         ds.setData(oracle.deviation);
         activeDevSeries.push({ series: ds, label: `Dev: ${oracle.label}`, color, kind: 'line' });
       });
@@ -1244,17 +1296,25 @@
         serverMeta = await res.json();
 
         const configEl = document.getElementById('config-info');
+        const fmtAgg = (a) => !a ? 'nudge' : (a.kind === 'trimmed-mean' ? `trimmed-mean(k=${a.k})` : a.kind);
+        const fmtFrac = (v) => typeof v === 'number' ? v : (v && v.fraction) || 0;
         if (serverMeta.scenarios.length === 1) {
           const c = serverMeta.scenarios[0].config;
           configEl.innerHTML = [
+            `<span>Aggregator: ${fmtAgg(c.aggregator)}</span>`,
             `<span>Validators: ${c.validatorCount}</span>`,
-            `<span>Mix: ${(() => { const m = c.validatorMix||{}; const parts = Object.entries(m).map(([k,v])=>(v*100).toFixed(0)+'% '+k); const h = 100-Object.values(m).reduce((a,b)=>a+b,0)*100; return h.toFixed(0)+'% honest'+(parts.length?', '+parts.join(', '):''); })()}</span>`,
-            `<span>Epsilon: ${typeof c.epsilon==='number'?c.epsilon.toFixed(6):c.epsilon}</span>`,
+            `<span>Mix: ${(() => { const m = c.validatorMix||{}; const parts = Object.entries(m).map(([k,v])=>(fmtFrac(v)*100).toFixed(0)+'% '+k); const h = 100-Object.values(m).reduce((a,v)=>a+fmtFrac(v),0)*100; return h.toFixed(0)+'% honest'+(parts.length?', '+parts.join(', '):''); })()}</span>`,
+            `<span>Epsilon: ${typeof c.epsilon==='number'?c.epsilon.toFixed(6):JSON.stringify(c.epsilon)}</span>`,
+            `<span>Jitter: ${(c.jitterStdDev*100).toFixed(3)}%</span>`,
             `<span>Seed: ${c.seed}</span>`,
             `<span>${c.startDate} to ${c.endDate}</span>`,
           ].join('');
         } else {
+          // Show aggregator breakdown if scenarios use different aggregators
+          const aggSet = new Set(serverMeta.scenarios.map(s => fmtAgg(s.config.aggregator)));
+          const aggDesc = aggSet.size === 1 ? `Aggregator: ${[...aggSet][0]}` : `Aggregators: ${[...aggSet].join(' / ')}`;
           configEl.innerHTML = `<span>${serverMeta.scenarioCount} scenarios compared</span>`+
+            `<span>${aggDesc}</span>`+
             `<span>${serverMeta.scenarios[0].config.startDate} to ${serverMeta.scenarios[0].config.endDate}</span>`;
         }
 

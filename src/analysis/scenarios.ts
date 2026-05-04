@@ -1,14 +1,82 @@
 import { join } from "path";
 import { mkdirSync } from "fs";
 import { epsilonValue } from "../types.js";
-import type { SimulationConfig, SimulationResult, PricePoint, ScenarioMeta, ValidatorMix, EpsilonSpec } from "../types.js";
-import { DEFAULT_CONFIG } from "../config.js";
+import type { SimulationConfig, SimulationResult, PricePoint, ScenarioMeta, ValidatorMix, EpsilonSpec, AggregatorConfig, MaliciousParams } from "../types.js";
+import { DEFAULT_CONFIG, DEFAULT_MALICIOUS_PARAMS } from "../config.js";
 import { runSimulation, type BlockSink } from "../sim/engine.js";
 import { maxBlockDelta } from "../data/interpolator.js";
 import { ChunkWriter, writeIndex, scenarioDirName } from "../viz/writer.js";
 import { loadCriteria } from "./research-criteria.js";
 import { generateReport } from "./research-report.js";
 import { formatMix } from "../mix.js";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Glossary — what each agent does at a glance.
+// Full implementations: src/sim/validator.ts, src/sim/malicious.ts.
+//
+// Agents (validator types you can mix):
+//   honest    Submits an honestly-jittered observation of the real price.
+//             Nudge mode: bump = sign(jitteredPrice − lastPrice), as author
+//             selects the optimal number of in-direction bumps.
+//             Quote mode: submits the jittered price directly.
+//
+//   malicious Inverse strategy. Pushes price *away* from real.
+//             Nudge mode: bump direction flipped; as author activates
+//             same-direction bumps (away-from-real).
+//             Quote mode: mirrors the honest quote across lastPrice
+//             (price = 2·lastPrice − honestQuote). Same magnitude, wrong sign.
+//
+//   pushy     Nudge mode: honest bump direction; as author activates ALL
+//             in-direction bumps (over-shoot via maximal push).
+//             Quote mode: submits real-price-plus-PUSHY_QUOTE_BIAS (5%) in
+//             the direction of motion. NOTE: this is an extreme outlier,
+//             which median trivially rejects below 50% — i.e. pushy was
+//             primarily an author-side attack and translates lossily.
+//
+//   noop      Author-side censorship.
+//             Nudge mode: emits honest bumps but as author selects none
+//             (price freezes for that block).
+//             Quote mode: abstains from quoting; when authoring, the chain
+//             skips aggregation entirely (modeled in chain.ts) — same
+//             behavior as nudge mode at the author-block level.
+//
+//   delayed  Honest intent, but reads jittered price from DELAY_BLOCKS=10
+//            (60s) ago in both modes. Lags sharp moves.
+//
+//   drift    Persistent upward bias, regardless of real price.
+//            Nudge mode: always Bump.Up; as author activates all Up bumps.
+//            Quote mode: submits lastPrice·(1 + DRIFT_QUOTE_STEP) every block.
+//
+// Aggregators:
+//   nudge        Validators submit Up/Down. Block author picks subset.
+//                price' = lastPrice + (net activated bumps) × ε.
+//   median       Validators submit absolute prices. price' = median(quotes).
+//                Robust to outliers up to 50% adversarial (by count).
+//   trimmed-mean Validators submit absolute prices. Drop top k% and bottom
+//                k% by value, then average. Smoother than median; weaker
+//                outlier rejection if k is too small.
+//
+// Adversarial knobs (MaliciousParams, defaults in src/config.ts):
+//   delayBlocks      How far behind `delayed` reads its price.
+//                    Default: 10 blocks (60s at 6s blocks).
+//   pushyQuoteBias   Quote-mode outlier magnitude for `pushy`, as a fraction
+//                    of real price. Default: 0.05 = 5%.
+//   driftQuoteStep   Quote-mode per-block multiplicative bias for `drift`.
+//                    Default: 0.001 = 0.1% per block.
+//
+// Each scenario can override these via mergeConfig({ maliciousParams: {...} }).
+// See `aggregator-comparison` below for a usage example.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Adversarial parameter set used by the aggregator-comparison scenario.
+// Listed here so scanning scenarios.ts reveals exactly what each adversary
+// is doing. Override per-scenario by passing a different object via
+// mergeConfig({ maliciousParams: ... }).
+const COMPARISON_MALICIOUS_PARAMS: MaliciousParams = {
+  driftQuoteStep: 0.1,
+  pushyQuoteBias: 0.1,
+  delayBlocks: 100,
+};
 
 export type ScenarioFn = (
   baseConfig: Partial<SimulationConfig>,
@@ -19,6 +87,14 @@ export type ScenarioFn = (
 
 function mergeConfig(overrides: Partial<SimulationConfig>): SimulationConfig {
   return { ...DEFAULT_CONFIG, ...overrides };
+}
+
+function aggregatorLabel(cfg: AggregatorConfig): string {
+  switch (cfg.kind) {
+    case "nudge":        return "nudge";
+    case "median":       return "median";
+    case "trimmed-mean": return `trimmed-mean(k=${cfg.k})`;
+  }
 }
 
 /**
@@ -415,6 +491,76 @@ export const scenarios: Record<string, ScenarioFn> = {
     generateReport(results, epsilonMultipliers, criteria, autoEpsilon, reportPath);
 
     return results;
+  },
+
+  /**
+   * Cross-aggregator malicious-fraction sweep.
+   *
+   * Compares the three aggregator rules under identical conditions:
+   *   - nudge        (current design: bumps + ε)
+   *   - median       (validators submit absolute prices, runtime medians)
+   *   - trimmed-mean (validators submit absolute prices, drop top/bottom 10%)
+   *
+   * Adversaries: only the strategies that translate cleanly to both nudge and
+   * quote modes are included here. `pushy` and `noop` are excluded — both are
+   * primarily *author-side* attacks in the nudge protocol and have weakened or
+   * structurally-different analogs under runtime aggregation. A separate
+   * scenario could surface those if needed.
+   *
+   * Cross-product: 3 aggregators × 3 malicious types × 7 fractions = 63 sims.
+   * Each scenario label is "<aggregator> · <type>@<pct>%", which is what shows
+   * up in the viz overlay legend.
+   *
+   * IMPORTANT: under median/trimmed-mean, ε is meaningless and ignored. The
+   * runs use whatever ε is passed in (auto by default) but it doesn't affect
+   * those aggregators' price updates.
+   */
+  async "aggregator-comparison"(overrides, pricePoints, outputDir, threadCount) {
+    console.log(`\n[Scenario: aggregator-comparison]`);
+
+    const aggregators: AggregatorConfig[] = [
+      { kind: "nudge" },
+      { kind: "median" },
+      { kind: "trimmed-mean", k: 0.33 },
+    ];
+    const adversaryTypes = ["malicious", "pushy"] as const;
+    // Non-zero fractions only — the honest (0%) baseline is added once per
+    // aggregator outside the type loop. Otherwise we'd run the same
+    // all-honest sim once per adversary type per aggregator.
+    const fractions = [0.10, 0.33, 0.49, 0.5];
+
+    const configs: SimulationConfig[] = [];
+    for (const agg of aggregators) {
+      // One honest baseline per aggregator.
+      configs.push(mergeConfig({
+        ...overrides,
+        aggregator: agg,
+        validatorMix: {},
+        maliciousParams: COMPARISON_MALICIOUS_PARAMS,
+        label: `${aggregatorLabel(agg)} · honest`,
+      }));
+
+      for (const type of adversaryTypes) {
+        for (const frac of fractions) {
+          const label = `${aggregatorLabel(agg)} · ${type}@${(frac * 100).toFixed(0)}%`;
+          configs.push(mergeConfig({
+            ...overrides,
+            aggregator: agg,
+            validatorMix: { [type]: frac },
+            maliciousParams: COMPARISON_MALICIOUS_PARAMS,
+            label,
+          }));
+        }
+      }
+    }
+
+    const mp = COMPARISON_MALICIOUS_PARAMS;
+    console.log(`  Grid: ${aggregators.length} aggregators × (1 honest + ${adversaryTypes.length} adversary types × ${fractions.length} fractions) = ${configs.length} simulations`);
+    console.log(`  Adversaries (with quote-mode behavior):`);
+    console.log(`    malicious : inverse direction (nudge) / mirror across lastPrice (quote)`);
+    console.log(`    pushy     : max-push as author (nudge) / outlier real·(1 ± ${mp.pushyQuoteBias}) (quote, lossy)`);
+
+    return runBatch(configs, pricePoints, outputDir, threadCount);
   },
 
   async "research-ratio-eps"(overrides, pricePoints, outputDir, threadCount) {
