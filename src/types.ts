@@ -48,6 +48,20 @@ export function aggregatorMode(cfg: AggregatorConfig): AggregatorMode {
   return cfg.kind;
 }
 
+// ── Price-data source selection ──────────────────────────────────────────────
+// The simulator can be fed by two pipelines, both producing PricePoint[]:
+//   "candles" : Binance US 1-minute OHLC linearly interpolated to 6s blocks
+//               (existing path; fast iteration, smooths intra-minute dynamics).
+//   "trades"  : per-trade data from one or more spot venues, bucketed to 6s
+//               VWAP per venue, then median across venues per block.
+//               (new path; preserves intra-minute volatility, reflects
+//               cross-venue price discovery).
+export type VenueId = "binance" | "kraken" | "bybit" | "gate";
+
+export type DataSourceSpec =
+  | { kind: "candles" }
+  | { kind: "trades"; venues: VenueId[] };
+
 // ── Malicious validator parameters ───────────────────────────────────────────
 // All knobs that govern adversarial behavior. Surfaced on SimulationConfig so
 // scenarios can vary them and so they show up in stdout / UI alongside the
@@ -127,6 +141,8 @@ export interface SimulationConfig {
   aggregator?: AggregatorConfig;
   /** Per-validator-type adversarial knobs. Defaults to DEFAULT_MALICIOUS_PARAMS in config.ts. */
   maliciousParams?: MaliciousParams;
+  /** Where the price feed comes from. Defaults to { kind: "candles" } (back-compat). */
+  dataSource?: DataSourceSpec;
 }
 
 export interface SimulationResult {

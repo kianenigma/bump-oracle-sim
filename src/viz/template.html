@@ -408,6 +408,11 @@
     // Column definitions: { key, label, type: 'string'|'number', getter: (scenario) => value }
     const STATS_COLUMNS = [
       { key: 'label', label: 'Label', type: 'string', getter: sc => sc.config.label || 'default' },
+      { key: 'dataSource', label: 'Data Source', type: 'string', getter: sc => {
+        const d = sc.config.dataSource;
+        if (!d || d.kind === 'candles') return 'candles';
+        return `trades(${(d.venues || []).join(',')})`;
+      }},
       { key: 'aggregator', label: 'Aggregator', type: 'string', getter: sc => {
         const a = sc.config.aggregator;
         if (!a) return 'nudge';
@@ -851,8 +856,13 @@
             if (present.has('pushy'))   malParts.push(`pushyQuoteBias=${(mp.pushyQuoteBias*100).toFixed(2)}%`);
             if (present.has('drift'))   malParts.push(`driftQuoteStep=${(mp.driftQuoteStep*100).toFixed(3)}%`);
           }
+          const ds = c.dataSource;
+          const dsStr = !ds || ds.kind === 'candles'
+            ? 'candles (Binance US 1m → 6s interp)'
+            : `trades (${(ds.venues || []).join(', ')})`;
           const lines = [
             c.label,
+            `data source  : ${dsStr}`,
             `aggregator   : ${aggStr}`,
             `range        : ${c.startDate} → ${c.endDate}`,
             `validators   : ${c.validatorCount} (${mixStr})`,
@@ -1297,10 +1307,12 @@
 
         const configEl = document.getElementById('config-info');
         const fmtAgg = (a) => !a ? 'nudge' : (a.kind === 'trimmed-mean' ? `trimmed-mean(k=${a.k})` : a.kind);
+        const fmtDs = (d) => !d || d.kind === 'candles' ? 'candles' : `trades(${(d.venues || []).join(',')})`;
         const fmtFrac = (v) => typeof v === 'number' ? v : (v && v.fraction) || 0;
         if (serverMeta.scenarios.length === 1) {
           const c = serverMeta.scenarios[0].config;
           configEl.innerHTML = [
+            `<span>Source: ${fmtDs(c.dataSource)}</span>`,
             `<span>Aggregator: ${fmtAgg(c.aggregator)}</span>`,
             `<span>Validators: ${c.validatorCount}</span>`,
             `<span>Mix: ${(() => { const m = c.validatorMix||{}; const parts = Object.entries(m).map(([k,v])=>(fmtFrac(v)*100).toFixed(0)+'% '+k); const h = 100-Object.values(m).reduce((a,v)=>a+fmtFrac(v),0)*100; return h.toFixed(0)+'% honest'+(parts.length?', '+parts.join(', '):''); })()}</span>`,

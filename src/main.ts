@@ -2,12 +2,11 @@ import { parseArgs } from "util";
 import { mkdirSync, existsSync, statSync, rmSync } from "fs";
 import { join } from "path";
 import { cpus } from "os";
-import { DEFAULT_CONFIG, CANDLE_INTERVAL } from "./config.js";
+import { DEFAULT_CONFIG, CANDLE_INTERVAL, ALL_VENUES } from "./config.js";
 import { epsilonValue } from "./types.js";
-import type { SimulationConfig, SimulationResult, ScenarioMeta, EpsilonSpec, AggregatorConfig } from "./types.js";
+import type { SimulationConfig, SimulationResult, ScenarioMeta, EpsilonSpec, AggregatorConfig, DataSourceSpec, VenueId } from "./types.js";
 import { parseMixCli, formatMix } from "./mix.js";
-import { fetchCandles } from "./data/fetcher.js";
-import { interpolateToBlocks } from "./data/interpolator.js";
+import { loadPriceSource } from "./data/source.js";
 import { runSimulation } from "./sim/engine.js";
 import { ChunkWriter, writeIndex, loadIndex, scenarioDirName } from "./viz/writer.js";
 import { startServer } from "./viz/server.js";
@@ -42,6 +41,8 @@ const { values: args } = parseArgs({
     force: { type: "boolean", default: false },
     aggregator: { type: "string" },
     "trimmed-mean-k": { type: "string", default: "0.1" },
+    "data-source": { type: "string", default: "candles" },
+    venues: { type: "string" },
     help: { type: "boolean", default: false },
   },
 });
@@ -77,6 +78,9 @@ Options:
   --force                       Overwrite existing output directory
   --aggregator <mode>           Aggregation rule: "nudge" (default), "median", or "trimmed-mean"
   --trimmed-mean-k <fraction>   Fraction trimmed from each tail when using trimmed-mean (default: 0.1)
+  --data-source <kind>          "candles" (default, fast) or "trades" (per-trade, multi-venue)
+  --venues <list>               Comma-separated venue ids (default: binance). Only used with --data-source=trades.
+                                  Available venues: ${ALL_VENUES.join(", ")} (Phase 1: only binance is implemented)
   --help                        Show this help
 `);
   process.exit(0);
@@ -87,6 +91,29 @@ if (args["list-scenarios"]) {
   process.exit(0);
 }
 
+
+function parseDataSourceArg(kind: string, venuesRaw: string | undefined): DataSourceSpec {
+  if (kind === "candles") {
+    if (venuesRaw) console.error(`Warning: --venues ignored when --data-source=candles`);
+    return { kind: "candles" };
+  }
+  if (kind === "trades") {
+    const list = (venuesRaw ?? "binance").split(",").map((s) => s.trim()).filter(Boolean);
+    for (const v of list) {
+      if (!ALL_VENUES.includes(v as VenueId)) {
+        console.error(`Invalid venue "${v}". Available: ${ALL_VENUES.join(", ")}`);
+        process.exit(1);
+      }
+    }
+    if (list.length === 0) {
+      console.error(`--data-source=trades requires at least one venue`);
+      process.exit(1);
+    }
+    return { kind: "trades", venues: list as VenueId[] };
+  }
+  console.error(`Invalid --data-source: "${kind}". Expected: candles, trades.`);
+  process.exit(1);
+}
 
 function parseAggregatorArg(raw: string | undefined, k: number): AggregatorConfig | undefined {
   if (raw === undefined) return undefined;
@@ -217,17 +244,22 @@ if (args.data) {
 const startDate = args["start-date"]!;
 const endDate = args["end-date"]!;
 
-console.log(`\nFetching DOT/USDT data: ${startDate} to ${endDate}`);
-const cacheData = await fetchCandles(startDate, endDate, CANDLE_INTERVAL);
+const dataSource = parseDataSourceArg(args["data-source"]!, args.venues);
+
+if (dataSource.kind === "candles") {
+  console.log(`\nFetching DOT/USDT data (candles): ${startDate} to ${endDate}`);
+} else {
+  console.log(`\nLoading DOT/USDT data (trades, venues: ${dataSource.venues.join(", ")}): ${startDate} to ${endDate}`);
+}
+
+const pricePoints = await loadPriceSource(dataSource, startDate, endDate);
 
 if (args["fetch-only"]) {
-  console.log(`\nFetch complete. ${cacheData.dataPoints} candles cached.`);
+  console.log(`\nFetch complete. ${pricePoints.length.toLocaleString()} price points loaded.`);
   process.exit(0);
 }
 
-console.log(`\nInterpolating ${cacheData.dataPoints} candles to 6s blocks...`);
-const pricePoints = interpolateToBlocks(cacheData.data);
-console.log(`  Generated ${pricePoints.length} price points`);
+console.log(`  Generated ${pricePoints.length.toLocaleString()} price points`);
 
 // Determine output directory
 const userSetOutput = Bun.argv.slice(2).includes("--output");
@@ -249,6 +281,7 @@ const baseOverrides: Partial<SimulationConfig> = {
   jitterStdDev: parseFloat(args.jitter!),
   epsilon: parseEpsilonArg(args.epsilon!),
   convergenceThreshold: parseFloat(args["convergence-threshold"]!),
+  dataSource,
   ...(aggregatorOverride ? { aggregator: aggregatorOverride } : {}),
 };
 

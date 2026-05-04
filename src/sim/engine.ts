@@ -31,7 +31,7 @@ export function runSimulation(
   quiet = false,
   onProgress?: (pct: number) => void,
 ): SimulationResult {
-  if (!quiet) printConfig(config);
+  if (!quiet) printConfig(config, pricePoints);
   const rng = mulberry32(config.seed);
   const endpoint = new PriceEndpoint(pricePoints);
 
@@ -202,7 +202,7 @@ export function runSimulation(
 }
 
 /** Print a structured snapshot of the run config so each simulation start is greppable. */
-function printConfig(config: SimulationConfig): void {
+function printConfig(config: SimulationConfig, pricePoints?: PricePoint[]): void {
   const agg = config.aggregator ?? { kind: "nudge" };
   const aggStr = agg.kind === "trimmed-mean" ? `trimmed-mean(k=${agg.k})` : agg.kind;
   const mixEntries = Object.entries(config.validatorMix);
@@ -226,11 +226,22 @@ function printConfig(config: SimulationConfig): void {
   if (present.has("pushy"))   malParts.push(`pushyQuoteBias=${(mp.pushyQuoteBias * 100).toFixed(2)}%`);
   if (present.has("drift"))   malParts.push(`driftQuoteStep=${(mp.driftQuoteStep * 100).toFixed(3)}%`);
 
+  const ds = config.dataSource ?? { kind: "candles" } as const;
+  const dsStr = ds.kind === "candles"
+    ? "candles (Binance US 1m → interp 6s)"
+    : `trades (${ds.venues.join(", ")})  ⚠ intra-minute volatility preserved`;
+
   console.log(`\n  ┌─ ${config.label}`);
+  console.log(`  │  data source  : ${dsStr}`);
   console.log(`  │  aggregator   : ${aggStr}`);
   console.log(`  │  range        : ${config.startDate} → ${config.endDate}`);
   console.log(`  │  validators   : ${config.validatorCount} (${mixStr})`);
   console.log(`  │  epsilon      : ${epsStr}${agg.kind !== "nudge" ? "  (ignored by this aggregator)" : ""}`);
+  if (ds.kind === "trades" && pricePoints && pricePoints.length > 1) {
+    const md = maxBlockDelta(pricePoints);
+    const autoEps = md / config.validatorCount;
+    console.log(`  │  trade-mode ε : maxBlockDelta=${md.toFixed(6)}, auto-ε ≈ ${autoEps.toFixed(6)} (validators=${config.validatorCount})`);
+  }
   console.log(`  │  jitter stddev: ${(config.jitterStdDev * 100).toFixed(3)}%`);
   if (malParts.length > 0) console.log(`  │  malicious    : ${malParts.join(", ")}`);
   console.log(`  │  seed         : ${config.seed}`);
