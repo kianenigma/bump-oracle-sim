@@ -6,9 +6,10 @@ import type {
   BlockChunk,
   ApiMetaResponse,
   ApiDataResponse,
+  LinePoint,
 } from "../types.js";
 import { aggregateOHLC, aggregateLine, aggregateDeviation } from "./aggregation.js";
-import { loadIndex, loadChunk } from "./writer.js";
+import { loadIndex, loadChunk, loadVenues, type VenuesFile } from "./writer.js";
 
 const TEMPLATE_PATH = join(import.meta.dir, "template.html");
 const MAX_CANDLES = 10_000;
@@ -130,6 +131,7 @@ function parseScenarioFilter(raw: string, allowedIndices?: number[]): number[] |
 async function buildDataResponse(
   outputDir: string,
   index: SimDataIndex,
+  venues: VenuesFile | null,
   from: number,
   to: number,
   tf: number,
@@ -174,6 +176,14 @@ async function buildDataResponse(
     };
   }));
 
+  let venuesResp: Record<string, LinePoint[]> | undefined;
+  if (venues) {
+    venuesResp = {};
+    for (const [vid, prices] of Object.entries(venues.venues)) {
+      venuesResp[vid] = aggregateLine(venues.timestamps, prices, paddedFrom, paddedTo, tf);
+    }
+  }
+
   return {
     tf,
     requestedTF,
@@ -181,6 +191,7 @@ async function buildDataResponse(
     to: paddedTo,
     realPrice: { ohlc: realOhlc, line: realLine },
     oracles,
+    venues: venuesResp,
   };
 }
 
@@ -192,6 +203,7 @@ export async function startServer(
   timeConstraint?: { from: number; to: number },
 ): Promise<void> {
   const index = await loadIndex(outputDir);
+  const venues = await loadVenues(outputDir);
   const templateHtml = await Bun.file(TEMPLATE_PATH).text();
   const metaResponse = JSON.stringify(buildMetaResponse(index, filterIndices, timeConstraint));
 
@@ -243,7 +255,7 @@ export async function startServer(
           });
         }
 
-        const result = await buildDataResponse(outputDir, index, from, to, tf, scenario, filterIndices);
+        const result = await buildDataResponse(outputDir, index, venues, from, to, tf, scenario, filterIndices);
         return new Response(JSON.stringify(result), {
           headers: {
             "Content-Type": "application/json",

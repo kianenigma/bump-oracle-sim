@@ -63,13 +63,6 @@
     .toolbar-hint { font-size: 10px; color: var(--text-dim); margin-left: auto; }
     kbd { background: var(--tag-bg); padding: 1px 4px; border-radius: 3px; font-size: 10px; font-family: inherit; }
 
-    .series-selector { padding: 5px 24px; background: var(--bg-surface); border-bottom: 1px solid var(--border); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-    .series-selector label { font-size: 11px; cursor: pointer; display: flex; align-items: center; gap: 4px; }
-    .series-selector label input { cursor: pointer; }
-    .series-selector .sel-link { font-size: 10px; color: var(--text-muted); cursor: pointer; text-decoration: underline; user-select: none; }
-    .series-selector .sel-link:hover { color: var(--text); }
-    .series-selector .sel-sep { font-size: 10px; color: var(--text-dim); }
-
     #chart-tab { display: flex; flex-direction: column; min-height: 0; }
     #chart-tab.hidden, #stats-tab.hidden { display: none !important; }
     #price-chart { flex: 3; position: relative; min-height: 0; }
@@ -131,6 +124,12 @@
     #scenario-list label input { cursor: pointer; flex-shrink: 0; }
     #scenario-list label .sc-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
     #scenario-list label .sc-name { overflow: hidden; text-overflow: ellipsis; }
+    #scenario-list .sc-group {
+      font-size: 10px; font-weight: 600; color: var(--text-dim); text-transform: uppercase;
+      letter-spacing: 0.5px; padding: 8px 10px 4px; border-bottom: 1px solid var(--border);
+      margin-top: 2px;
+    }
+    #scenario-list .sc-group:first-child { margin-top: 0; }
 
     #sidebar-toggle {
       background: var(--accent-bg); color: var(--text-muted); border: 1px solid var(--border);
@@ -234,17 +233,10 @@
     </span>
   </div>
 
-  <div class="series-selector" id="series-selector">
-    <span style="font-size:11px;color:var(--text-muted);">Series:</span>
-    <div id="series-checkboxes" style="display:contents;"></div>
-    <span style="margin-left:auto;"></span>
-    <button id="sidebar-toggle" style="display:none;" title="Toggle scenario panel">Scenarios &#9656;</button>
-  </div>
-
   <div id="main-area">
-    <div id="sidebar" class="collapsed">
+    <div id="sidebar">
       <div id="sidebar-header">
-        <span>Scenarios</span>
+        <span>Series</span>
         <div id="sidebar-actions">
           <span class="sel-link" id="sc-all">All</span>
           <span class="sel-sep">/</span>
@@ -313,6 +305,9 @@
     }
     let COLORS = generateColors(32);
     const REAL_COLOR = '#888888';
+    // Distinct, accessible colors for the four venues. Index aligns with
+    // venueIds[] (which mirrors the loaded venue order from the .simdata).
+    const VENUE_COLORS = ['#f0b90b', '#7d3fbe', '#f7931a', '#ce4257'];
 
     // ── State ──
     let currentTF = 900;
@@ -376,7 +371,6 @@
         document.getElementById('stats-tab').classList.toggle('hidden', currentTab !== 'stats');
         document.getElementById('research-tab').classList.toggle('hidden', currentTab !== 'research');
         document.getElementById('toolbar-tf').style.display = currentTab === 'chart' ? '' : 'none';
-        document.getElementById('series-selector').style.display = currentTab === 'chart' ? '' : 'none';
 
         if (currentTab === 'chart') {
           priceChart.applyOptions({ width: priceChartEl.clientWidth, height: priceChartEl.clientHeight });
@@ -411,7 +405,12 @@
       { key: 'dataSource', label: 'Data Source', type: 'string', getter: sc => {
         const d = sc.config.dataSource;
         if (!d || d.kind === 'candles') return 'candles';
-        return `trades(${(d.venues || []).join(',')})`;
+        const cv = (d.crossVenue && d.crossVenue.kind) || 'median';
+        return `trades(${(d.venues || []).join(',')}; ${cv})`;
+      }},
+      { key: 'validatorPriceSource', label: 'Validator Obs', type: 'string', getter: sc => {
+        const v = sc.config.validatorPriceSource;
+        return !v ? 'median' : v.kind;
       }},
       { key: 'aggregator', label: 'Aggregator', type: 'string', getter: sc => {
         const a = sc.config.aggregator;
@@ -792,157 +791,262 @@
       }
     }
 
-    // ── Scenario sidebar ──
-
-    let allScenarioEntries = [];
+    // ── Series sidebar ──
 
     const sidebarEl = document.getElementById('sidebar');
-    const sidebarToggleBtn = document.getElementById('sidebar-toggle');
     const scenarioListEl = document.getElementById('scenario-list');
     const sidebarSearchEl = document.getElementById('sidebar-search');
 
-    sidebarToggleBtn.addEventListener('click', () => {
-      sidebarEl.classList.toggle('collapsed');
-      sidebarToggleBtn.textContent = sidebarEl.classList.contains('collapsed') ? 'Scenarios \u25B8' : '\u25C2 Scenarios';
-      setTimeout(() => {
-        priceChart.applyOptions({ width: priceChartEl.clientWidth });
-        devChart.applyOptions({ width: devChartEl.clientWidth });
-      }, 160);
-    });
-
-    document.getElementById('sc-all').addEventListener('click', () => toggleAllScenarios(true));
-    document.getElementById('sc-none').addEventListener('click', () => toggleAllScenarios(false));
+    document.getElementById('sc-all').addEventListener('click', () => setAllSeriesVisibility(true));
+    document.getElementById('sc-none').addEventListener('click', () => setAllSeriesVisibility(false));
     sidebarSearchEl.addEventListener('input', filterScenarioList);
 
-    function buildScenarioSelector(scenarios) {
-      if (scenarios.length <= 1) {
-        sidebarToggleBtn.style.display = 'none';
-        sidebarEl.classList.add('collapsed');
-        return;
-      }
+    // ── Unified series sidebar ──
+    // The sidebar lists every series rendered on the chart, in three groups:
+    //   1. Real Price     — the cross-venue median (or candle real price)
+    //   2. Venue: <id>    — per-venue line (only when .simdata was built from trades)
+    //   3. Oracle: <label> — one per simulation scenario
+    // Each row has a checkbox that toggles `seriesVisibility[label]`. For
+    // oracle rows, toggling also adjusts `activeScenarios` so the server
+    // doesn't waste work fetching/aggregating data for hidden scenarios.
 
-      sidebarToggleBtn.style.display = '';
-      sidebarEl.classList.remove('collapsed');
-      sidebarToggleBtn.textContent = '\u25C2 Scenarios';
+    let allSeriesEntries = [];   // sidebar entries: { el, cb, label, kind, scenarioIndex? }
+    let venueIds = [];            // venue ids present in this .simdata, in order
+    let panelBuilt = false;
 
+    function dataSourceVenues(meta) {
+      const ds = meta.scenarios[0]?.config?.dataSource;
+      return ds && ds.kind === 'trades' ? (ds.venues || []) : [];
+    }
+
+    function defaultPriceSourceMode(meta) {
+      const v = meta.scenarios[0]?.config?.validatorPriceSource;
+      return v && v.kind === 'random-venue' ? 'random-venue' : 'median';
+    }
+
+    /** Build the entire sidebar from /api/meta. Called once at startup. */
+    function buildSeriesPanel(meta) {
       scenarioListEl.innerHTML = '';
-      allScenarioEntries = [];
+      allSeriesEntries = [];
       scenarioColorMap.clear();
 
-      for (const sc of scenarios) {
-        const idx = scenarios.indexOf(sc);
-        const color = COLORS[idx % COLORS.length];
-        scenarioColorMap.set(sc.index, color);
+      venueIds = dataSourceVenues(meta);
+      const mode = defaultPriceSourceMode(meta);
+
+      const addGroup = (title) => {
+        const h = document.createElement('div');
+        h.className = 'sc-group';
+        h.textContent = title;
+        scenarioListEl.appendChild(h);
+      };
+
+      const addRow = (entry) => {
+        // entry: { label, color, kind, scenarioIndex?, defaultVisible }
+        // Visibility is stored under `seriesVisibility[label]`. If unset, falls back to defaultVisible.
+        if (seriesVisibility[entry.label] === undefined) {
+          seriesVisibility[entry.label] = entry.defaultVisible;
+        }
         const lbl = document.createElement('label');
-        // Rich tooltip: full config snapshot so hovering a scenario reveals
-        // exactly what was simulated (matches the stdout block from engine.ts).
-        lbl.title = (() => {
-          const c = sc.config;
-          const aggCfg = c.aggregator;
-          const aggStr = !aggCfg ? 'nudge'
-            : aggCfg.kind === 'trimmed-mean' ? `trimmed-mean(k=${aggCfg.k})`
-            : aggCfg.kind;
-          const fracOf = v => typeof v === 'number' ? v : (v && v.fraction) || 0;
-          const mix = c.validatorMix || {};
-          const mixParts = Object.entries(mix).map(([k, v]) => `${(fracOf(v)*100).toFixed(1)}% ${k}`);
-          const honestPct = 100 - Object.values(mix).reduce((a, v) => a + fracOf(v), 0) * 100;
-          const mixStr = `${honestPct.toFixed(1)}% honest` + (mixParts.length ? ', ' + mixParts.join(', ') : '');
-          const epsStr = typeof c.epsilon === 'number' ? c.epsilon.toFixed(6) : JSON.stringify(c.epsilon);
-          const mp = c.maliciousParams;
-          const malParts = [];
-          if (mp) {
-            const present = new Set(Object.keys(mix));
-            if (present.has('delayed')) malParts.push(`delayBlocks=${mp.delayBlocks}`);
-            if (present.has('pushy'))   malParts.push(`pushyQuoteBias=${(mp.pushyQuoteBias*100).toFixed(2)}%`);
-            if (present.has('drift'))   malParts.push(`driftQuoteStep=${(mp.driftQuoteStep*100).toFixed(3)}%`);
-          }
-          const ds = c.dataSource;
-          const dsStr = !ds || ds.kind === 'candles'
-            ? 'candles (Binance US 1m → 6s interp)'
-            : `trades (${(ds.venues || []).join(', ')})`;
-          const lines = [
-            c.label,
-            `data source  : ${dsStr}`,
-            `aggregator   : ${aggStr}`,
-            `range        : ${c.startDate} → ${c.endDate}`,
-            `validators   : ${c.validatorCount} (${mixStr})`,
-            `epsilon      : ${epsStr}${aggCfg && aggCfg.kind !== 'nudge' ? ' (ignored)' : ''}`,
-            `jitter stddev: ${(c.jitterStdDev*100).toFixed(3)}%`,
-          ];
-          if (malParts.length) lines.push(`malicious    : ${malParts.join(', ')}`);
-          lines.push(`seed         : ${c.seed}`);
-          return lines.join('\n');
-        })();
+        lbl.title = entry.tooltip || entry.label;
 
         const cb = document.createElement('input');
         cb.type = 'checkbox';
-        cb.checked = activeScenarios.has(sc.index);
-        cb.addEventListener('change', () => onScenarioToggle(sc.index, cb.checked));
+        cb.checked = seriesVisibility[entry.label] !== false;
+        cb.addEventListener('change', () => onSeriesToggle(entry, cb.checked));
 
         const dot = document.createElement('span');
         dot.className = 'sc-dot';
-        dot.style.background = color;
+        dot.style.background = entry.color;
 
         const name = document.createElement('span');
         name.className = 'sc-name';
-        name.textContent = sc.config.label || `Scenario ${sc.index}`;
+        name.textContent = entry.displayName || entry.label;
 
         lbl.appendChild(cb);
         lbl.appendChild(dot);
         lbl.appendChild(name);
         scenarioListEl.appendChild(lbl);
-        allScenarioEntries.push({ el: lbl, cb, label: (sc.config.label || '').toLowerCase(), index: sc.index });
+
+        allSeriesEntries.push({ el: lbl, cb, ...entry });
+      };
+
+      // 1. Real Price (always present). Default visible only in median mode.
+      addGroup('Source');
+      addRow({
+        label: 'Real Price',
+        displayName: 'Real Price (median ground truth)',
+        color: REAL_COLOR,
+        kind: 'realPrice',
+        defaultVisible: mode === 'median',
+        tooltip: 'Cross-venue median (in trades mode) or candle-interpolated price (in candles mode).\nUsed as the deviation reference for every oracle.',
+      });
+
+      // 2. Per-venue lines (default visible in random-venue mode).
+      if (venueIds.length > 0) {
+        for (let i = 0; i < venueIds.length; i++) {
+          const v = venueIds[i];
+          addRow({
+            label: `Venue: ${v}`,
+            displayName: v,
+            color: VENUE_COLORS[i % VENUE_COLORS.length],
+            kind: 'venue',
+            venueId: v,
+            defaultVisible: mode === 'random-venue',
+            tooltip: `Per-venue 6s VWAP for ${v}. Validators in random-venue mode see one of these per query.`,
+          });
+        }
       }
+
+      // 3. Scenarios (oracle outputs). For big sweeps (10+ scenarios) only
+      //    the first is visible by default to avoid drawing 100+ lines on load.
+      if (meta.scenarios.length > 0) {
+        addGroup('Scenarios');
+        const showAll = meta.scenarios.length < 10;
+        meta.scenarios.forEach((sc, idx) => {
+          const color = COLORS[idx % COLORS.length];
+          scenarioColorMap.set(sc.index, color);
+          addRow({
+            label: `Oracle: ${sc.config.label}`,
+            displayName: sc.config.label || `Scenario ${sc.index}`,
+            color,
+            kind: 'oracle',
+            scenarioIndex: sc.index,
+            defaultVisible: showAll || idx === 0,
+            tooltip: scenarioTooltip(sc.config),
+          });
+          if (seriesVisibility[`Oracle: ${sc.config.label}`] !== false) {
+            activeScenarios.add(sc.index);
+          }
+        });
+      }
+
+      panelBuilt = true;
+    }
+
+    /** Returns the rich tooltip string for a scenario config (matches engine.ts:printConfig). */
+    function scenarioTooltip(c) {
+      const aggCfg = c.aggregator;
+      const aggStr = !aggCfg ? 'nudge'
+        : aggCfg.kind === 'trimmed-mean' ? `trimmed-mean(k=${aggCfg.k})`
+        : aggCfg.kind;
+      const fracOf = v => typeof v === 'number' ? v : (v && v.fraction) || 0;
+      const mix = c.validatorMix || {};
+      const mixParts = Object.entries(mix).map(([k, v]) => `${(fracOf(v)*100).toFixed(1)}% ${k}`);
+      const honestPct = 100 - Object.values(mix).reduce((a, v) => a + fracOf(v), 0) * 100;
+      const mixStr = `${honestPct.toFixed(1)}% honest` + (mixParts.length ? ', ' + mixParts.join(', ') : '');
+      const epsStr = typeof c.epsilon === 'number' ? c.epsilon.toFixed(6) : JSON.stringify(c.epsilon);
+      const mp = c.maliciousParams;
+      const malParts = [];
+      if (mp) {
+        const present = new Set(Object.keys(mix));
+        if (present.has('delayed')) malParts.push(`delayBlocks=${mp.delayBlocks}`);
+        if (present.has('pushy'))   malParts.push(`pushyQuoteBias=${(mp.pushyQuoteBias*100).toFixed(2)}%`);
+        if (present.has('drift'))   malParts.push(`driftQuoteStep=${(mp.driftQuoteStep*100).toFixed(3)}%`);
+      }
+      const ds = c.dataSource;
+      const cvStr = ds && ds.kind === 'trades' ? ((ds.crossVenue && ds.crossVenue.kind) || 'median') : null;
+      const dsStr = !ds || ds.kind === 'candles'
+        ? 'candles (Binance US 1m \u2192 6s interp)'
+        : `trades (${(ds.venues || []).join(', ')}; cross-venue=${cvStr})`;
+      const vps = c.validatorPriceSource;
+      const vpsStr = !vps ? 'median' : vps.kind;
+      const lines = [
+        c.label,
+        `data source  : ${dsStr}`,
+        `validator obs: ${vpsStr}`,
+        `aggregator   : ${aggStr}`,
+        `range        : ${c.startDate} \u2192 ${c.endDate}`,
+        `validators   : ${c.validatorCount} (${mixStr})`,
+        `epsilon      : ${epsStr}${aggCfg && aggCfg.kind !== 'nudge' ? ' (ignored)' : ''}`,
+        `jitter stddev: ${(c.jitterStdDev*100).toFixed(3)}%`,
+      ];
+      if (malParts.length) lines.push(`malicious    : ${malParts.join(', ')}`);
+      lines.push(`seed         : ${c.seed}`);
+      return lines.join('\n');
     }
 
     function filterScenarioList() {
       const q = sidebarSearchEl.value.toLowerCase();
-      for (const entry of allScenarioEntries) {
-        entry.el.style.display = (!q || entry.label.includes(q)) ? '' : 'none';
+      for (const entry of allSeriesEntries) {
+        const visible = !q || (entry.displayName || entry.label).toLowerCase().includes(q);
+        entry.el.style.display = visible ? '' : 'none';
       }
     }
 
-    function onScenarioToggle(idx, enabled) {
-      if (enabled) activeScenarios.add(idx);
-      else activeScenarios.delete(idx);
-
-      if (activeScenarios.size === 0) {
-        clearPriceSeries();
-        clearDevSeries();
-        rebuildSeriesSelector();
-        return;
-      }
-
-      bufferedTF = 0;
-      const range = getVisibleTimeRange();
-      const from = range ? range.from : totalTimeRange.from;
-      const to = range ? range.to : totalTimeRange.to;
-      fetchData(from, to, currentTF, false);
+    /** Apply seriesVisibility[label] to a chart-series entry. */
+    function applyVisibilityToSeries(s) {
+      if (!s) return;
+      const vis = seriesVisibility[s.label] !== false;
+      s.series.applyOptions({ visible: vis });
+      if (!vis && s.priceLine) s.priceLine.applyOptions({ axisLabelVisible: false });
     }
 
-    function toggleAllScenarios(enabled) {
-      if (!serverMeta) return;
-      const visible = allScenarioEntries.filter(e => e.el.style.display !== 'none');
-      const targets = visible.length > 0 && visible.length < allScenarioEntries.length ? visible : allScenarioEntries;
+    /** Toggle handler called from any sidebar checkbox. Updates state and chart.
+     *  Series are never destroyed by visibility toggles — we set visible=false
+     *  so the data sticks around and "None → enable one" works without a
+     *  refetch (and definitely without losing the source-row series). */
+    function onSeriesToggle(entry, enabled) {
+      seriesVisibility[entry.label] = enabled;
 
-      if (enabled) {
-        for (const e of targets) { activeScenarios.add(e.index); e.cb.checked = true; }
-      } else {
-        for (const e of targets) { activeScenarios.delete(e.index); e.cb.checked = false; }
+      if (entry.kind === 'oracle') {
+        if (enabled) activeScenarios.add(entry.scenarioIndex);
+        else activeScenarios.delete(entry.scenarioIndex);
+
+        // Re-enabling an oracle whose data we never fetched: refetch.
+        const haveSeries = activePriceSeries.some(p => p.label === entry.label);
+        if (enabled && !haveSeries) {
+          bufferedTF = 0;
+          const range = getVisibleTimeRange();
+          const from = range ? range.from : totalTimeRange.from;
+          const to = range ? range.to : totalTimeRange.to;
+          fetchData(from, to, currentTF, false);
+          return;
+        }
       }
 
-      if (activeScenarios.size === 0) {
-        clearPriceSeries();
-        clearDevSeries();
-        rebuildSeriesSelector();
-        return;
+      // Existing series: flip visibility in place.
+      for (const s of activePriceSeries) {
+        if (s.label === entry.label) applyVisibilityToSeries(s);
+      }
+      for (const s of activeDevSeries) {
+        if (s.label === `Dev: ${entry.label.replace(/^Oracle: /, '')}`) applyVisibilityToSeries(s);
+      }
+    }
+
+    function setAllSeriesVisibility(visible) {
+      // Apply to any sidebar entries currently NOT filtered out (so users can
+      // narrow by search and toggle just those). Falls back to all.
+      const targetable = allSeriesEntries.filter(e => e.el.style.display !== 'none');
+      const targets = targetable.length > 0 && targetable.length < allSeriesEntries.length ? targetable : allSeriesEntries;
+
+      // Update visibility state + checkboxes; track which scenarios newly need data.
+      const oracleIndicesNeedingFetch = new Set();
+      for (const entry of targets) {
+        seriesVisibility[entry.label] = visible;
+        entry.cb.checked = visible;
+        if (entry.kind === 'oracle') {
+          if (visible) {
+            const have = activePriceSeries.some(p => p.label === entry.label);
+            if (!have) oracleIndicesNeedingFetch.add(entry.scenarioIndex);
+            activeScenarios.add(entry.scenarioIndex);
+          } else {
+            activeScenarios.delete(entry.scenarioIndex);
+          }
+        }
       }
 
-      bufferedTF = 0;
-      const range = getVisibleTimeRange();
-      const from = range ? range.from : totalTimeRange.from;
-      const to = range ? range.to : totalTimeRange.to;
-      fetchData(from, to, currentTF, false);
+      // Just flip visibility on existing series. Never clear — that loses
+      // source-row data and silently breaks the next "enable one" click.
+      for (const s of activePriceSeries) applyVisibilityToSeries(s);
+      for (const s of activeDevSeries) applyVisibilityToSeries(s);
+
+      if (oracleIndicesNeedingFetch.size > 0) {
+        bufferedTF = 0;
+        const range = getVisibleTimeRange();
+        const from = range ? range.from : totalTimeRange.from;
+        const to = range ? range.to : totalTimeRange.to;
+        fetchData(from, to, currentTF, false);
+      }
     }
 
     // ── Charts ──
@@ -979,85 +1083,6 @@
       activeDevSeries = [];
     }
 
-    // ── Series selector checkboxes ──
-    function rebuildSeriesSelector() {
-      const el = document.getElementById('series-checkboxes');
-      el.innerHTML = '';
-
-      const hasSidebar = serverMeta && serverMeta.scenarios.length > 1;
-      if (!hasSidebar) {
-        for (let i = 0; i < activeDevSeries.length; i++) {
-          const priceSeries = activePriceSeries[1 + i];
-          const devSeries = activeDevSeries[i];
-          if (!priceSeries || !devSeries) continue;
-          const displayLabel = priceSeries.label.replace(/^Oracle: /, '');
-          addSelectorCheckbox(el, displayLabel, priceSeries.color, [priceSeries, devSeries]);
-        }
-
-        const allLink = document.createElement('span');
-        allLink.className = 'sel-link';
-        allLink.textContent = 'All';
-        allLink.addEventListener('click', () => setAllSeriesVisibility(true));
-
-        const sep = document.createElement('span');
-        sep.className = 'sel-sep';
-        sep.textContent = '/';
-
-        const noneLink = document.createElement('span');
-        noneLink.className = 'sel-link';
-        noneLink.textContent = 'None';
-        noneLink.addEventListener('click', () => setAllSeriesVisibility(false));
-
-        el.appendChild(allLink);
-        el.appendChild(sep);
-        el.appendChild(noneLink);
-      }
-    }
-
-    function setAllSeriesVisibility(visible) {
-      for (const entry of activePriceSeries) {
-        if (entry.label === 'Real Price') continue;
-        seriesVisibility[entry.label] = visible;
-        entry.series.applyOptions({ visible });
-        if (!visible && entry.priceLine) {
-          entry.priceLine.applyOptions({ axisLabelVisible: false });
-        }
-      }
-      for (const entry of activeDevSeries) {
-        seriesVisibility[entry.label] = visible;
-        entry.series.applyOptions({ visible });
-        if (!visible && entry.priceLine) {
-          entry.priceLine.applyOptions({ axisLabelVisible: false });
-        }
-      }
-      document.querySelectorAll('#series-checkboxes input[type="checkbox"]').forEach(cb => {
-        cb.checked = visible;
-      });
-    }
-
-    function addSelectorCheckbox(parent, displayLabel, color, seriesEntries) {
-      const lbl = document.createElement('label');
-      const cb = document.createElement('input');
-      cb.type = 'checkbox';
-      const visKey = seriesEntries[0].label;
-      cb.checked = seriesVisibility[visKey] !== false;
-      cb.addEventListener('change', () => {
-        for (const entry of seriesEntries) {
-          seriesVisibility[entry.label] = cb.checked;
-          entry.series.applyOptions({ visible: cb.checked });
-          if (!cb.checked && entry.priceLine) {
-            entry.priceLine.applyOptions({ axisLabelVisible: false });
-          }
-        }
-      });
-      const dot = document.createElement('span');
-      dot.style.cssText = `width:10px;height:10px;border-radius:50%;background:${color};display:inline-block;`;
-      lbl.appendChild(cb);
-      lbl.appendChild(dot);
-      lbl.appendChild(document.createTextNode(displayLabel));
-      parent.appendChild(lbl);
-    }
-
 
     // ══════════════════════════════════════════════
     // ── SERVER MODE ──
@@ -1066,27 +1091,49 @@
     function canUpdateInPlace(data) {
       if (lastServerView !== currentView) return false;
       if (activePriceSeries.length === 0) return false;
-      const expectedPrice = 1 + data.oracles.length;
-      const expectedDev = data.oracles.length;
-      return activePriceSeries.length === expectedPrice && activeDevSeries.length === expectedDev;
+      // Identity-based check, not just counts. After "disable X / enable Y"
+      // the count can stay the same while the identity set differs — using
+      // counts alone, updateSeriesData would silently skip Y (its label
+      // isn't in `byLabel`) and the user sees an empty slot. Force a
+      // rebuild whenever any expected label is missing.
+      const priceLabels = new Set(activePriceSeries.map((p) => p.label));
+      const devLabels = new Set(activeDevSeries.map((d) => d.label));
+      if (!priceLabels.has('Real Price')) return false;
+      if (data.venues) {
+        for (const vid of Object.keys(data.venues)) {
+          if (!priceLabels.has(`Venue: ${vid}`)) return false;
+        }
+      }
+      for (const oracle of data.oracles) {
+        if (!priceLabels.has(`Oracle: ${oracle.label}`)) return false;
+        if (!devLabels.has(`Dev: ${oracle.label}`)) return false;
+      }
+      return true;
     }
 
     function updateSeriesData(data) {
       const isCandle = currentView === 'candle';
 
-      if (isCandle) {
-        activePriceSeries[0].series.setData(data.realPrice.ohlc);
-      } else {
-        activePriceSeries[0].series.setData(data.realPrice.line);
+      // Lookup-by-label rather than positional indexing — venue and oracle
+      // counts can differ across responses, so we can't rely on order.
+      const byLabel = new Map(activePriceSeries.map((s) => [s.label, s]));
+
+      const realEntry = byLabel.get('Real Price');
+      if (realEntry) realEntry.series.setData(isCandle ? data.realPrice.ohlc : data.realPrice.line);
+
+      if (data.venues) {
+        for (const [vid, line] of Object.entries(data.venues)) {
+          const e = byLabel.get(`Venue: ${vid}`);
+          if (e) e.series.setData(line);
+        }
       }
 
-      data.oracles.forEach((oracle, idx) => {
-        if (isCandle) {
-          activePriceSeries[1 + idx].series.setData(oracle.ohlc);
-        } else {
-          activePriceSeries[1 + idx].series.setData(oracle.line);
-        }
-        activeDevSeries[idx].series.setData(oracle.deviation);
+      const devByLabel = new Map(activeDevSeries.map((s) => [s.label, s]));
+      data.oracles.forEach((oracle) => {
+        const e = byLabel.get(`Oracle: ${oracle.label}`);
+        if (e) e.series.setData(isCandle ? oracle.ohlc : oracle.line);
+        const d = devByLabel.get(`Dev: ${oracle.label}`);
+        if (d) d.series.setData(oracle.deviation);
       });
     }
 
@@ -1097,26 +1144,44 @@
       const isCandle = currentView === 'candle';
       lastServerView = currentView;
 
-      // lastValueVisible: true causes the right-axis to always label the latest
-      // value of each series, so the current price is visible even when the
-      // crosshair is not on the chart. priceLineVisible stays false to avoid
-      // dashed horizontal clutter across the plot area.
+      // 1. Real Price (median in trades mode; candle real price otherwise).
+      //    Visibility comes from the sidebar; lastValueVisible keeps the
+      //    right-axis label populated even when the crosshair is off-chart.
       const rpLabel = 'Real Price';
+      const rpVisible = seriesVisibility[rpLabel] !== false;
       if (isCandle) {
         const s = priceChart.addCandlestickSeries({
           upColor: '#5c6b73', downColor: '#5c6b73',
           wickUpColor: '#888', wickDownColor: '#888',
           borderUpColor: '#888', borderDownColor: '#888',
-          lastValueVisible: true, priceLineVisible: false,
+          visible: rpVisible, lastValueVisible: true, priceLineVisible: false,
         });
         s.setData(data.realPrice.ohlc);
         activePriceSeries.push({ series: s, label: rpLabel, color: REAL_COLOR, kind: 'candle' });
       } else {
-        const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, lastValueVisible: true, priceLineVisible: false });
+        const s = priceChart.addLineSeries({ color: REAL_COLOR, lineWidth: 1, visible: rpVisible, lastValueVisible: true, priceLineVisible: false });
         s.setData(data.realPrice.line);
         activePriceSeries.push({ series: s, label: rpLabel, color: REAL_COLOR, kind: 'line' });
       }
 
+      // 2. Per-venue lines (only present when .simdata was built from trades).
+      //    Always rendered as line series so they stay readable at any zoom.
+      if (data.venues) {
+        let vi = 0;
+        for (const v of venueIds) {
+          const line = data.venues[v];
+          if (!line) { vi++; continue; }
+          const color = VENUE_COLORS[vi % VENUE_COLORS.length];
+          const label = `Venue: ${v}`;
+          const visible = seriesVisibility[label] !== false;
+          const s = priceChart.addLineSeries({ color, lineWidth: 1, visible, lastValueVisible: true, priceLineVisible: false });
+          s.setData(line);
+          activePriceSeries.push({ series: s, label, color, kind: 'line' });
+          vi++;
+        }
+      }
+
+      // 3. Oracle outputs (one per active scenario), plus matching deviation series.
       data.oracles.forEach((oracle, idx) => {
         const color = scenarioColorMap.get(oracle.index) || COLORS[idx % COLORS.length];
         const oLabel = `Oracle: ${oracle.label}`;
@@ -1141,8 +1206,6 @@
         ds.setData(oracle.deviation);
         activeDevSeries.push({ series: ds, label: `Dev: ${oracle.label}`, color, kind: 'line' });
       });
-
-      rebuildSeriesSelector();
     }
 
     function activeScenarioParam() {
@@ -1341,14 +1404,11 @@
         totalTimeRange = { from: minFrom, to: maxTo };
 
         activeScenarios.clear();
-        if (serverMeta.scenarios.length < 10) {
-          for (const sc of serverMeta.scenarios) activeScenarios.add(sc.index);
-        } else {
-          activeScenarios.add(serverMeta.scenarios[0].index);
-        }
-
         COLORS = generateColors(Math.max(32, serverMeta.scenarios.length));
-        buildScenarioSelector(serverMeta.scenarios);
+        // buildSeriesPanel computes default visibility per scenario and updates
+        // activeScenarios. For sweeps with many scenarios, only the first is
+        // visible by default to keep the chart readable.
+        buildSeriesPanel(serverMeta);
         updateTFButtonStates();
 
         await fetchData(totalTimeRange.from, totalTimeRange.to, currentTF, true);

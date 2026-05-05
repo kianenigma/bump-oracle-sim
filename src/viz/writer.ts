@@ -1,6 +1,6 @@
 import { join } from "path";
 import { mkdirSync, existsSync } from "fs";
-import type { BlockMetrics, SimulationConfig, SimulationSummary, SimDataIndex, ScenarioMeta, BlockChunk } from "../types.js";
+import type { BlockMetrics, SimulationConfig, SimulationSummary, SimDataIndex, ScenarioMeta, BlockChunk, ResolvedPriceSource, VenueId } from "../types.js";
 import { BLOCKS_PER_CHUNK } from "../types.js";
 import type { BlockSink } from "../sim/engine.js";
 
@@ -116,13 +116,45 @@ function writeChunkStreaming(path: string, chunk: BlockChunk): void {
 
 /**
  * Write the top-level index.json for a simulation output directory.
+ *
+ * If `priceSource` is provided and contains per-venue prices, also emit
+ * `venues.json` at the .simdata root. The server uses this to render
+ * per-venue lines on the chart in random-venue mode. Per-venue prices are
+ * shared across all scenarios in this .simdata (they came from the same
+ * data source / time range), so we only store them once.
  */
-export function writeIndex(outputDir: string, scenarios: ScenarioMeta[]): void {
+export function writeIndex(
+  outputDir: string,
+  scenarios: ScenarioMeta[],
+  priceSource?: ResolvedPriceSource,
+): void {
   const index: SimDataIndex = {
     scenarioCount: scenarios.length,
     scenarios,
   };
   Bun.write(join(outputDir, "index.json"), JSON.stringify(index, null, 2));
+
+  if (priceSource?.venuePrices) {
+    const timestamps = priceSource.pricePoints.map((p) => p.timestamp);
+    const payload: VenuesFile = {
+      timestamps,
+      venues: priceSource.venuePrices,
+    };
+    Bun.write(join(outputDir, "venues.json"), JSON.stringify(payload));
+  }
+}
+
+/** Shape of `venues.json` (alongside index.json in a .simdata directory). */
+export interface VenuesFile {
+  timestamps: number[];
+  venues: Record<VenueId, number[]>;
+}
+
+/** Load venues.json if present. Returns null when not in trades mode. */
+export async function loadVenues(outputDir: string): Promise<VenuesFile | null> {
+  const path = join(outputDir, "venues.json");
+  if (!existsSync(path)) return null;
+  return Bun.file(path).json();
 }
 
 /**

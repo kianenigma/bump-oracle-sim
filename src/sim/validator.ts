@@ -1,5 +1,5 @@
 import { Bump } from "../types.js";
-import type { BumpSubmission, MaliciousParams, Submission } from "../types.js";
+import type { BumpSubmission, MaliciousParams, Submission, ValidatorPriceSource } from "../types.js";
 import type { PriceEndpoint } from "./price-endpoint.js";
 
 export interface ValidatorAgent {
@@ -43,19 +43,34 @@ export function optimalBumpCount(absDiff: number, epsilon: number, maxBumps: num
 export class HonestValidator implements ValidatorAgent {
   readonly index: number;
   readonly isHonest = true;
-  private endpoint: PriceEndpoint;
-  private rng: () => number;
-  private jitterStdDev: number;
+  protected endpoint: PriceEndpoint;
+  protected rng: () => number;
+  protected jitterStdDev: number;
+  protected priceSource: ValidatorPriceSource;
 
-  constructor(index: number, endpoint: PriceEndpoint, rng: () => number, jitterStdDev: number, _params: MaliciousParams) {
+  constructor(
+    index: number,
+    endpoint: PriceEndpoint,
+    rng: () => number,
+    jitterStdDev: number,
+    _params: MaliciousParams,
+    priceSource: ValidatorPriceSource,
+  ) {
     this.index = index;
     this.endpoint = endpoint;
     this.rng = rng;
     this.jitterStdDev = jitterStdDev;
+    this.priceSource = priceSource;
+  }
+
+  /** This validator's observation of the price at the given block, applying
+   *  jitter and respecting `priceSource` (median vs random-venue). */
+  protected observe(blockIndex: number): number {
+    return this.endpoint.observe(this.priceSource, blockIndex, this.rng, this.jitterStdDev);
   }
 
   produceBump(lastPrice: number, blockIndex: number): Bump {
-    const price = this.endpoint.getJitteredPrice(blockIndex, this.rng, this.jitterStdDev);
+    const price = this.observe(blockIndex);
     return price >= lastPrice ? Bump.Up : Bump.Down;
   }
 
@@ -65,7 +80,7 @@ export class HonestValidator implements ValidatorAgent {
     epsilon: number,
     blockIndex: number
   ): boolean[] {
-    const targetPrice = this.endpoint.getJitteredPrice(blockIndex, this.rng, this.jitterStdDev);
+    const targetPrice = this.observe(blockIndex);
     const diff = targetPrice - lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
     const neededBumps = optimalBumpCount(Math.abs(diff), epsilon, bumps.length);
@@ -85,9 +100,9 @@ export class HonestValidator implements ValidatorAgent {
     return mask;
   }
 
-  // Honest quote = the validator's locally jittered observation of the real price.
+  // Honest quote = the validator's local observation, exactly the same value
+  // it would use to derive its bump direction.
   produceQuote(_lastPrice: number, blockIndex: number): Submission {
-    const price = this.endpoint.getJitteredPrice(blockIndex, this.rng, this.jitterStdDev);
-    return { kind: "quote", validatorIndex: this.index, price };
+    return { kind: "quote", validatorIndex: this.index, price: this.observe(blockIndex) };
   }
 }

@@ -1,5 +1,12 @@
-import type { PricePoint, VenueId } from "../../types.js";
+import type { CrossVenueSpec, PricePoint, VenueId } from "../../types.js";
 import { BLOCK_TIME_SECONDS, BLOCKS_PER_DAY, type RawTrade, type VenueBucket } from "./types.js";
+
+/** Per-block prices for the cross-venue median plus, in trades mode, every
+ *  individual venue's carry-forward-filled series. Same length as `points`. */
+export interface CombinedSource {
+  points: PricePoint[];
+  venuePrices: Map<VenueId, number[]>;
+}
 
 /**
  * Bucketize a chronologically-sorted stream of trades for one UTC day into
@@ -41,28 +48,39 @@ export function bucketizeDay(trades: RawTrade[], dayStartSec: number): VenueBuck
 }
 
 /**
- * Combine multiple venues' per-block buckets into a single PricePoint[].
+ * Combine multiple venues' per-block buckets into a cross-venue median price
+ * series, alongside per-venue carry-forward-filled series of equal length.
  *
- * For each block index i:
- *   - For each venue, if bucket[i].vwap is null, carry forward that venue's
- *     last-known non-null VWAP (per-venue carry-forward).
- *   - Take the median across the (up to N) venue values that are now non-null.
- *   - If no venue has yet produced a non-null VWAP at block i (start-of-range
- *     edge case), drop the block (it will not appear in the output).
+ * For each block i:
+ *   - For each venue, if bucket[i].vwap is non-null: use it (and update that
+ *     venue's lastSeen).
+ *   - Else fall back to that venue's lastSeen, or — for blocks before the
+ *     venue's first print — to the cross-venue median computed at this block.
+ *     This guarantees every per-venue array is fully populated and aligned
+ *     with `points`, so PriceEndpoint.getPriceByVenue(v, i) is always well-
+ *     defined for every venue we returned a series for.
+ *   - Cross-venue median is taken over the venues that already have a real
+ *     reading (not the median-fallback values), so we don't pollute the
+ *     ground-truth median with self-references in the seed phase.
+ *   - If no venue has yet produced a non-null VWAP at block i, drop the block.
  *
- * The returned PricePoint[] is contiguous in time at the 6s grid for the range
- * starting from the first block where ≥1 venue has data.
+ * The returned `points` is contiguous in time at the 6s grid starting from
+ * the first block where ≥1 venue has data; `venuePrices` arrays have the same
+ * length and start.
  */
-export function combineVenuesByMedian(
+export function combineVenues(
   perVenue: Map<VenueId, VenueBucket[]>,
-): PricePoint[] {
+  spec: CrossVenueSpec = { kind: "median" },
+): CombinedSource {
   const venues = [...perVenue.keys()];
-  if (venues.length === 0) return [];
+  if (venues.length === 0) {
+    return { points: [], venuePrices: new Map() };
+  }
 
   const lengths = new Set(venues.map((v) => perVenue.get(v)!.length));
   if (lengths.size !== 1) {
     throw new Error(
-      `combineVenuesByMedian: per-venue bucket arrays must be the same length (got ${[...lengths].join(", ")})`,
+      `combineVenues: per-venue bucket arrays must be the same length (got ${[...lengths].join(", ")})`,
     );
   }
   const N = perVenue.get(venues[0])!.length;
@@ -71,35 +89,89 @@ export function combineVenuesByMedian(
   const lastSeen = new Map<VenueId, number | null>();
   for (const v of venues) lastSeen.set(v, null);
 
-  const out: PricePoint[] = [];
+  const points: PricePoint[] = [];
+  const venueSeries = new Map<VenueId, number[]>();
+  for (const v of venues) venueSeries.set(v, []);
   let started = false;
 
   for (let i = 0; i < N; i++) {
-    const values: number[] = [];
+    // Collect (price, volume, isFresh) for every venue. `price` always uses
+    // carry-forward fill so even quiet venues contribute a value when needed.
+    // `isFresh` flags whether the venue actually traded this 6s window — used
+    // by VWAP to skip stale carry-forwards from the volume weighting.
+    const fillFromMedian = (carry: number | null | undefined): number | null =>
+      carry !== null && carry !== undefined ? carry : null;
+
+    const samples: Array<{ venue: VenueId; price: number; volume: number; fresh: boolean }> = [];
+    let anyFresh = false;
     for (const v of venues) {
       const cur = perVenue.get(v)![i];
       if (cur.vwap !== null) {
         lastSeen.set(v, cur.vwap);
-        values.push(cur.vwap);
+        samples.push({ venue: v, price: cur.vwap, volume: cur.volume, fresh: true });
+        anyFresh = true;
       } else {
-        const prev = lastSeen.get(v);
-        if (prev !== null && prev !== undefined) values.push(prev);
+        const prev = fillFromMedian(lastSeen.get(v));
+        if (prev !== null) samples.push({ venue: v, price: prev, volume: 0, fresh: false });
       }
     }
-    if (values.length === 0) {
-      // No venue has data yet — skip until the first block any venue prints.
-      continue;
-    }
+
+    if (samples.length === 0) continue; // pre-first-print: skip block entirely
+
     started = true;
     const blockTs = perVenue.get(venues[0])![i].blockTimestamp;
-    out.push({ timestamp: blockTs, price: medianSorted(values) });
+
+    // Compute the cross-venue real price per the chosen rule.
+    let crossPrice: number;
+    if (spec.kind === "vwap") {
+      // Volume-weight only across venues that actually traded this block.
+      // If none did, fall back to the median of carry-forward values.
+      const fresh = samples.filter((s) => s.fresh);
+      if (fresh.length === 0) {
+        crossPrice = medianOf(samples.map((s) => s.price));
+      } else {
+        let num = 0, den = 0;
+        for (const s of fresh) { num += s.price * s.volume; den += s.volume; }
+        crossPrice = den > 0 ? num / den : medianOf(fresh.map((s) => s.price));
+      }
+    } else if (spec.kind === "mean") {
+      let sum = 0;
+      for (const s of samples) sum += s.price;
+      crossPrice = sum / samples.length;
+    } else {
+      crossPrice = medianOf(samples.map((s) => s.price));
+    }
+
+    points.push({ timestamp: blockTs, price: crossPrice });
+
+    // Per-venue series: fresh → bucket vwap; stale → carry forward; pre-first-
+    // print → seed from the just-computed cross-venue price.
+    for (const v of venues) {
+      const cur = perVenue.get(v)![i];
+      const arr = venueSeries.get(v)!;
+      if (cur.vwap !== null) {
+        arr.push(cur.vwap);
+      } else {
+        const prev = lastSeen.get(v);
+        arr.push(prev !== null && prev !== undefined ? prev : crossPrice);
+      }
+    }
   }
 
   if (!started) {
-    // No venue produced any non-null VWAP across the entire range.
-    throw new Error("combineVenuesByMedian: no venue produced any data in the requested range");
+    throw new Error("combineVenues: no venue produced any data in the requested range");
   }
-  return out;
+  return { points, venuePrices: venueSeries };
+}
+
+function medianOf(values: number[]): number {
+  const sorted = values.slice().sort((a, b) => a - b);
+  return medianSorted(sorted);
+}
+
+/** @deprecated Use combineVenues instead; kept for any external callers. */
+export function combineVenuesByMedian(perVenue: Map<VenueId, VenueBucket[]>): PricePoint[] {
+  return combineVenues(perVenue).points;
 }
 
 /** Median of a number array. Sorts in place. */

@@ -58,9 +58,42 @@ export function aggregatorMode(cfg: AggregatorConfig): AggregatorMode {
 //               cross-venue price discovery).
 export type VenueId = "binance" | "kraken" | "bybit" | "gate";
 
+// How per-venue 6s VWAPs are combined into a single cross-venue real price
+// per block. The result is the "ground truth" the oracle is compared against
+// and the source of the median validators see in `validatorPriceSource: median`.
+//   "median"  : middle value across venues (current default; matches the old behavior).
+//             For 4 venues this averages the middle 2 — naturally damps a single outlier.
+//   "vwap"    : volume-weighted across venues. Quiet venues contribute less; the
+//             active market dominates. Falls back to median of carry-forward
+//             values for blocks where no venue has fresh trades.
+//   "mean"    : simple arithmetic mean across venues. Equal weight regardless
+//             of activity — illiquid venues pull as much as active ones.
+export type CrossVenueSpec =
+  | { kind: "median" }
+  | { kind: "vwap" }
+  | { kind: "mean" };
+
 export type DataSourceSpec =
   | { kind: "candles" }
-  | { kind: "trades"; venues: VenueId[] };
+  | { kind: "trades"; venues: VenueId[]; crossVenue?: CrossVenueSpec };
+
+// Where each validator gets its own observation of the price.
+//   "median"        : every validator sees the cross-venue median (or candle-
+//                     interpolated value), with per-validator Gaussian jitter
+//                     applied on top. The current/default behavior.
+//   "random-venue"  : every validator query picks a random venue from the
+//                     loaded set and observes that venue's price (with jitter
+//                     applied on top). Only valid when dataSource.kind=="trades".
+export type ValidatorPriceSource =
+  | { kind: "median" }
+  | { kind: "random-venue" };
+
+/** What `loadPriceSource` returns: the resolved 6s price grid plus, when in
+ *  trades mode, per-venue carry-forward-filled price arrays of the same length. */
+export interface ResolvedPriceSource {
+  pricePoints: PricePoint[];
+  venuePrices?: Record<VenueId, number[]>;
+}
 
 // ── Malicious validator parameters ───────────────────────────────────────────
 // All knobs that govern adversarial behavior. Surfaced on SimulationConfig so
@@ -143,6 +176,8 @@ export interface SimulationConfig {
   maliciousParams?: MaliciousParams;
   /** Where the price feed comes from. Defaults to { kind: "candles" } (back-compat). */
   dataSource?: DataSourceSpec;
+  /** Where each validator gets its observation. Defaults to { kind: "median" }. */
+  validatorPriceSource?: ValidatorPriceSource;
 }
 
 export interface SimulationResult {
@@ -271,4 +306,7 @@ export interface ApiDataResponse {
     line: LinePoint[];
   };
   oracles: ApiOracleData[];
+  /** Per-venue price lines, present only when the .simdata was produced from
+   *  trade data. Keyed by VenueId. Each is downsampled for the visible window. */
+  venues?: Record<string, LinePoint[]>;
 }

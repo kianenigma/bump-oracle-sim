@@ -1,8 +1,8 @@
-import type { DataSourceSpec, PricePoint, VenueId } from "../types.js";
+import type { CrossVenueSpec, DataSourceSpec, ResolvedPriceSource, VenueId } from "../types.js";
 import { fetchCandles } from "./fetcher.js";
 import { interpolateToBlocks } from "./interpolator.js";
 import { CANDLE_INTERVAL } from "../config.js";
-import { combineVenuesByMedian, daysInRange } from "./trades/aggregate.js";
+import { combineVenues, daysInRange } from "./trades/aggregate.js";
 import { BinanceSpotSource } from "./trades/venues/binance.js";
 import { BybitSpotSource } from "./trades/venues/bybit.js";
 import { GateSpotSource } from "./trades/venues/gate.js";
@@ -22,12 +22,12 @@ export async function loadPriceSource(
   spec: DataSourceSpec,
   startDate: string,
   endDate: string,
-): Promise<PricePoint[]> {
+): Promise<ResolvedPriceSource> {
   if (spec.kind === "candles") {
     const cacheData = await fetchCandles(startDate, endDate, CANDLE_INTERVAL);
-    return interpolateToBlocks(cacheData.data);
+    return { pricePoints: interpolateToBlocks(cacheData.data) };
   }
-  return loadTradeSourcePoints(spec.venues, startDate, endDate);
+  return loadTradeSourcePoints(spec.venues, startDate, endDate, spec.crossVenue ?? { kind: "median" });
 }
 
 /** Return a venue source instance by id. */
@@ -44,12 +44,13 @@ async function loadTradeSourcePoints(
   venues: VenueId[],
   startDate: string,
   endDate: string,
-): Promise<PricePoint[]> {
+  crossVenue: CrossVenueSpec,
+): Promise<ResolvedPriceSource> {
   if (venues.length === 0) {
     throw new Error("loadPriceSource(trades): at least one venue required");
   }
   const days = daysInRange(startDate, endDate);
-  console.log(`  Loading trade data: ${venues.join(", ")} × ${days.length} day${days.length === 1 ? "" : "s"} (${startDate} → ${endDate})`);
+  console.log(`  Loading trade data: ${venues.join(", ")} × ${days.length} day${days.length === 1 ? "" : "s"} (${startDate} → ${endDate}); cross-venue rule: ${crossVenue.kind}`);
 
   // Per venue: load all days sequentially (respects per-venue rate limits and
   // any in-flight dedup like Gate's monthly download lock). Across venues:
@@ -74,5 +75,9 @@ async function loadTradeSourcePoints(
   );
 
   const perVenue = new Map<VenueId, VenueBucket[]>(venueResults);
-  return combineVenuesByMedian(perVenue);
+  const combined = combineVenues(perVenue, crossVenue);
+  // Convert Map to a structuredClone-friendly Record so we can postMessage to workers.
+  const venuePrices: Record<VenueId, number[]> = {} as Record<VenueId, number[]>;
+  for (const [id, arr] of combined.venuePrices) venuePrices[id] = arr;
+  return { pricePoints: combined.points, venuePrices };
 }

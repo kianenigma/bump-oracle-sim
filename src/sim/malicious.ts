@@ -1,5 +1,5 @@
 import { Bump } from "../types.js";
-import type { BumpSubmission, MaliciousParams, Submission } from "../types.js";
+import type { BumpSubmission, MaliciousParams, Submission, ValidatorPriceSource } from "../types.js";
 import { optimalBumpCount, type ValidatorAgent } from "./validator.js";
 import type { PriceEndpoint } from "./price-endpoint.js";
 
@@ -23,16 +23,29 @@ export class MaliciousValidator implements ValidatorAgent {
   private endpoint: PriceEndpoint;
   private rng: () => number;
   private jitterStdDev: number;
+  private priceSource: ValidatorPriceSource;
 
-  constructor(index: number, endpoint: PriceEndpoint, rng: () => number, jitterStdDev: number, _params: MaliciousParams) {
+  constructor(
+    index: number,
+    endpoint: PriceEndpoint,
+    rng: () => number,
+    jitterStdDev: number,
+    _params: MaliciousParams,
+    priceSource: ValidatorPriceSource,
+  ) {
     this.index = index;
     this.endpoint = endpoint;
     this.rng = rng;
     this.jitterStdDev = jitterStdDev;
+    this.priceSource = priceSource;
+  }
+
+  private observe(blockIndex: number): number {
+    return this.endpoint.observe(this.priceSource, blockIndex, this.rng, this.jitterStdDev);
   }
 
   produceBump(lastPrice: number, blockIndex: number): Bump {
-    const price = this.endpoint.getJitteredPrice(blockIndex, this.rng, this.jitterStdDev);
+    const price = this.observe(blockIndex);
     // Inverse: if real price is above, bump down (opposite of honest)
     return price >= lastPrice ? Bump.Down : Bump.Up;
   }
@@ -43,7 +56,7 @@ export class MaliciousValidator implements ValidatorAgent {
     epsilon: number,
     blockIndex: number
   ): boolean[] {
-    const targetPrice = this.endpoint.getJitteredPrice(blockIndex, this.rng, this.jitterStdDev);
+    const targetPrice = this.observe(blockIndex);
     const diff = targetPrice - lastPrice;
     // Inverse direction: push price away from real
     const direction = diff >= 0 ? Bump.Down : Bump.Up;
@@ -69,7 +82,7 @@ export class MaliciousValidator implements ValidatorAgent {
   // submitted (lastPrice + delta), this submits (lastPrice - delta). Same magnitude,
   // wrong direction. Drags the median proportionally to the real movement.
   produceQuote(lastPrice: number, blockIndex: number): Submission {
-    const honestQuote = this.endpoint.getJitteredPrice(blockIndex, this.rng, this.jitterStdDev);
+    const honestQuote = this.observe(blockIndex);
     const mirrored = 2 * lastPrice - honestQuote;
     return { kind: "quote", validatorIndex: this.index, price: mirrored };
   }
@@ -87,18 +100,31 @@ export class PushyMaliciousValidator implements ValidatorAgent {
   private rng: () => number;
   private jitterStdDev: number;
   private quoteBias: number;
+  private priceSource: ValidatorPriceSource;
 
-  constructor(index: number, endpoint: PriceEndpoint, rng: () => number, jitterStdDev: number, params: MaliciousParams) {
+  constructor(
+    index: number,
+    endpoint: PriceEndpoint,
+    rng: () => number,
+    jitterStdDev: number,
+    params: MaliciousParams,
+    priceSource: ValidatorPriceSource,
+  ) {
     this.index = index;
     this.endpoint = endpoint;
     this.rng = rng;
     this.jitterStdDev = jitterStdDev;
     this.quoteBias = params.pushyQuoteBias;
+    this.priceSource = priceSource;
+  }
+
+  private observe(blockIndex: number): number {
+    return this.endpoint.observe(this.priceSource, blockIndex, this.rng, this.jitterStdDev);
   }
 
   // Honest (correct) bump direction based on real price with jitter
   produceBump(lastPrice: number, blockIndex: number): Bump {
-    const price = this.endpoint.getJitteredPrice(blockIndex, this.rng, this.jitterStdDev);
+    const price = this.observe(blockIndex);
     return price >= lastPrice ? Bump.Up : Bump.Down;
   }
 
@@ -109,7 +135,7 @@ export class PushyMaliciousValidator implements ValidatorAgent {
     epsilon: number,
     blockIndex: number
   ): boolean[] {
-    const targetPrice = this.endpoint.getJitteredPrice(blockIndex, this.rng, this.jitterStdDev);
+    const targetPrice = this.observe(blockIndex);
     const diff = targetPrice - lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
 
@@ -123,7 +149,7 @@ export class PushyMaliciousValidator implements ValidatorAgent {
   // motion". This is structurally weak vs. median (which trivially rejects
   // outliers below 50%) but visible in trimmed mean if it sneaks past trimming.
   produceQuote(lastPrice: number, blockIndex: number): Submission {
-    const realObs = this.endpoint.getJitteredPrice(blockIndex, this.rng, this.jitterStdDev);
+    const realObs = this.observe(blockIndex);
     const dir = realObs >= lastPrice ? 1 : -1;
     const price = realObs + dir * this.quoteBias * realObs;
     return { kind: "quote", validatorIndex: this.index, price };
@@ -140,16 +166,25 @@ export class NoopValidator implements ValidatorAgent {
   private endpoint: PriceEndpoint;
   private rng: () => number;
   private jitterStdDev: number;
+  private priceSource: ValidatorPriceSource;
 
-  constructor(index: number, endpoint: PriceEndpoint, rng: () => number, jitterStdDev: number, _params: MaliciousParams) {
+  constructor(
+    index: number,
+    endpoint: PriceEndpoint,
+    rng: () => number,
+    jitterStdDev: number,
+    _params: MaliciousParams,
+    priceSource: ValidatorPriceSource,
+  ) {
     this.index = index;
     this.endpoint = endpoint;
     this.rng = rng;
     this.jitterStdDev = jitterStdDev;
+    this.priceSource = priceSource;
   }
 
   produceBump(lastPrice: number, blockIndex: number): Bump {
-    const price = this.endpoint.getJitteredPrice(blockIndex, this.rng, this.jitterStdDev);
+    const price = this.endpoint.observe(this.priceSource, blockIndex, this.rng, this.jitterStdDev);
     return price >= lastPrice ? Bump.Up : Bump.Down;
   }
 
@@ -178,21 +213,36 @@ export class DelayedValidator implements ValidatorAgent {
   private rng: () => number;
   private jitterStdDev: number;
   private delayBlocks: number;
+  private priceSource: ValidatorPriceSource;
 
-  constructor(index: number, endpoint: PriceEndpoint, rng: () => number, jitterStdDev: number, params: MaliciousParams) {
+  constructor(
+    index: number,
+    endpoint: PriceEndpoint,
+    rng: () => number,
+    jitterStdDev: number,
+    params: MaliciousParams,
+    priceSource: ValidatorPriceSource,
+  ) {
     this.index = index;
     this.endpoint = endpoint;
     this.rng = rng;
     this.jitterStdDev = jitterStdDev;
     this.delayBlocks = params.delayBlocks;
+    this.priceSource = priceSource;
   }
 
   private staleIndex(blockIndex: number): number {
     return Math.max(0, blockIndex - this.delayBlocks);
   }
 
+  /** Same dispatch as honest, but at a stale block index. The price-source
+   *  (median vs random-venue) is honored at the stale timestamp. */
+  private observeStale(blockIndex: number): number {
+    return this.endpoint.observe(this.priceSource, this.staleIndex(blockIndex), this.rng, this.jitterStdDev);
+  }
+
   produceBump(lastPrice: number, blockIndex: number): Bump {
-    const price = this.endpoint.getJitteredPrice(this.staleIndex(blockIndex), this.rng, this.jitterStdDev);
+    const price = this.observeStale(blockIndex);
     return price >= lastPrice ? Bump.Up : Bump.Down;
   }
 
@@ -202,7 +252,7 @@ export class DelayedValidator implements ValidatorAgent {
     epsilon: number,
     blockIndex: number
   ): boolean[] {
-    const targetPrice = this.endpoint.getJitteredPrice(this.staleIndex(blockIndex), this.rng, this.jitterStdDev);
+    const targetPrice = this.observeStale(blockIndex);
     const diff = targetPrice - lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
     const neededBumps = optimalBumpCount(Math.abs(diff), epsilon, bumps.length);
@@ -222,8 +272,7 @@ export class DelayedValidator implements ValidatorAgent {
   // price from `delayBlocks` ago. Direction-correct on average but lagging
   // sharp moves.
   produceQuote(_lastPrice: number, blockIndex: number): Submission {
-    const price = this.endpoint.getJitteredPrice(this.staleIndex(blockIndex), this.rng, this.jitterStdDev);
-    return { kind: "quote", validatorIndex: this.index, price };
+    return { kind: "quote", validatorIndex: this.index, price: this.observeStale(blockIndex) };
   }
 }
 
@@ -238,13 +287,22 @@ export class DriftValidator implements ValidatorAgent {
   private rng: () => number;
   private jitterStdDev: number;
   private quoteStep: number;
+  private priceSource: ValidatorPriceSource;
 
-  constructor(index: number, endpoint: PriceEndpoint, rng: () => number, jitterStdDev: number, params: MaliciousParams) {
+  constructor(
+    index: number,
+    endpoint: PriceEndpoint,
+    rng: () => number,
+    jitterStdDev: number,
+    params: MaliciousParams,
+    priceSource: ValidatorPriceSource,
+  ) {
     this.index = index;
     this.endpoint = endpoint;
     this.rng = rng;
     this.jitterStdDev = jitterStdDev;
     this.quoteStep = params.driftQuoteStep;
+    this.priceSource = priceSource;
   }
 
   produceBump(): Bump {

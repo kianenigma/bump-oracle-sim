@@ -1,17 +1,17 @@
 import { join } from "path";
 import { runSimulation } from "./engine.js";
 import { ChunkWriter, scenarioDirName } from "../viz/writer.js";
-import type { PricePoint, SimulationConfig, ScenarioMeta } from "../types.js";
+import type { ResolvedPriceSource, SimulationConfig, ScenarioMeta } from "../types.js";
 
 declare var self: Worker;
 
-let pricePoints: PricePoint[];
+let priceSource: ResolvedPriceSource;
 
 self.onmessage = (event: MessageEvent) => {
   const msg = event.data;
 
   if (msg.type === "init") {
-    pricePoints = msg.pricePoints;
+    priceSource = msg.priceSource;
     self.postMessage({ type: "ready" });
     return;
   }
@@ -31,7 +31,7 @@ self.onmessage = (event: MessageEvent) => {
       self.postMessage({ type: "progress", pct, scenarioIndex });
     };
 
-    const result = runSimulation(config, pricePoints, writer?.sink, true, onProgress);
+    const result = runSimulation(config, priceSource, writer?.sink, true, onProgress);
 
     let meta: ScenarioMeta | undefined;
     if (writer) {

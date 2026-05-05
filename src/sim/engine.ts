@@ -1,4 +1,4 @@
-import type { SimulationConfig, SimulationResult, BlockMetrics, SimulationSummary, PricePoint, EpsilonMode, AggregatorConfig, MaliciousParams } from "../types.js";
+import type { SimulationConfig, SimulationResult, BlockMetrics, SimulationSummary, PricePoint, EpsilonMode, AggregatorConfig, MaliciousParams, ResolvedPriceSource, ValidatorPriceSource } from "../types.js";
 import { mixFraction, mixJitter } from "../mix.js";
 import { mulberry32 } from "../rng.js";
 import { PriceEndpoint } from "./price-endpoint.js";
@@ -11,7 +11,14 @@ import { BLOCK_TIME_SECONDS, DEFAULT_MALICIOUS_PARAMS } from "../config.js";
 
 // Registry of validator constructors keyed by name.
 // Every entry must have the same constructor signature as HonestValidator.
-type ValidatorCtor = new (index: number, endpoint: PriceEndpoint, rng: () => number, jitterStdDev: number, params: MaliciousParams) => ValidatorAgent;
+type ValidatorCtor = new (
+  index: number,
+  endpoint: PriceEndpoint,
+  rng: () => number,
+  jitterStdDev: number,
+  params: MaliciousParams,
+  priceSource: ValidatorPriceSource,
+) => ValidatorAgent;
 
 const VALIDATOR_REGISTRY: Record<string, ValidatorCtor> = {
   malicious: MaliciousValidator,
@@ -26,14 +33,25 @@ export type BlockSink = (block: BlockMetrics) => void;
 
 export function runSimulation(
   config: SimulationConfig,
-  pricePoints: PricePoint[],
+  source: ResolvedPriceSource,
   sink?: BlockSink,
   quiet = false,
   onProgress?: (pct: number) => void,
 ): SimulationResult {
+  const pricePoints = source.pricePoints;
   if (!quiet) printConfig(config, pricePoints);
   const rng = mulberry32(config.seed);
-  const endpoint = new PriceEndpoint(pricePoints);
+  const endpoint = new PriceEndpoint(pricePoints, source.venuePrices);
+
+  // Validate that requested validator-price-source mode is compatible with
+  // the loaded data source. random-venue requires per-venue series.
+  const validatorPriceSource: ValidatorPriceSource = config.validatorPriceSource ?? { kind: "median" };
+  if (validatorPriceSource.kind === "random-venue" && !endpoint.hasVenues()) {
+    throw new Error(
+      `validatorPriceSource="random-venue" requires --data-source=trades; ` +
+      `current run has no per-venue prices loaded.`,
+    );
+  }
 
   // Resolve epsilon spec into a numeric value + mode
   let epsilon: number;
@@ -85,14 +103,14 @@ export function runSimulation(
   // Honest validators first (use per-type jitter if "honest" key is in the mix)
   const honestJitter = mix["honest"] ? mixJitter(mix["honest"], config.jitterStdDev) : config.jitterStdDev;
   for (let i = 0; i < honestCount; i++) {
-    validators.push(new HonestValidator(nextIndex, endpoint, mulberry32(config.seed + nextIndex + 1), honestJitter, maliciousParams));
+    validators.push(new HonestValidator(nextIndex, endpoint, mulberry32(config.seed + nextIndex + 1), honestJitter, maliciousParams, validatorPriceSource));
     nextIndex++;
   }
 
   // Non-honest types (each with its own jitter)
   for (const { name, count, ctor, jitter } of typeCounts) {
     for (let i = 0; i < count; i++) {
-      validators.push(new ctor(nextIndex, endpoint, mulberry32(config.seed + nextIndex + 1), jitter, maliciousParams));
+      validators.push(new ctor(nextIndex, endpoint, mulberry32(config.seed + nextIndex + 1), jitter, maliciousParams, validatorPriceSource));
       nextIndex++;
     }
   }
@@ -229,10 +247,12 @@ function printConfig(config: SimulationConfig, pricePoints?: PricePoint[]): void
   const ds = config.dataSource ?? { kind: "candles" } as const;
   const dsStr = ds.kind === "candles"
     ? "candles (Binance US 1m → interp 6s)"
-    : `trades (${ds.venues.join(", ")})  ⚠ intra-minute volatility preserved`;
+    : `trades (${ds.venues.join(", ")}, cross-venue=${ds.crossVenue?.kind ?? "median"})  ⚠ intra-minute volatility preserved`;
+  const vps = config.validatorPriceSource ?? { kind: "median" };
 
   console.log(`\n  ┌─ ${config.label}`);
   console.log(`  │  data source  : ${dsStr}`);
+  console.log(`  │  validator obs: ${vps.kind === "random-venue" ? "random-venue (each query picks a random venue)" : "cross-venue median (or candle real price)"}`);
   console.log(`  │  aggregator   : ${aggStr}`);
   console.log(`  │  range        : ${config.startDate} → ${config.endDate}`);
   console.log(`  │  validators   : ${config.validatorCount} (${mixStr})`);

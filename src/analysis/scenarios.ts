@@ -1,7 +1,7 @@
 import { join } from "path";
 import { mkdirSync } from "fs";
 import { epsilonValue } from "../types.js";
-import type { SimulationConfig, SimulationResult, PricePoint, ScenarioMeta, ValidatorMix, EpsilonSpec, AggregatorConfig, MaliciousParams } from "../types.js";
+import type { SimulationConfig, SimulationResult, PricePoint, ScenarioMeta, ValidatorMix, EpsilonSpec, AggregatorConfig, MaliciousParams, ResolvedPriceSource, ValidatorPriceSource } from "../types.js";
 import { DEFAULT_CONFIG, DEFAULT_MALICIOUS_PARAMS } from "../config.js";
 import { runSimulation, type BlockSink } from "../sim/engine.js";
 import { maxBlockDelta } from "../data/interpolator.js";
@@ -80,7 +80,7 @@ const COMPARISON_MALICIOUS_PARAMS: MaliciousParams = {
 
 export type ScenarioFn = (
   baseConfig: Partial<SimulationConfig>,
-  pricePoints: PricePoint[],
+  priceSource: ResolvedPriceSource,
   outputDir?: string,
   threadCount?: number,
 ) => Promise<SimulationResult[]>;
@@ -103,7 +103,7 @@ function aggregatorLabel(cfg: AggregatorConfig): string {
  */
 function runOne(
   config: SimulationConfig,
-  pricePoints: PricePoint[],
+  priceSource: ResolvedPriceSource,
   outputDir: string | undefined,
   scenarioIndex: number,
 ): { result: SimulationResult; meta?: ScenarioMeta } {
@@ -116,7 +116,7 @@ function runOne(
     sink = writer.sink;
   }
 
-  const result = runSimulation(config, pricePoints, sink);
+  const result = runSimulation(config, priceSource, sink);
 
   let meta: ScenarioMeta | undefined;
   if (writer) {
@@ -141,7 +141,7 @@ function runOne(
  */
 async function runBatch(
   configs: SimulationConfig[],
-  pricePoints: PricePoint[],
+  priceSource: ResolvedPriceSource,
   outputDir?: string,
   threadCount = 1,
 ): Promise<SimulationResult[]> {
@@ -151,12 +151,12 @@ async function runBatch(
   let metas: (ScenarioMeta | undefined)[];
 
   if (threadCount > 1 && configs.length > 1) {
-    ({ results, metas } = await runBatchParallel(configs, pricePoints, threadCount, outputDir));
+    ({ results, metas } = await runBatchParallel(configs, priceSource, threadCount, outputDir));
   } else {
     results = [];
     metas = [];
     for (let i = 0; i < configs.length; i++) {
-      const { result, meta } = runOne(configs[i], pricePoints, outputDir, i);
+      const { result, meta } = runOne(configs[i], priceSource, outputDir, i);
       results.push(result);
       metas.push(meta);
     }
@@ -164,7 +164,7 @@ async function runBatch(
 
   if (outputDir) {
     const validMetas = metas.filter((m): m is ScenarioMeta => m !== undefined);
-    if (validMetas.length > 0) writeIndex(outputDir, validMetas);
+    if (validMetas.length > 0) writeIndex(outputDir, validMetas, priceSource);
   }
 
   return results;
@@ -178,7 +178,7 @@ async function runBatch(
  */
 async function runBatchParallel(
   configs: SimulationConfig[],
-  pricePoints: PricePoint[],
+  priceSource: ResolvedPriceSource,
   threadCount: number,
   outputDir?: string,
 ): Promise<{ results: SimulationResult[]; metas: (ScenarioMeta | undefined)[] }> {
@@ -196,7 +196,7 @@ async function runBatchParallel(
         workers.push(w);
         w.onmessage = (e) => { if (e.data.type === "ready") resolve(); };
         w.onerror = (e) => reject(e);
-        w.postMessage({ type: "init", pricePoints });
+        w.postMessage({ type: "init", priceSource });
       })
     )
   );
@@ -326,24 +326,24 @@ const RESEARCH_MIXES: ValidatorMix[] = [
 
 export const scenarios: Record<string, ScenarioFn> = {
   /** Baseline: 100% honest */
-  async honest(overrides, pricePoints, outputDir, threadCount) {
+  async honest(overrides, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: honest]`);
     const config = mergeConfig({ ...overrides, validatorMix: {}, label: "honest (100%)" });
-    return runBatch([config], pricePoints, outputDir, threadCount);
+    return runBatch([config], priceSource, outputDir, threadCount);
   },
 
   /** Sweep malicious fraction from 0% to 50% */
-  async "sweep-malicious"(overrides, pricePoints, outputDir, threadCount) {
+  async "sweep-malicious"(overrides, priceSource, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3, 0.4, 0.49, 0.5];
     const configs = fractions.map((frac) => {
       const label = `${(frac * 100).toFixed(0)}% malicious`;
       return mergeConfig({ ...overrides, validatorMix: { malicious: frac }, label });
     });
-    return runBatch(configs, pricePoints, outputDir, threadCount);
+    return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
   /** Sweep all malicious variants with a fixed epsilon */
-  async "sweep-all-malicious"(overrides, pricePoints, outputDir, threadCount) {
+  async "sweep-all-malicious"(overrides, priceSource, outputDir, threadCount) {
     const mixes: ValidatorMix[] = [
       {},                   // 0% (baseline)
       { malicious: 0.1 },
@@ -369,10 +369,10 @@ export const scenarios: Record<string, ScenarioFn> = {
       configs.push(mergeConfig({ ...overrides, validatorMix: mix, label }));
     }
 
-    return runBatch(configs, pricePoints, outputDir, threadCount);
+    return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  async "sweep-malicious-and-epsilon"(overrides, pricePoints, outputDir, threadCount) {
+  async "sweep-malicious-and-epsilon"(overrides, priceSource, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3];
     const base = epsilonValue(DEFAULT_CONFIG.epsilon);
     const epsilons: EpsilonSpec[] = [base / 5, DEFAULT_CONFIG.epsilon, base * 5];
@@ -384,10 +384,10 @@ export const scenarios: Record<string, ScenarioFn> = {
         configs.push(mergeConfig({ ...overrides, validatorMix: { malicious: frac }, epsilon, label }));
       }
     }
-    return runBatch(configs, pricePoints, outputDir, threadCount);
+    return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  async "sweep-pushy-and-epsilon"(overrides, pricePoints, outputDir, threadCount) {
+  async "sweep-pushy-and-epsilon"(overrides, priceSource, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3];
     const base = epsilonValue(DEFAULT_CONFIG.epsilon);
     const epsilons: EpsilonSpec[] = [base / 5, DEFAULT_CONFIG.epsilon, base * 5];
@@ -399,14 +399,14 @@ export const scenarios: Record<string, ScenarioFn> = {
         configs.push(mergeConfig({ ...overrides, validatorMix: { pushy: frac }, epsilon, label }));
       }
     }
-    return runBatch(configs, pricePoints, outputDir, threadCount);
+    return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
   /** Vary epsilon to find optimal value */
-  async "epsilon-sweep"(overrides, pricePoints, outputDir, threadCount) {
+  async "epsilon-sweep"(overrides, priceSource, outputDir, threadCount) {
     const multipliers = [0.25, 0.5, 1, 2, 4];
     const autoConfig = mergeConfig(overrides);
-    const maxDelta = maxBlockDelta(pricePoints);
+    const maxDelta = maxBlockDelta(priceSource.pricePoints);
     const baseEpsilon = maxDelta / autoConfig.validatorCount;
 
     const configs = multipliers.map((mult) => {
@@ -414,22 +414,22 @@ export const scenarios: Record<string, ScenarioFn> = {
       const label = `epsilon=${eps.toFixed(6)} (${mult}x)`;
       return mergeConfig({ ...overrides, epsilon: eps, label });
     });
-    return runBatch(configs, pricePoints, outputDir, threadCount);
+    return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
   /** Stress test: 49% malicious */
-  async stress(overrides, pricePoints, outputDir, threadCount) {
+  async stress(overrides, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: stress]`);
     const config = mergeConfig({
       ...overrides,
       validatorMix: { malicious: 0.49 },
       label: "stress (49% malicious)",
     });
-    return runBatch([config], pricePoints, outputDir, threadCount);
+    return runBatch([config], priceSource, outputDir, threadCount);
   },
 
   /** For all malicious variants, show 49% and 50% */
-  async "edge-malicious"(overrides, pricePoints, outputDir, threadCount) {
+  async "edge-malicious"(overrides, priceSource, outputDir, threadCount) {
     const mixes: ValidatorMix[] = [
       { malicious: 0.49 },
       { malicious: 0.50 },
@@ -446,10 +446,10 @@ export const scenarios: Record<string, ScenarioFn> = {
     for (const mix of mixes) {
       configs.push(mergeConfig({ ...overrides, validatorMix: mix, label: formatMix(mix) }));
   }
-    return runBatch(configs, pricePoints, outputDir, threadCount);
+    return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  async "research-absolute-eps"(overrides, pricePoints, outputDir, threadCount) {
+  async "research-absolute-eps"(overrides, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: research-absolute-eps]`);
     const criteria = loadCriteria();
     const base = mergeConfig({ ...overrides, convergenceThreshold: criteria.convergenceThreshold });
@@ -483,7 +483,7 @@ export const scenarios: Record<string, ScenarioFn> = {
 
     console.log(`  Grid: ${multipliers.length} epsilons x ${mixes.length} mixes = ${configs.length} simulations`);
 
-    const results = await runBatch(configs, pricePoints, outputDir, threadCount);
+    const results = await runBatch(configs, priceSource, outputDir, threadCount);
 
     const reportPath = outputDir
       ? join(outputDir, "research_report.json")
@@ -515,7 +515,7 @@ export const scenarios: Record<string, ScenarioFn> = {
    * runs use whatever ε is passed in (auto by default) but it doesn't affect
    * those aggregators' price updates.
    */
-  async "aggregator-comparison"(overrides, pricePoints, outputDir, threadCount) {
+  async "aggregator-comparison"(overrides, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: aggregator-comparison]`);
 
     const aggregators: AggregatorConfig[] = [
@@ -560,10 +560,78 @@ export const scenarios: Record<string, ScenarioFn> = {
     console.log(`    malicious : inverse direction (nudge) / mirror across lastPrice (quote)`);
     console.log(`    pushy     : max-push as author (nudge) / outlier real·(1 ± ${mp.pushyQuoteBias}) (quote, lossy)`);
 
-    return runBatch(configs, pricePoints, outputDir, threadCount);
+    return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  async "research-ratio-eps"(overrides, pricePoints, outputDir, threadCount) {
+  /**
+   * Compare validator-observation modes under realistic per-trade data.
+   *
+   * MUST be run with --data-source=trades and ≥2 venues, otherwise the
+   * "random-venue" arm has nothing to draw from and will throw.
+   *
+   * Each pair of runs uses identical config except for the validator
+   * observation source:
+   *   - median       : every validator sees the cross-venue median (current default).
+   *   - random-venue : each validator query picks a random venue from the
+   *                    loaded set. Honest validators now disagree more
+   *                    (per-venue noise), which interacts with the aggregator.
+   *
+   * Cross-product: 2 obs sources × 3 aggregators × 4 malicious fractions = 24 sims.
+   * Useful expected shape:
+   *   - With nudge aggregator + random-venue, honest validators waste more
+   *     up/down nudges canceling each other → tracking lag.
+   *   - With median aggregator + random-venue, the runtime already aggregates,
+   *     so the impact should be much smaller.
+   */
+  async "validator-observation"(overrides, priceSource, outputDir, threadCount) {
+    console.log(`\n[Scenario: validator-observation]`);
+    if (!priceSource.venuePrices) {
+      throw new Error(
+        `validator-observation scenario requires --data-source=trades and ≥1 venue. ` +
+        `Re-run with: --data-source trades --venues binance,bybit,gate,kraken`,
+      );
+    }
+
+    const obsModes: ValidatorPriceSource[] = [
+      { kind: "median" },
+      { kind: "random-venue" },
+    ];
+    const aggregators: AggregatorConfig[] = [
+      { kind: "nudge" },
+      { kind: "median" },
+      { kind: "trimmed-mean", k: 0.1 },
+    ];
+    const adversaryTypes = ["malicious"] as const;
+    const fractions = [0, 0.10, 0.33, 0.49];
+
+    const configs: SimulationConfig[] = [];
+    for (const obs of obsModes) {
+      for (const agg of aggregators) {
+        for (const frac of fractions) {
+          const mix: ValidatorMix = frac === 0 ? {} : { malicious: frac };
+          const aggLabel = aggregatorLabel(agg);
+          const obsLabel = obs.kind;
+          const advLabel = frac === 0 ? "honest" : `mal@${(frac * 100).toFixed(0)}%`;
+          configs.push(mergeConfig({
+            ...overrides,
+            aggregator: agg,
+            validatorMix: mix,
+            validatorPriceSource: obs,
+            label: `${obsLabel} obs · ${aggLabel} · ${advLabel}`,
+          }));
+        }
+      }
+    }
+
+    console.log(`  Grid: ${obsModes.length} obs modes × ${aggregators.length} aggregators × ${fractions.length} fractions = ${configs.length} simulations`);
+    console.log(`  Observation modes:`);
+    console.log(`    median       : every validator sees the cross-venue median + jitter`);
+    console.log(`    random-venue : every validator query picks a random venue + jitter`);
+
+    return runBatch(configs, priceSource, outputDir, threadCount);
+  },
+
+  async "research-ratio-eps"(overrides, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: research-ratio-eps]`);
     const criteria = loadCriteria();
     const base = mergeConfig({ ...overrides, convergenceThreshold: criteria.convergenceThreshold });
@@ -598,7 +666,7 @@ export const scenarios: Record<string, ScenarioFn> = {
 
     console.log(`  Grid: ${multipliers.length} ratios x ${mixes.length} mixes = ${configs.length} simulations`);
 
-    const results = await runBatch(configs, pricePoints, outputDir, threadCount);
+    const results = await runBatch(configs, priceSource, outputDir, threadCount);
 
     const reportPath = outputDir
       ? join(outputDir, "research_report.json")

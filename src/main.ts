@@ -4,7 +4,7 @@ import { join } from "path";
 import { cpus } from "os";
 import { DEFAULT_CONFIG, CANDLE_INTERVAL, ALL_VENUES } from "./config.js";
 import { epsilonValue } from "./types.js";
-import type { SimulationConfig, SimulationResult, ScenarioMeta, EpsilonSpec, AggregatorConfig, DataSourceSpec, VenueId } from "./types.js";
+import type { SimulationConfig, SimulationResult, ScenarioMeta, EpsilonSpec, AggregatorConfig, DataSourceSpec, VenueId, ValidatorPriceSource, CrossVenueSpec } from "./types.js";
 import { parseMixCli, formatMix } from "./mix.js";
 import { loadPriceSource } from "./data/source.js";
 import { runSimulation } from "./sim/engine.js";
@@ -41,8 +41,10 @@ const { values: args } = parseArgs({
     force: { type: "boolean", default: false },
     aggregator: { type: "string" },
     "trimmed-mean-k": { type: "string", default: "0.1" },
-    "data-source": { type: "string", default: "candles" },
+    "data-source": { type: "string", default: "trades" },
     venues: { type: "string" },
+    "cross-venue": { type: "string" },
+    "price-source": { type: "string" },
     help: { type: "boolean", default: false },
   },
 });
@@ -78,9 +80,15 @@ Options:
   --force                       Overwrite existing output directory
   --aggregator <mode>           Aggregation rule: "nudge" (default), "median", or "trimmed-mean"
   --trimmed-mean-k <fraction>   Fraction trimmed from each tail when using trimmed-mean (default: 0.1)
-  --data-source <kind>          "candles" (default, fast) or "trades" (per-trade, multi-venue)
-  --venues <list>               Comma-separated venue ids (default: binance). Only used with --data-source=trades.
-                                  Available venues: ${ALL_VENUES.join(", ")} (Phase 1: only binance is implemented)
+  --data-source <kind>          "trades" (default, per-trade multi-venue) or "candles" (Binance US 1m)
+  --venues <list>                Comma-separated venue ids (default: all four). Only used with --data-source=trades.
+                                  Available venues: ${ALL_VENUES.join(", ")}
+  --cross-venue <rule>           How to combine per-venue prices into the ground-truth real price:
+                                  "median" (default), "vwap" (volume-weighted across venues), or "mean".
+                                  Only used with --data-source=trades.
+  --price-source <mode>          "random-venue" (default; each query picks a random venue) or
+                                  "median" (every validator sees the cross-venue median).
+                                  random-venue requires --data-source=trades.
   --help                        Show this help
 `);
   process.exit(0);
@@ -92,13 +100,31 @@ if (args["list-scenarios"]) {
 }
 
 
-function parseDataSourceArg(kind: string, venuesRaw: string | undefined): DataSourceSpec {
+function parsePriceSourceArg(raw: string | undefined): ValidatorPriceSource | undefined {
+  if (raw === undefined) return undefined;
+  if (raw === "median") return { kind: "median" };
+  if (raw === "random-venue") return { kind: "random-venue" };
+  console.error(`Invalid --price-source: "${raw}". Expected: median, random-venue.`);
+  process.exit(1);
+}
+
+function parseCrossVenueArg(raw: string | undefined): CrossVenueSpec {
+  if (raw === undefined) return { kind: "median" };
+  if (raw === "median" || raw === "vwap" || raw === "mean") return { kind: raw };
+  console.error(`Invalid --cross-venue: "${raw}". Expected: median, vwap, mean.`);
+  process.exit(1);
+}
+
+function parseDataSourceArg(kind: string, venuesRaw: string | undefined, crossVenueRaw: string | undefined): DataSourceSpec {
   if (kind === "candles") {
     if (venuesRaw) console.error(`Warning: --venues ignored when --data-source=candles`);
+    if (crossVenueRaw) console.error(`Warning: --cross-venue ignored when --data-source=candles`);
     return { kind: "candles" };
   }
   if (kind === "trades") {
-    const list = (venuesRaw ?? "binance").split(",").map((s) => s.trim()).filter(Boolean);
+    const list = venuesRaw
+      ? venuesRaw.split(",").map((s) => s.trim()).filter(Boolean)
+      : ALL_VENUES.slice();
     for (const v of list) {
       if (!ALL_VENUES.includes(v as VenueId)) {
         console.error(`Invalid venue "${v}". Available: ${ALL_VENUES.join(", ")}`);
@@ -109,7 +135,7 @@ function parseDataSourceArg(kind: string, venuesRaw: string | undefined): DataSo
       console.error(`--data-source=trades requires at least one venue`);
       process.exit(1);
     }
-    return { kind: "trades", venues: list as VenueId[] };
+    return { kind: "trades", venues: list as VenueId[], crossVenue: parseCrossVenueArg(crossVenueRaw) };
   }
   console.error(`Invalid --data-source: "${kind}". Expected: candles, trades.`);
   process.exit(1);
@@ -244,7 +270,7 @@ if (args.data) {
 const startDate = args["start-date"]!;
 const endDate = args["end-date"]!;
 
-const dataSource = parseDataSourceArg(args["data-source"]!, args.venues);
+const dataSource = parseDataSourceArg(args["data-source"]!, args.venues, args["cross-venue"]);
 
 if (dataSource.kind === "candles") {
   console.log(`\nFetching DOT/USDT data (candles): ${startDate} to ${endDate}`);
@@ -252,14 +278,14 @@ if (dataSource.kind === "candles") {
   console.log(`\nLoading DOT/USDT data (trades, venues: ${dataSource.venues.join(", ")}): ${startDate} to ${endDate}`);
 }
 
-const pricePoints = await loadPriceSource(dataSource, startDate, endDate);
+const priceSource = await loadPriceSource(dataSource, startDate, endDate);
 
 if (args["fetch-only"]) {
-  console.log(`\nFetch complete. ${pricePoints.length.toLocaleString()} price points loaded.`);
+  console.log(`\nFetch complete. ${priceSource.pricePoints.length.toLocaleString()} price points loaded.`);
   process.exit(0);
 }
 
-console.log(`  Generated ${pricePoints.length.toLocaleString()} price points`);
+console.log(`  Generated ${priceSource.pricePoints.length.toLocaleString()} price points`);
 
 // Determine output directory
 const userSetOutput = Bun.argv.slice(2).includes("--output");
@@ -273,6 +299,13 @@ if (userSetOutput) {
 }
 
 const aggregatorOverride = parseAggregatorArg(args.aggregator, parseFloat(args["trimmed-mean-k"]!));
+let priceSourceOverride = parsePriceSourceArg(args["price-source"]);
+// If user explicitly picked --data-source=candles without specifying
+// --price-source, default to median observation (random-venue is
+// structurally impossible without per-venue data and would just throw).
+if (dataSource.kind === "candles" && priceSourceOverride === undefined) {
+  priceSourceOverride = { kind: "median" };
+}
 const baseOverrides: Partial<SimulationConfig> = {
   startDate,
   endDate,
@@ -283,6 +316,7 @@ const baseOverrides: Partial<SimulationConfig> = {
   convergenceThreshold: parseFloat(args["convergence-threshold"]!),
   dataSource,
   ...(aggregatorOverride ? { aggregator: aggregatorOverride } : {}),
+  ...(priceSourceOverride ? { validatorPriceSource: priceSourceOverride } : {}),
 };
 
 ensureOutputDir(outputDir, !!args.force);
@@ -295,7 +329,7 @@ if (args.scenario) {
     console.error(`Unknown scenario: ${args.scenario}. Available: ${listScenarios().join(", ")}`);
     process.exit(1);
   }
-  await scenarioFn(baseOverrides, pricePoints, outputDir, threadCount);
+  await scenarioFn(baseOverrides, priceSource, outputDir, threadCount);
 } else {
   // Single simulation
   const mix = parseMixCli(args.mix!);
@@ -309,7 +343,7 @@ if (args.scenario) {
   console.log(`\n[Single simulation]`);
   const dirName = scenarioDirName(config.label, 0);
   const writer = new ChunkWriter(join(outputDir, dirName));
-  const result = runSimulation(config, pricePoints, writer.sink);
+  const result = runSimulation(config, priceSource, writer.sink);
   const info = writer.finish();
 
   const meta: ScenarioMeta = {
@@ -321,7 +355,7 @@ if (args.scenario) {
     chunkTimeRanges: info.chunkTimeRanges,
     dir: dirName,
   };
-  writeIndex(outputDir, [meta]);
+  writeIndex(outputDir, [meta], priceSource);
 }
 
 // Start server

@@ -7,7 +7,6 @@ export const DEFAULT_MALICIOUS_PARAMS: MaliciousParams = {
 };
 
 // All venues currently supported by the trade-data pipeline.
-// Phase 1 ships only Binance; the others are stubs added in Phase 2.
 export const ALL_VENUES: VenueId[] = ["binance", "kraken", "bybit", "gate"];
 
 export const DEFAULT_CONFIG: SimulationConfig = {
@@ -22,7 +21,10 @@ export const DEFAULT_CONFIG: SimulationConfig = {
   label: "default",
   aggregator: { kind: "nudge" },
   maliciousParams: DEFAULT_MALICIOUS_PARAMS,
-  dataSource: { kind: "candles" },
+  // Defaults reflect the realistic setup: validators query individual venues
+  // (random per query) and the cross-venue median is used as ground truth.
+  dataSource: { kind: "trades", venues: ALL_VENUES, crossVenue: { kind: "median" } },
+  validatorPriceSource: { kind: "random-venue" },
 };
 
 export const BLOCK_TIME_SECONDS = 6;
