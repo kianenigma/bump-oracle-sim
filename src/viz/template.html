@@ -187,6 +187,18 @@
 <body>
   <div id="loading-overlay"><div class="spinner"></div><span>Loading...</span></div>
 
+  <!-- Floating tooltip showing block # and per-scenario author info on hover.
+       Position is set by the crosshair-move handler; pointer-events:none so
+       it never steals hover from the chart underneath. -->
+  <div id="author-tooltip" style="
+    position: fixed; pointer-events: none; display: none;
+    background: var(--panel, #1a1d22); color: var(--text, #e6e6e6);
+    border: 1px solid var(--border, #333); border-radius: 4px;
+    padding: 6px 8px; font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+    z-index: 1000; max-width: 360px; white-space: nowrap;
+  "></div>
+
   <div id="header">
     <div id="header-left">
       <h1>Oracle Bump Simulation</h1>
@@ -216,8 +228,8 @@
     <div class="toolbar-sep"></div>
     <div class="toolbar-group">
       <span class="toolbar-label">View:</span>
-      <button class="tb view-btn active" data-view="candle">Candle</button>
-      <button class="tb view-btn" data-view="line">Line</button>
+      <button class="tb view-btn" data-view="candle">Candle</button>
+      <button class="tb view-btn active" data-view="line">Line</button>
     </div>
     <div class="toolbar-sep"></div>
     <div class="toolbar-group">
@@ -313,7 +325,7 @@
 
     // ── State ──
     let currentTF = 900;
-    let currentView = 'candle';
+    let currentView = 'line';
     let currentTab = 'chart';
 
     let serverMeta = null;
@@ -1690,6 +1702,123 @@
 
     priceChart.subscribeCrosshairMove(updatePriceTracking);
     devChart.subscribeCrosshairMove(updateDevTracking);
+
+    // ── Hover tooltip: block # + per-scenario author type ─────────────────
+    // Subscribes to crosshair-move on BOTH charts (so hovering deviation also
+    // works) and asks /api/block which block was authored by whom at the
+    // hovered timestamp. Throttled to ~50ms; aborts in-flight on new moves.
+    const authorTooltipEl = document.getElementById('author-tooltip');
+    let authorFetchAbort = null;
+    let authorThrottleTimer = null;
+    let authorLastTime = 0;
+    let authorLastReqId = 0;
+
+    /** Friendly type → glyph map. Keeps the tooltip narrow. */
+    const TYPE_GLYPH = {
+      honest: '✓',
+      malicious: '✗',
+      pushy: '⇈',
+      noop: '∅',
+      delayed: '⌛',
+      drift: '↗',
+    };
+
+    function hideAuthorTooltip() {
+      authorTooltipEl.style.display = 'none';
+    }
+
+    /** Position the tooltip near the cursor while keeping it on-screen. */
+    function placeAuthorTooltip(clientX, clientY) {
+      const pad = 14;
+      const w = authorTooltipEl.offsetWidth || 200;
+      const h = authorTooltipEl.offsetHeight || 60;
+      let x = clientX + pad;
+      let y = clientY + pad;
+      if (x + w > window.innerWidth - 8) x = clientX - w - pad;
+      if (y + h > window.innerHeight - 8) y = clientY - h - pad;
+      authorTooltipEl.style.left = Math.max(0, x) + 'px';
+      authorTooltipEl.style.top = Math.max(0, y) + 'px';
+    }
+
+    /** Fetch /api/block and render the tooltip. Aborts older in-flight reqs. */
+    async function fetchAndRenderAuthorTooltip(time, clientX, clientY) {
+      if (!serverMeta || activeScenarios.size === 0) {
+        hideAuthorTooltip();
+        return;
+      }
+      if (authorFetchAbort) authorFetchAbort.abort();
+      authorFetchAbort = new AbortController();
+      const reqId = ++authorLastReqId;
+
+      try {
+        const sids = [...activeScenarios].join(',');
+        const res = await fetch(`/api/block?scenarios=${sids}&time=${time}`, { signal: authorFetchAbort.signal });
+        if (reqId !== authorLastReqId) return;  // stale
+        const data = await res.json();
+
+        const blockTime = new Date(data.timestamp * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+        const lines = [
+          `<div style="font-weight:600;margin-bottom:3px">Block #${data.block.toLocaleString()} · ${blockTime}</div>`,
+        ];
+        // Cap to keep the tooltip readable; remaining count shown below.
+        const MAX_ROWS = 12;
+        const rows = data.authors.slice(0, MAX_ROWS);
+        for (const a of rows) {
+          const dot = scenarioColorMap.get(a.scenario) || '#888';
+          const glyph = TYPE_GLYPH[a.type] ?? '·';
+          const labelEsc = (a.label || `#${a.scenario}`).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+          lines.push(
+            `<div><span style="color:${dot}">●</span> ${labelEsc}: ` +
+            `<b>${glyph} ${a.type}</b> <span style="opacity:0.7">(validator #${a.index})</span></div>`,
+          );
+        }
+        if (data.authors.length > MAX_ROWS) {
+          lines.push(`<div style="opacity:0.7">+ ${data.authors.length - MAX_ROWS} more (toggle scenarios off)</div>`);
+        }
+
+        authorTooltipEl.innerHTML = lines.join('');
+        authorTooltipEl.style.display = 'block';
+        placeAuthorTooltip(clientX, clientY);
+      } catch (e) {
+        if (e?.name !== 'AbortError') {
+          // Network/parse error — just hide silently.
+          hideAuthorTooltip();
+        }
+      }
+    }
+
+    /** Crosshair handler shared by both charts. Throttles network at ~50ms but
+     *  re-positions the tooltip on every move so it tracks smoothly. */
+    function makeAuthorTooltipHandler(containerEl) {
+      return (param) => {
+        const validTime = param && param.time && param.point;
+        if (!validTime || activeScenarios.size === 0 || currentTab !== 'chart') {
+          hideAuthorTooltip();
+          return;
+        }
+        const rect = containerEl.getBoundingClientRect();
+        const clientX = rect.left + param.point.x;
+        const clientY = rect.top + param.point.y;
+
+        // Snappy reposition for the existing tooltip.
+        if (authorTooltipEl.style.display !== 'none') placeAuthorTooltip(clientX, clientY);
+
+        // Throttle network: refetch only when the time-bucket changed AND at
+        // most once per 50ms.
+        const t = Math.floor(param.time);
+        if (t === authorLastTime && authorTooltipEl.style.display !== 'none') return;
+        authorLastTime = t;
+        if (authorThrottleTimer) return;
+        authorThrottleTimer = setTimeout(() => {
+          authorThrottleTimer = null;
+          fetchAndRenderAuthorTooltip(t, clientX, clientY);
+        }, 50);
+      };
+    }
+    priceChart.subscribeCrosshairMove(makeAuthorTooltipHandler(priceChartEl));
+    devChart.subscribeCrosshairMove(makeAuthorTooltipHandler(devChartEl));
+    priceChartEl.addEventListener('mouseleave', hideAuthorTooltip);
+    devChartEl.addEventListener('mouseleave', hideAuthorTooltip);
 
     // ── Resize ──
     const ro = new ResizeObserver(() => {

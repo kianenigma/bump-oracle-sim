@@ -44,14 +44,6 @@ The nudge aggregator can also have this, but it would simply be a noop, and the 
 everyone remains at 1.
 
 
-## Smoke Test
-
-Then we should have a simple scenario in which one of our malicious validators gets disabled.
-
-## Scenarios to be added:
-
-* Compare Malicious
-
 # UI
 We should have a way to show the confidence metric of our validators in the UI. We should add a new
 tab, that contains this information. A simple chart would do, but I should be able to select

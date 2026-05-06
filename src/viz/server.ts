@@ -7,9 +7,13 @@ import type {
   ApiMetaResponse,
   ApiDataResponse,
   LinePoint,
+  ValidatorGroup,
+  ValidatorType,
 } from "../types.js";
 import { aggregateOHLC, aggregateLine, aggregateDeviation } from "./aggregation.js";
 import { loadIndex, loadChunk, loadVenues, type VenuesFile } from "./writer.js";
+import { mulberry32 } from "../rng.js";
+import { BLOCK_TIME_SECONDS } from "../config.js";
 
 const TEMPLATE_PATH = join(import.meta.dir, "template.html");
 const MAX_CANDLES = 10_000;
@@ -50,6 +54,61 @@ async function loadChunkCached(outputDir: string, scenarioDir: string, chunkInde
 
 function scenarioDir(meta: ScenarioMeta, index: number): string {
   return meta.dir ?? `scenario_${index}`;
+}
+
+// ── Author replay (per-scenario cache) ──────────────────────────────────────
+// Author selection in chain.ts is `Math.floor(rng() * validators.length)`,
+// where the chain's only RNG consumer is author selection. So we can rebuild
+// the entire authorIndex sequence by replaying mulberry32(seed) blockCount
+// times — no need to write authors to .simdata.
+//
+// Cache key: scenario directory name (unique per scenario in the index).
+// Memory: 4 bytes × blockCount per scenario; 5M blocks ≈ 20 MB. The cache is
+// uncapped because `--data` only ever serves one .simdata directory at a time.
+const authorCache = new Map<string, Uint32Array>();
+
+function totalValidatorCount(validators: ValidatorGroup[]): number {
+  let n = 0;
+  for (const g of validators) n += g.count;
+  return n;
+}
+
+function getAuthorIndices(meta: ScenarioMeta, scenarioIdx: number): Uint32Array {
+  const key = scenarioDir(meta, scenarioIdx);
+  const cached = authorCache.get(key);
+  if (cached) return cached;
+  const total = totalValidatorCount(meta.config.validators);
+  const arr = new Uint32Array(meta.blockCount);
+  if (total > 0) {
+    const rng = mulberry32(meta.config.seed);
+    for (let i = 0; i < meta.blockCount; i++) {
+      arr[i] = Math.floor(rng() * total);
+    }
+  }
+  authorCache.set(key, arr);
+  return arr;
+}
+
+/** Walk the validator groups (which are stored in order) to find the type
+ *  that owns `authorIdx`. O(groups), groups is tiny (<10 typical). */
+function validatorTypeAt(validators: ValidatorGroup[], authorIdx: number): ValidatorType {
+  let cum = 0;
+  for (const g of validators) {
+    if (authorIdx < cum + g.count) return g.type;
+    cum += g.count;
+  }
+  // Fallback for out-of-range; shouldn't happen unless authorIdx ≥ total.
+  return validators.length > 0 ? validators[validators.length - 1].type : "honest";
+}
+
+/** Floor a timestamp to the block index using uniform 6s spacing from
+ *  meta.timeRange.from. Clamps to [0, blockCount-1]. */
+function blockAtTimestamp(meta: ScenarioMeta, ts: number): number {
+  if (meta.blockCount === 0) return 0;
+  if (ts <= meta.timeRange.from) return 0;
+  if (ts >= meta.timeRange.to) return meta.blockCount - 1;
+  const idx = Math.floor((ts - meta.timeRange.from) / BLOCK_TIME_SECONDS);
+  return Math.max(0, Math.min(meta.blockCount - 1, idx));
 }
 
 function buildMetaResponse(
@@ -239,6 +298,49 @@ export async function startServer(
             "Content-Type": "application/json",
             "Access-Control-Allow-Origin": "*",
           },
+        });
+      }
+
+      if (url.pathname === "/api/block") {
+        // Hover-tooltip lookup: which block was authored by whom at this time,
+        // for which scenarios. Lightweight; cache makes it O(1) post-warmup.
+        const scenarioParam = url.searchParams.get("scenarios") ?? "all";
+        const time = parseFloat(url.searchParams.get("time") ?? "0");
+        if (isNaN(time)) {
+          return new Response(JSON.stringify({ error: "Invalid time" }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+
+        const parsed = parseScenarioFilter(scenarioParam, filterIndices);
+        const allowed = filterIndices ?? index.scenarios.map((_, i) => i);
+        const scenarioIndices = parsed === "all" ? allowed : (parsed.length > 0 ? parsed : allowed);
+
+        if (scenarioIndices.length === 0) {
+          return new Response(JSON.stringify({ block: 0, timestamp: time, authors: [] }), {
+            headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+          });
+        }
+
+        // All scenarios share the same block timeline (driven by the price
+        // source, not the validator config), so resolve block from the first.
+        const refMeta = index.scenarios[scenarioIndices[0]];
+        const block = blockAtTimestamp(refMeta, time);
+        const blockTimestamp = refMeta.timeRange.from + block * BLOCK_TIME_SECONDS;
+
+        const authors = scenarioIndices.map((idx) => {
+          const meta = index.scenarios[idx];
+          const arr = getAuthorIndices(meta, idx);
+          // Clamp in case scenarios disagree on blockCount (shouldn't happen).
+          const safeBlock = Math.min(block, arr.length - 1);
+          const authorIdx = arr[safeBlock] ?? 0;
+          const type = validatorTypeAt(meta.config.validators, authorIdx);
+          return { scenario: idx, label: meta.config.label, index: authorIdx, type };
+        });
+
+        return new Response(JSON.stringify({ block, timestamp: blockTimestamp, authors }), {
+          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
         });
       }
 
