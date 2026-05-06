@@ -61,7 +61,7 @@ export type EpsilonMode = "abs" | "ratio";
 // `permanentExclusion`: when a validator's confidence first reaches 0,
 // is the exclusion sticky (cannot recover) or transient (recovers when
 // the callback raises confidence again). Default true.
-export type ConfidencePolicy = "off" | "default";
+export type ConfidencePolicy = "off" | "default" | "wideband" | "wideband-strict" | "wideband-attributed";
 
 export type AggregatorConfig =
   | { kind: "nudge"; epsilon: EpsilonSpec; minInputs?: number }
@@ -138,7 +138,7 @@ export interface ResolvedPriceSource {
 // old top-level (validatorCount, validatorMix, jitterStdDev,
 // validatorPriceSource, maliciousParams) bundle. A simulation's full
 // validator set is the concatenation of all groups, in order.
-export type ValidatorType = "honest" | "malicious" | "pushy" | "noop" | "delayed" | "drift" | "withholder";
+export type ValidatorType = "honest" | "malicious" | "pushy" | "noop" | "delayed" | "drift" | "withholder" | "bias-injector" | "overshoot-ratchet" | "stealth-withholder" | "convergent-cabal" | "inband-shifter";
 
 /** Type-specific behavior knobs. Required keys depend on `type`:
  *    delayed   → delayBlocks
@@ -163,6 +163,81 @@ export interface ValidatorParams {
    *  Coordination is implicit: every withholder evaluates the same condition
    *  against (its observation, lastPrice) — no shared state needed. */
   withholderDirection?: "up" | "down";
+  /** bias-injector: which direction of price motion the cabal biases TOWARD.
+   *  "up"   = oracle is ratcheted upward (against real-down moves)
+   *  "down" = oracle is ratcheted downward (against real-up moves)
+   *  Quote mode: identical to withholder (abstain on against-direction obs).
+   *  Nudge mode: all members emit `direction` bumps unconditionally; cabal
+   *  authors select all in-direction bumps (overshoot); on against-direction
+   *  real motion blocks, cabal authors return [] (freeze the correction). */
+  biasInjectorDirection?: "up" | "down";
+  /** overshoot-ratchet: which direction the cabal ratchets the oracle in.
+   *  "up"   = ratchet upward (oracle drifts above real over time)
+   *  "down" = ratchet downward (oracle drifts below real over time)
+   *  Quote mode: identical to withholder (abstain on against-direction obs).
+   *  Nudge mode: pool-poison every block + adaptive author strategy:
+   *    - oracle-already-overshot-past-ceiling : freeze (avoid giving back gains)
+   *    - oracle-on-or-below-target            : activate ALL in-direction bumps
+   *      regardless of real motion (always inject; never let real correct). */
+  overshootRatchetDirection?: "up" | "down";
+  /** overshoot-ratchet: ceiling on the cumulative deviation the cabal lets
+   *  build up before they freeze. Expressed as a multiple of ε. Default 200
+   *  (≈ 2/3 of one maxBlockDelta). Higher = bolder attack, more likely to
+   *  trip criterion 2 (max single-block deviation) but more givebacks; lower
+   *  = stealthier ratchet. */
+  overshootRatchetCeilingBumps?: number;
+  /** stealth-withholder: bias direction (oracle is suppressed FROM moving
+   *  this way, so the oracle drifts opposite to real over up-trends if "up").
+   *  - "up": abstain when observed > lastPrice * (1 + threshold). Real moves
+   *          up are frozen, so oracle drifts BELOW real over up-trends.
+   *  - "down": abstain when observed < lastPrice * (1 - threshold). Real
+   *          moves down are frozen, so oracle drifts ABOVE real over down-runs.
+   *  Per the round-3 design, the cabal MUST be configured with priceSource
+   *  jitterStdDev=0 so that all members observe identical real prices and
+   *  abstain in lock-step. Stochastic per-validator jitter would defeat the
+   *  whole point — it'd let a fraction of cabal abstain on non-freeze blocks,
+   *  re-exposing them to the wideband-confidence ABSENT_PENALTY path. */
+  stealthWithholderDirection?: "up" | "down";
+  /** stealth-withholder: minimum normalized move (|observed-lastPrice|/lastPrice)
+   *  in the bias direction before the cabal abstains. Smaller threshold →
+   *  more freezes, stronger attack, but threshold must exceed jitter stddev
+   *  to avoid sign-flips across cabal. With recommended jitterStdDev=0 setup
+   *  any threshold ≥ 0 is fine; default 0.0005 (0.05%) gives near-maximum
+   *  freeze rate while still requiring observed to actually be above
+   *  lastPrice (avoids spurious abstentions when the oracle is already
+   *  ahead of real). */
+  stealthAbstainThreshold?: number;
+  /** convergent-cabal: bias direction (oracle is suppressed FROM moving this
+   *  way; oracle drifts opposite to real over up-trends if "up"). */
+  convergentCabalDirection?: "up" | "down";
+  /** convergent-cabal: trend window (blocks). The cabal only abstains when
+   *  real has been moving in the bias direction for this many CONSECUTIVE
+   *  recent blocks (per the cabal member's lockstep observation history).
+   *  Longer window = rarer abstention = lower absent-penalty exposure but
+   *  weaker attack. */
+  convergentCabalTrendBlocks?: number;
+  /** convergent-cabal: minimum cumulative real move in bias direction over
+   *  the trend window (fraction of lastPrice) required to trigger abstention.
+   *  Combined with `convergentCabalTrendBlocks`, ensures the cabal only
+   *  spends absent-penalty budget when the trend is real and significant. */
+  convergentCabalTrendMagnitude?: number;
+  /** convergent-cabal: nudge-mode author ceiling, in units of ε. Same
+   *  semantics as `overshootRatchetCeilingBumps`. */
+  convergentCabalCeilingBumps?: number;
+  /** inband-shifter: bias direction. "up" = ratchet oracle upward.
+   *  Quote leg submits `lastPrice * (1 + biasSign * quoteBias)`; nudge leg
+   *  pool-poisons this direction every block. */
+  inbandShifterDirection?: "up" | "down";
+  /** inband-shifter: quote-leg per-block bias as a fraction of `lastPrice`,
+   *  applied in `inbandShifterDirection`. Must lie strictly inside the
+   *  defender's wideband `goodBand` (5%) so the cabal never accrues a
+   *  BAD_QUOTE_PENALTY — the whole point of the attack is to be invisible
+   *  to defense #1's quote-distance check. Default 0.04 (4%). */
+  inbandShifterQuoteBias?: number;
+  /** inband-shifter: nudge-mode author ceiling, in units of ε. Same shape
+   *  as `overshootRatchetCeilingBumps` but kept independent so each
+   *  scenario can tune the two attackers without coupling them. Default 200. */
+  inbandShifterCeilingBumps?: number;
 }
 
 export interface ValidatorGroup {

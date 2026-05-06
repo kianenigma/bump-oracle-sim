@@ -60,13 +60,13 @@ export class Chain {
       lastPrice: this.lastPrice,
       blockIndex,
       epsilon: effectiveEps,
+      inputKind: this.aggregator.inputKind,
     };
 
     // 1. Gather one input per validator (offchain gossip).
-    const inputKind = this.aggregator.inputKind;
     const inputs: Submission[] = new Array(this.validators.length);
     for (let i = 0; i < this.validators.length; i++) {
-      inputs[i] = this.validators[i].produceInput(inputKind, ctx);
+      inputs[i] = this.validators[i].produceInput(ctx);
     }
 
     // 2. Pick a uniformly random author from ALL validators.

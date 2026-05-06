@@ -206,7 +206,7 @@ export function parseValidatorsCli(
     }
 
     if (!isValidatorType(name) || name === "honest") {
-      console.error(`Unknown validator type "${name}" in --mix. Available: malicious, pushy, noop, delayed, drift, withholder.`);
+      console.error(`Unknown validator type "${name}" in --mix. Available: malicious, pushy, noop, delayed, drift, withholder, bias-injector, overshoot-ratchet, stealth-withholder, convergent-cabal, inband-shifter.`);
       process.exit(1);
     }
 
@@ -222,5 +222,7 @@ export function parseValidatorsCli(
 
 function isValidatorType(s: string): s is ValidatorType {
   return s === "honest" || s === "malicious" || s === "pushy" || s === "noop"
-    || s === "delayed" || s === "drift" || s === "withholder";
+    || s === "delayed" || s === "drift" || s === "withholder" || s === "bias-injector"
+    || s === "overshoot-ratchet" || s === "stealth-withholder" || s === "convergent-cabal"
+    || s === "inband-shifter";
 }

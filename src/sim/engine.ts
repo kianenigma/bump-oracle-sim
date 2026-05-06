@@ -22,6 +22,11 @@ import {
   DelayedValidator,
   DriftValidator,
   WithholderValidator,
+  BiasInjectorValidator,
+  OvershootRatchetValidator,
+  StealthWithholderValidator,
+  ConvergentCabalValidator,
+  InBandShifterValidator,
 } from "./malicious.js";
 import { Chain } from "./chain.js";
 import { makeAggregator, defaultMinInputs } from "./aggregator.js";
@@ -48,6 +53,11 @@ const VALIDATOR_REGISTRY: Record<ValidatorGroup["type"], ValidatorCtor> = {
   delayed: DelayedValidator,
   drift: DriftValidator,
   withholder: WithholderValidator,
+  "bias-injector": BiasInjectorValidator,
+  "overshoot-ratchet": OvershootRatchetValidator,
+  "stealth-withholder": StealthWithholderValidator,
+  "convergent-cabal": ConvergentCabalValidator,
+  "inband-shifter": InBandShifterValidator,
 };
 
 export type BlockSink = (block: BlockMetrics) => void;

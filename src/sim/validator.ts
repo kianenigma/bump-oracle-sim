@@ -2,6 +2,9 @@ import { Bump } from "../types.js";
 import type { Submission, ValidatorParams, ValidatorPriceSource, ValidatorType } from "../types.js";
 import type { PriceEndpoint } from "./price-endpoint.js";
 
+/** What kind of input an aggregator wants this block. */
+export type InputKind = "nudge" | "quote";
+
 /** Per-block context handed to every produceInput / produceInherent call. */
 export interface ProduceCtx {
   lastPrice: number;
@@ -9,10 +12,10 @@ export interface ProduceCtx {
   /** Effective epsilon for this block (already accounts for ratio mode).
    *  Only meaningful in nudge mode; quote-mode validators ignore it. */
   epsilon: number;
+  /** What kind of input the aggregator expects this block. Validators
+   *  match on this to decide quote vs nudge behaviour. */
+  inputKind: InputKind;
 }
-
-/** What kind of input an aggregator wants this block — drives produceInput. */
-export type InputKind = "nudge" | "quote";
 
 export interface ValidatorAgent {
   readonly index: number;
@@ -20,7 +23,7 @@ export interface ValidatorAgent {
   readonly isHonest: boolean;
 
   /** This validator's local input for the block (gossiped to other nodes). */
-  produceInput(inputKind: InputKind, ctx: ProduceCtx): Submission;
+  produceInput(ctx: ProduceCtx): Submission;
 
   /**
    * As block author: from all gossiped inputs, select the subset that
@@ -97,9 +100,9 @@ export class HonestValidator implements ValidatorAgent {
     return this.endpoint.observe(this.priceSource, blockIndex, this.rng);
   }
 
-  produceInput(inputKind: InputKind, ctx: ProduceCtx): Submission {
+  produceInput(ctx: ProduceCtx): Submission {
     const price = this.observe(ctx.blockIndex);
-    if (inputKind === "nudge") {
+    if (ctx.inputKind === "nudge") {
       return { kind: "nudge", validatorIndex: this.index, bump: price >= ctx.lastPrice ? Bump.Up : Bump.Down };
     }
     return { kind: "quote", validatorIndex: this.index, price };
@@ -107,8 +110,7 @@ export class HonestValidator implements ValidatorAgent {
 
   produceInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
     if (inputs.length === 0) return [];
-    if (inputs[0].kind === "quote" || inputs[0].kind === "abstain") {
-      // Quote mode: honest pass-through.
+    if (ctx.inputKind === "quote") {
       return passThroughQuotes(inputs);
     }
     // Nudge mode: target the local price, pick optimal in-direction bumps.

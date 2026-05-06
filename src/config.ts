@@ -25,6 +25,18 @@ export const DEFAULT_VALIDATOR_PARAMS: Required<ValidatorParams> = {
   maliciousQuoteBias: 0.1,    // 5% outlier OPPOSITE motion (quote mode)
   driftQuoteStep: 0.1,       // 0.1% upward bias per block (quote mode)
   withholderDirection: "up",  // suppress upward oracle moves by default
+  biasInjectorDirection: "up", // ratchet oracle upward by default
+  overshootRatchetDirection: "up", // ratchet oracle upward by default
+  overshootRatchetCeilingBumps: 200, // ≈ 2/3 maxBlockDelta of permissible overshoot
+  stealthWithholderDirection: "up", // freeze upward oracle moves by default
+  stealthAbstainThreshold: 0.0005,  // 0.05% — abstain on real moves above this magnitude
+  convergentCabalDirection: "up",
+  convergentCabalTrendBlocks: 30,            // ≈ 3 minutes of sustained real move
+  convergentCabalTrendMagnitude: 0.0030,     // 0.30% sustained directional move
+  convergentCabalCeilingBumps: 200,
+  inbandShifterDirection: "up",
+  inbandShifterQuoteBias: 0.04,              // 4% — strictly inside the 5% wideband
+  inbandShifterCeilingBumps: 200,
 };
 
 // How often to snapshot the confidence vector into BlockMetrics. With a 6s

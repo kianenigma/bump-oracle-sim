@@ -42,13 +42,25 @@ export interface Aggregator {
 
 // ── Confidence callback ─────────────────────────────────────────────────────
 /** Mutates `state` in place. Constants live inside the function — different
- *  policies are different functions, not different parameter bags. */
+ *  policies are different functions, not different parameter bags.
+ *
+ *  `priceUpdated` is `true` when the aggregator successfully computed a new
+ *  median (this block produced a real `finalPrice`); `false` when the
+ *  aggregator hit the minInputs floor and held the price (freeze block,
+ *  `finalPrice === ctx.lastPrice`). Callbacks are called on BOTH paths so
+ *  that selective-abstention attacks cannot evade the absent-penalty just
+ *  by aligning their abstain blocks with freeze blocks. Each callback
+ *  decides how to interpret freeze: typically absences still penalise,
+ *  but the goodBand reward/bad-quote penalty is skipped (no median to
+ *  compare against).
+ */
 export type ConfidenceUpdate = (
   state: Float32Array,
   inputs: Submission[],
   inherent: Submission[],
   finalPrice: number,
   validatorCount: number,
+  priceUpdated: boolean,
 ) => void;
 
 // Tuned so a 1/3-saturated withholder reaches 0 in ~100 blocks (~10 min wall)
@@ -66,7 +78,7 @@ function clamp01(x: number): number {
   return x;
 }
 
-export const defaultConfidenceUpdate: ConfidenceUpdate = (state, _inputs, inherent, finalPrice, N) => {
+export const defaultConfidenceUpdate: ConfidenceUpdate = (state, _inputs, inherent, finalPrice, N, priceUpdated) => {
   // Mark which validators showed up in the inherent.
   const present = new Uint8Array(N);
   // Also remember each present validator's submission for the distance check.
@@ -92,6 +104,9 @@ export const defaultConfidenceUpdate: ConfidenceUpdate = (state, _inputs, inhere
       state[v] = clamp01(state[v] - ABSENT_PENALTY);
       continue;
     }
+    // On freeze blocks there's no fresh median to compare against; skip
+    // the goodBand reward/bad-quote penalty for present validators.
+    if (!priceUpdated) continue;
     const dist = Math.abs(priceByIdx[v] - finalPrice);
     state[v] = clamp01(state[v] + (dist <= band ? REWARD_DELTA : -BAD_QUOTE_PENALTY));
   }
@@ -99,8 +114,141 @@ export const defaultConfidenceUpdate: ConfidenceUpdate = (state, _inputs, inhere
 
 export const noopConfidenceUpdate: ConfidenceUpdate = () => { /* deliberately empty */ };
 
+// ── widebandConfidenceUpdate ────────────────────────────────────────────────
+// Defense-2 candidate. The default callback uses GOOD_BAND_PCT=1%, which
+// false-positives honest validators in `random-venue` observation mode
+// (cross-venue spreads can exceed 1% during volatile periods → honest
+// validators get penalised as bad quotes and eventually excluded). This
+// variant widens the band to 5% — large enough to absorb realistic
+// cross-venue dispersion while still well below the bias magnitudes of any
+// directional attacker. Same penalty/reward magnitudes; same absent-penalty.
+const WIDE_GOOD_BAND_PCT = 0.05;
+export const widebandConfidenceUpdate: ConfidenceUpdate = (state, _inputs, inherent, finalPrice, N, priceUpdated) => {
+  const present = new Uint8Array(N);
+  const priceByIdx = new Float64Array(N);
+  for (const s of inherent) {
+    if (s.kind === "quote") {
+      present[s.validatorIndex] = 1;
+      priceByIdx[s.validatorIndex] = s.price;
+    } else if (s.kind === "nudge") {
+      present[s.validatorIndex] = 1;
+      priceByIdx[s.validatorIndex] = finalPrice;
+    }
+  }
+  const band = WIDE_GOOD_BAND_PCT * Math.abs(finalPrice);
+  for (let v = 0; v < N; v++) {
+    if (state[v] === 0) continue;
+    if (!present[v]) {
+      // Defense #2 (committed): penalise absences even on freeze blocks.
+      // This plugs the seam exploited by `stealth-withholder` (round 3) —
+      // lock-step abstention used to align with freeze branches and skip
+      // the callback. Now the callback runs on freeze too and absent
+      // cabal members still accrue penalty.
+      state[v] = clamp01(state[v] - ABSENT_PENALTY);
+      continue;
+    }
+    if (!priceUpdated) continue;
+    const dist = Math.abs(priceByIdx[v] - finalPrice);
+    state[v] = clamp01(state[v] + (dist <= band ? REWARD_DELTA : -BAD_QUOTE_PENALTY));
+  }
+};
+
+// ── widebandStrictConfidenceUpdate ─────────────────────────────────────────
+// Defense-4 candidate. Round 4's `convergent-cabal` exploited the symmetry
+// between REWARD_DELTA and ABSENT_PENALTY (both 0.01): a cabal that abstains
+// less than 50% of blocks has non-decreasing long-run confidence, so even
+// permanent-exclusion never fires.
+//
+// This variant breaks that symmetry: the absent penalty is 5× the reward.
+// Now confidence decays for any cabal abstaining above ~16.7% of blocks
+// (the breakeven point `reward / (reward + STRICT_ABSENT_PENALTY)`). Honest
+// validators are rarely absent from the inherent (random author selection,
+// no abstain) and remain comfortably above the band, so honest baseline
+// is preserved.
+//
+// Same goodBand (5%) and bad-quote penalty (0.05) as the regular wideband
+// callback; only the absent penalty changes.
+const STRICT_ABSENT_PENALTY = 0.05;
+export const widebandStrictConfidenceUpdate: ConfidenceUpdate = (state, _inputs, inherent, finalPrice, N, priceUpdated) => {
+  const present = new Uint8Array(N);
+  const priceByIdx = new Float64Array(N);
+  for (const s of inherent) {
+    if (s.kind === "quote") {
+      present[s.validatorIndex] = 1;
+      priceByIdx[s.validatorIndex] = s.price;
+    } else if (s.kind === "nudge") {
+      present[s.validatorIndex] = 1;
+      priceByIdx[s.validatorIndex] = finalPrice;
+    }
+  }
+  const band = WIDE_GOOD_BAND_PCT * Math.abs(finalPrice);
+  for (let v = 0; v < N; v++) {
+    if (state[v] === 0) continue;
+    if (!present[v]) {
+      state[v] = clamp01(state[v] - STRICT_ABSENT_PENALTY);
+      continue;
+    }
+    if (!priceUpdated) continue;
+    const dist = Math.abs(priceByIdx[v] - finalPrice);
+    state[v] = clamp01(state[v] + (dist <= band ? REWARD_DELTA : -BAD_QUOTE_PENALTY));
+  }
+};
+
+// ── widebandAttributedConfidenceUpdate ─────────────────────────────────────
+// Defense-5 candidate. Defense-4 rejected because it failed to distinguish
+// SELF-ABSTAIN (validator chose not to submit) from AUTHOR-CENSORSHIP
+// (validator submitted, author dropped them from the inherent). Honest
+// validators were getting -0.05 penalties for being censored by cabal
+// authors, eventually decaying to permanent exclusion and collapsing the
+// system.
+//
+// This variant uses BOTH `inputs` (everyone's gossiped submissions) and
+// `inherent` (author's selection) to attribute the absence:
+//   - validator submitted a quote/nudge in inputs but is missing from
+//     inherent → AUTHOR-CENSORSHIP → no penalty
+//   - validator submitted abstain or didn't submit at all → SELF-ABSTAIN
+//     → -STRICT penalty (the round-4 reward-arbitrage seam stays plugged)
+//
+// Reward and bad-quote logic unchanged from wideband-strict.
+export const widebandAttributedConfidenceUpdate: ConfidenceUpdate = (state, inputs, inherent, finalPrice, N, priceUpdated) => {
+  // Classify each validator into one of {present, censored, self-abstain}.
+  const present = new Uint8Array(N);
+  const submittedNonAbstain = new Uint8Array(N);
+  const priceByIdx = new Float64Array(N);
+  for (const s of inputs) {
+    if (s.kind === "quote" || s.kind === "nudge") submittedNonAbstain[s.validatorIndex] = 1;
+  }
+  for (const s of inherent) {
+    if (s.kind === "quote") {
+      present[s.validatorIndex] = 1;
+      priceByIdx[s.validatorIndex] = s.price;
+    } else if (s.kind === "nudge") {
+      present[s.validatorIndex] = 1;
+      priceByIdx[s.validatorIndex] = finalPrice;
+    }
+  }
+  const band = WIDE_GOOD_BAND_PCT * Math.abs(finalPrice);
+  for (let v = 0; v < N; v++) {
+    if (state[v] === 0) continue;
+    if (!present[v]) {
+      // Attributed absent: penalise only if validator self-abstained, not
+      // if a malicious author censored them out of the inherent.
+      if (!submittedNonAbstain[v]) {
+        state[v] = clamp01(state[v] - STRICT_ABSENT_PENALTY);
+      }
+      continue;
+    }
+    if (!priceUpdated) continue;
+    const dist = Math.abs(priceByIdx[v] - finalPrice);
+    state[v] = clamp01(state[v] + (dist <= band ? REWARD_DELTA : -BAD_QUOTE_PENALTY));
+  }
+};
+
 function resolveConfidence(policy: ConfidencePolicy | undefined): { update: ConfidenceUpdate; on: boolean } {
-  if (policy === "default") return { update: defaultConfidenceUpdate, on: true };
+  if (policy === "default")             return { update: defaultConfidenceUpdate,             on: true };
+  if (policy === "wideband")            return { update: widebandConfidenceUpdate,            on: true };
+  if (policy === "wideband-strict")     return { update: widebandStrictConfidenceUpdate,      on: true };
+  if (policy === "wideband-attributed") return { update: widebandAttributedConfidenceUpdate,  on: true };
   return { update: noopConfidenceUpdate, on: false };
 }
 
@@ -219,14 +367,17 @@ abstract class ConfidenceTrackingAggregator {
     return n;
   }
 
-  /** Run the configured callback, then sticky-mark anything that hit zero. */
+  /** Run the configured callback, then sticky-mark anything that hit zero.
+   *  `priceUpdated` distinguishes success path (median computed → full
+   *  reward/penalty logic) from freeze path (only absences are penalised). */
   protected updateConfidence(
     inputs: Submission[],
     inherent: Submission[],
     finalPrice: number,
+    priceUpdated: boolean,
   ): void {
     if (!this.tracksConfidence) return;
-    this.confidenceUpdate(this.confidence, inputs, inherent, finalPrice, this.N);
+    this.confidenceUpdate(this.confidence, inputs, inherent, finalPrice, this.N, priceUpdated);
     if (this.permanentExclusion) {
       for (let v = 0; v < this.N; v++) {
         if (this.confidence[v] === 0) this.excluded[v] = 1;
@@ -273,11 +424,15 @@ export class MedianAggregator extends ConfidenceTrackingAggregator implements Ag
       ? Math.min(this.minInputs, Math.floor((2 / 3) * this.activeCount()) + 1)
       : this.minInputs;
     if (quotes.length < effectiveMinInputs || quotes.length === 0) {
+      // Freeze branch: still run the confidence callback so absences
+      // accrue penalty even though no median was produced. This closes
+      // the round-3 stealth-withholder seam.
+      this.updateConfidence(ctx.inputs, filtered, ctx.lastPrice, false);
       return { newPrice: ctx.lastPrice, totalBumps: totalQuotes, activatedBumps: 0, netDirection: 0, priceUpdated: false };
     }
     const { sorted, trim } = sortAndTrim(quotes, this.k);
     const newPrice = medianOfRange(sorted, trim, sorted.length - trim);
-    this.updateConfidence(ctx.inputs, filtered, newPrice);
+    this.updateConfidence(ctx.inputs, filtered, newPrice, true);
     return {
       newPrice,
       totalBumps: totalQuotes,
@@ -330,6 +485,7 @@ export class MeanAggregator extends ConfidenceTrackingAggregator implements Aggr
       ? Math.min(this.minInputs, Math.floor((2 / 3) * this.activeCount()) + 1)
       : this.minInputs;
     if (quoteEntries.length < effectiveMinInputs || quoteEntries.length === 0) {
+      this.updateConfidence(ctx.inputs, filtered, ctx.lastPrice, false);
       return { newPrice: ctx.lastPrice, totalBumps: totalQuotes, activatedBumps: 0, netDirection: 0, priceUpdated: false };
     }
 
@@ -360,7 +516,7 @@ export class MeanAggregator extends ConfidenceTrackingAggregator implements Aggr
       newPrice = sum / (hi - lo);
     }
 
-    this.updateConfidence(ctx.inputs, filtered, newPrice);
+    this.updateConfidence(ctx.inputs, filtered, newPrice, true);
     return {
       newPrice,
       totalBumps: totalQuotes,
