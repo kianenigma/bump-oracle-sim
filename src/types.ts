@@ -122,15 +122,20 @@ export interface ResolvedPriceSource {
 export type ValidatorType = "honest" | "malicious" | "pushy" | "noop" | "delayed" | "drift";
 
 /** Type-specific behavior knobs. Required keys depend on `type`:
- *    delayed → delayBlocks
- *    pushy   → pushyQuoteBias
- *    drift   → driftQuoteStep
+ *    delayed   → delayBlocks
+ *    pushy     → pushyQuoteBias
+ *    malicious → maliciousQuoteBias  (quote-mode strength of the attack)
+ *    drift     → driftQuoteStep
  *  Other types ignore this object. Defaults applied in engine if omitted. */
 export interface ValidatorParams {
   /** delayed: how many 6s blocks behind the validator reads. */
   delayBlocks?: number;
   /** pushy: quote-mode outlier magnitude as a fraction of real price. */
   pushyQuoteBias?: number;
+  /** malicious: quote-mode outlier magnitude (fraction of lastPrice) pushed
+   *  in the OPPOSITE direction of real motion. Higher = stronger attack.
+   *  0 → "no-change" vote at lastPrice; 1 → would push by 100% of price. */
+  maliciousQuoteBias?: number;
   /** drift: quote-mode per-block multiplicative bias. */
   driftQuoteStep?: number;
 }

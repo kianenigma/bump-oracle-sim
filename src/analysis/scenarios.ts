@@ -34,12 +34,23 @@ import { buildValidators, formatValidators, type GroupSpec } from "../validators
 //   malicious Inverse strategy. Pushes price *away* from real.
 //             Nudge: bump direction flipped; as author activates
 //             same-direction bumps (away-from-real).
-//             Quote: mirrors honest across lastPrice (2·last − honest).
+//             Quote: own input is an outlier opposite real motion of size
+//             `params.maliciousQuoteBias × lastPrice`; as author SELECTIVELY
+//             includes only gossiped quotes whose value supports the wrong
+//             direction (i.e. on the opposite side of lastPrice from real).
+//             This is the spec's "select prices that support your value"
+//             attack — visible in the block-metric gap between totalBumps
+//             (gossiped) and activatedBumps (passed by author).
 //
 //   pushy     Nudge: honest direction; as author activates ALL in-direction
 //             bumps (over-shoot via maximal push).
-//             Quote: outlier real·(1 ± pushyQuoteBias). Trivially rejected
-//             by median; visible past mean(k) if k is small.
+//             Quote: own input is `real·(1 ± pushyQuoteBias)`, an outlier
+//             past real in the direction of motion. As author, SELECTIVELY
+//             keeps only quotes whose value is beyond `observed` (≈ real)
+//             in the direction of motion — the overshoot variant of
+//             malicious's selective-inclusion attack. Threshold is real
+//             (not lastPrice) because pushy's goal is "go past real",
+//             not "go in the right direction at all".
 //
 //   noop      Author-side censorship.
 //             Nudge: emits honest bumps, as author selects none → freeze.
@@ -69,7 +80,8 @@ import { buildValidators, formatValidators, type GroupSpec } from "../validators
 // the defaults so the cross-aggregator differences are visible.
 const COMPARISON_PARAMS: Required<ValidatorParams> = {
   delayBlocks: 100,
-  pushyQuoteBias: 0.1,
+  pushyQuoteBias: 0.5,
+  maliciousQuoteBias: 0.5,
   driftQuoteStep: 0.1,
 };
 
@@ -563,7 +575,7 @@ export const scenarios: Record<string, ScenarioFn> = {
     }
 
     console.log(`  Grid: ${aggregators.length} aggregators × (1 honest + ${adversaryTypes.length} types × ${fractions.length} fractions) = ${configs.length}`);
-    console.log(`  Comparison knobs: pushyQuoteBias=${(COMPARISON_PARAMS.pushyQuoteBias * 100).toFixed(1)}%, delayBlocks=${COMPARISON_PARAMS.delayBlocks}, driftQuoteStep=${(COMPARISON_PARAMS.driftQuoteStep * 100).toFixed(1)}%`);
+    console.log(`  Comparison knobs: maliciousQuoteBias=${(COMPARISON_PARAMS.maliciousQuoteBias * 100).toFixed(1)}%, pushyQuoteBias=${(COMPARISON_PARAMS.pushyQuoteBias * 100).toFixed(1)}%, delayBlocks=${COMPARISON_PARAMS.delayBlocks}, driftQuoteStep=${(COMPARISON_PARAMS.driftQuoteStep * 100).toFixed(1)}%`);
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 

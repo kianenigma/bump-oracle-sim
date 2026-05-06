@@ -408,7 +408,7 @@
       const validators = c.validators || [];
       let total = 0;
       const mixCounts = {};
-      const params = { delayBlocks: undefined, pushyQuoteBias: undefined, driftQuoteStep: undefined };
+      const params = { delayBlocks: undefined, pushyQuoteBias: undefined, maliciousQuoteBias: undefined, driftQuoteStep: undefined };
       let firstPS = null;
       for (const g of validators) {
         total += g.count;
@@ -419,6 +419,7 @@
         if (g.params) {
           if (g.type === 'delayed' && params.delayBlocks === undefined) params.delayBlocks = g.params.delayBlocks;
           if (g.type === 'pushy' && params.pushyQuoteBias === undefined) params.pushyQuoteBias = g.params.pushyQuoteBias;
+          if (g.type === 'malicious' && params.maliciousQuoteBias === undefined) params.maliciousQuoteBias = g.params.maliciousQuoteBias;
           if (g.type === 'drift' && params.driftQuoteStep === undefined) params.driftQuoteStep = g.params.driftQuoteStep;
         }
       }
@@ -426,10 +427,11 @@
       if (total > 0) for (const [k, n] of Object.entries(mixCounts)) mix[k] = n / total;
       const ps = firstPS || { kind: 'cross-venue', jitterStdDev: 0 };
       let mp = null;
-      if (params.delayBlocks !== undefined || params.pushyQuoteBias !== undefined || params.driftQuoteStep !== undefined) {
+      if (params.delayBlocks !== undefined || params.pushyQuoteBias !== undefined || params.maliciousQuoteBias !== undefined || params.driftQuoteStep !== undefined) {
         mp = {
           delayBlocks: params.delayBlocks ?? 0,
           pushyQuoteBias: params.pushyQuoteBias ?? 0,
+          maliciousQuoteBias: params.maliciousQuoteBias ?? 0,
           driftQuoteStep: params.driftQuoteStep ?? 0,
         };
       }
@@ -494,9 +496,10 @@
         const mp = v.maliciousParams; if (!mp) return '—';
         const present = new Set(Object.keys(v.validatorMix));
         const parts = [];
-        if (present.has('delayed')) parts.push(`delay=${mp.delayBlocks}b`);
-        if (present.has('pushy'))   parts.push(`pushyBias=${(mp.pushyQuoteBias*100).toFixed(2)}%`);
-        if (present.has('drift'))   parts.push(`driftStep=${(mp.driftQuoteStep*100).toFixed(3)}%`);
+        if (present.has('delayed'))   parts.push(`delay=${mp.delayBlocks}b`);
+        if (present.has('pushy'))     parts.push(`pushyBias=${(mp.pushyQuoteBias*100).toFixed(2)}%`);
+        if (present.has('malicious')) parts.push(`malBias=${(mp.maliciousQuoteBias*100).toFixed(2)}%`);
+        if (present.has('drift'))     parts.push(`driftStep=${(mp.driftQuoteStep*100).toFixed(3)}%`);
         return parts.length ? parts.join(', ') : '—';
       }},
       { key: 'totalBlocks', label: 'Total Blocks', type: 'number', getter: sc => sc.summary.totalBlocks },
@@ -1004,9 +1007,10 @@
       const malParts = [];
       if (mp) {
         const present = new Set(Object.keys(mix));
-        if (present.has('delayed')) malParts.push(`delayBlocks=${mp.delayBlocks}`);
-        if (present.has('pushy'))   malParts.push(`pushyQuoteBias=${(mp.pushyQuoteBias*100).toFixed(2)}%`);
-        if (present.has('drift'))   malParts.push(`driftQuoteStep=${(mp.driftQuoteStep*100).toFixed(3)}%`);
+        if (present.has('delayed'))   malParts.push(`delayBlocks=${mp.delayBlocks}`);
+        if (present.has('pushy'))     malParts.push(`pushyQuoteBias=${(mp.pushyQuoteBias*100).toFixed(2)}%`);
+        if (present.has('malicious')) malParts.push(`maliciousQuoteBias=${(mp.maliciousQuoteBias*100).toFixed(2)}%`);
+        if (present.has('drift'))     malParts.push(`driftQuoteStep=${(mp.driftQuoteStep*100).toFixed(3)}%`);
       }
       const ds = v.realPrice;
       const cvStr = ds && ds.kind === 'trades' ? ((ds.crossVenue && ds.crossVenue.kind) || 'mean') : null;
@@ -1037,10 +1041,19 @@
       }
     }
 
+    /** Map a series label to the sidebar-visibility key it should follow.
+     *  Deviation series share the visibility of their owning oracle row, so
+     *  `Dev: X` reads `seriesVisibility['Oracle: X']`. Everything else reads
+     *  its own label. Without this remap the sidebar checkbox would hide the
+     *  price line but leave the deviation line stuck visible. */
+    function visibilityKeyFor(label) {
+      return label.startsWith('Dev: ') ? 'Oracle: ' + label.slice(5) : label;
+    }
+
     /** Apply seriesVisibility[label] to a chart-series entry. */
     function applyVisibilityToSeries(s) {
       if (!s) return;
-      const vis = seriesVisibility[s.label] !== false;
+      const vis = seriesVisibility[visibilityKeyFor(s.label)] !== false;
       s.series.applyOptions({ visible: vis });
       if (!vis && s.priceLine) s.priceLine.applyOptions({ axisLabelVisible: false });
     }
@@ -1655,7 +1668,7 @@
       const hasData = param && param.time && param.seriesData;
       for (const entry of activeDevSeries) {
         if (!entry.priceLine) continue;
-        const isVisible = hasData && seriesVisibility[entry.label] !== false;
+        const isVisible = hasData && seriesVisibility[visibilityKeyFor(entry.label)] !== false;
         if (!isVisible) {
           entry.priceLine.applyOptions({ axisLabelVisible: false });
           continue;

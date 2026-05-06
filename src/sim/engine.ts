@@ -269,9 +269,10 @@ function printConfig(config: SimulationConfig, pricePoints?: PricePoint[]): void
   for (const g of config.validators) {
     if (g.count === 0) continue;
     const p = resolveParams(g.params);
-    if (g.type === "delayed") malParts.push(`delayBlocks=${p.delayBlocks}`);
-    if (g.type === "pushy")   malParts.push(`pushyQuoteBias=${(p.pushyQuoteBias * 100).toFixed(2)}%`);
-    if (g.type === "drift")   malParts.push(`driftQuoteStep=${(p.driftQuoteStep * 100).toFixed(3)}%`);
+    if (g.type === "delayed")   malParts.push(`delayBlocks=${p.delayBlocks}`);
+    if (g.type === "pushy")     malParts.push(`pushyQuoteBias=${(p.pushyQuoteBias * 100).toFixed(2)}%`);
+    if (g.type === "malicious") malParts.push(`maliciousQuoteBias=${(p.maliciousQuoteBias * 100).toFixed(2)}%`);
+    if (g.type === "drift")     malParts.push(`driftQuoteStep=${(p.driftQuoteStep * 100).toFixed(3)}%`);
   }
 
   const rp: RealPriceSpec = config.realPrice ?? { kind: "candles" };

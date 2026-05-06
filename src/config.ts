@@ -20,9 +20,10 @@ export const DEFAULT_PRICE_SOURCE: ValidatorPriceSource = {
 // Defaults for the type-specific param keys. Engine fills these in when a
 // group's `params` is missing or partial.
 export const DEFAULT_VALIDATOR_PARAMS: Required<ValidatorParams> = {
-  delayBlocks: 10,         // 60s at 6s blocks
-  pushyQuoteBias: 0.05,    // 5% outlier in motion direction (quote mode)
-  driftQuoteStep: 0.001,   // 0.1% upward bias per block (quote mode)
+  delayBlocks: 10,             // 60s at 6s blocks
+  pushyQuoteBias: 0.05,        // 5% outlier in motion direction (quote mode)
+  maliciousQuoteBias: 0.05,    // 5% outlier OPPOSITE motion (quote mode)
+  driftQuoteStep: 0.001,       // 0.1% upward bias per block (quote mode)
 };
 
 export const DEFAULT_VALIDATOR_COUNT = 300;

@@ -72,6 +72,11 @@ function sortAndTrim(quotes: number[], k: number): { sorted: number[]; trim: num
 // ── MedianAggregator ────────────────────────────────────────────────────────
 // Optionally trims top/bottom k% of the inherent quotes by value, then takes
 // the median of what remains. Empty inherent → hold price.
+//
+// Metric semantics (matches the nudge aggregator):
+//   totalBumps     = quotes gossiped (count in `inputs`)        — pre-author
+//   activatedBumps = quotes that contributed to the median      — post-trim
+// The gap surfaces author-side censorship in the block metrics.
 export class MedianAggregator implements Aggregator {
   readonly mode = "median" as const;
   readonly inputKind = "quote" as const;
@@ -81,15 +86,16 @@ export class MedianAggregator implements Aggregator {
   }
 
   apply(ctx: AggregatorContext): AggregateOutcome {
+    const totalQuotes = countQuotes(ctx.inputs);
     const quotes = collectQuotes(ctx.inherent);
     if (quotes.length === 0) {
-      return { newPrice: ctx.lastPrice, totalBumps: 0, activatedBumps: 0, netDirection: 0 };
+      return { newPrice: ctx.lastPrice, totalBumps: totalQuotes, activatedBumps: 0, netDirection: 0 };
     }
     const { sorted, trim } = sortAndTrim(quotes, this.k);
     const newPrice = medianOfRange(sorted, trim, sorted.length - trim);
     return {
       newPrice,
-      totalBumps: quotes.length,
+      totalBumps: totalQuotes,
       activatedBumps: quotes.length - 2 * trim,
       netDirection: Math.sign(newPrice - ctx.lastPrice),
     };
@@ -100,6 +106,9 @@ export class MedianAggregator implements Aggregator {
 // Optionally trims top/bottom k% by value, then arithmetic mean of survivors.
 // k=0 is a plain mean across all quotes. If trimming would empty the set,
 // falls back to median(all) so the price still updates.
+//
+// Metric semantics: same as median — totalBumps is pre-author gossip,
+// activatedBumps is the post-trim contributing count.
 export class MeanAggregator implements Aggregator {
   readonly mode = "mean" as const;
   readonly inputKind = "quote" as const;
@@ -109,9 +118,10 @@ export class MeanAggregator implements Aggregator {
   }
 
   apply(ctx: AggregatorContext): AggregateOutcome {
+    const totalQuotes = countQuotes(ctx.inputs);
     const quotes = collectQuotes(ctx.inherent);
     if (quotes.length === 0) {
-      return { newPrice: ctx.lastPrice, totalBumps: 0, activatedBumps: 0, netDirection: 0 };
+      return { newPrice: ctx.lastPrice, totalBumps: totalQuotes, activatedBumps: 0, netDirection: 0 };
     }
     const { sorted, trim } = sortAndTrim(quotes, this.k);
     const lo = trim;
@@ -121,7 +131,7 @@ export class MeanAggregator implements Aggregator {
     const newPrice = sum / (hi - lo);
     return {
       newPrice,
-      totalBumps: quotes.length,
+      totalBumps: totalQuotes,
       activatedBumps: hi - lo,
       netDirection: Math.sign(newPrice - ctx.lastPrice),
     };
@@ -144,6 +154,12 @@ function collectQuotes(submissions: Submission[]): number[] {
   const out: number[] = [];
   for (const s of submissions) if (s.kind === "quote") out.push(s.price);
   return out;
+}
+
+function countQuotes(submissions: Submission[]): number {
+  let n = 0;
+  for (const s of submissions) if (s.kind === "quote") n++;
+  return n;
 }
 
 /** Median of `sorted[lo, hi)`. Caller guarantees lo < hi. */
