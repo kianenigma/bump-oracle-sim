@@ -305,9 +305,11 @@
     }
     let COLORS = generateColors(32);
     const REAL_COLOR = '#888888';
-    // Distinct, accessible colors for the four venues. Index aligns with
+    // Distinct, accessible colors for the venues. Index aligns with
     // venueIds[] (which mirrors the loaded venue order from the .simdata).
-    const VENUE_COLORS = ['#f0b90b', '#7d3fbe', '#f7931a', '#ce4257'];
+    // Order matches ALL_VENUES: binance(yellow), kraken(purple),
+    // bybit(orange), gate(red), okx(blue), coinbase(coinbase-blue).
+    const VENUE_COLORS = ['#f0b90b', '#7d3fbe', '#f7931a', '#ce4257', '#3b82f6', '#0052ff'];
 
     // ── State ──
     let currentTF = 900;
@@ -396,6 +398,62 @@
 
 
     // ══════════════════════════════════════════════
+    // ── Config adapter ──
+    // ══════════════════════════════════════════════
+    // Reshape the new SimulationConfig (validators[] groups, aggregator-owned ε,
+    // realPrice) into the legacy fields the UI was originally written against.
+    // Nothing visual changes — this is purely a read-side adapter.
+    function configView(c) {
+      if (!c) return null;
+      const validators = c.validators || [];
+      let total = 0;
+      const mixCounts = {};
+      const params = { delayBlocks: undefined, pushyQuoteBias: undefined, driftQuoteStep: undefined };
+      let firstPS = null;
+      for (const g of validators) {
+        total += g.count;
+        if (g.type !== 'honest' && g.count > 0) {
+          mixCounts[g.type] = (mixCounts[g.type] || 0) + g.count;
+        }
+        if (!firstPS) firstPS = g.priceSource;
+        if (g.params) {
+          if (g.type === 'delayed' && params.delayBlocks === undefined) params.delayBlocks = g.params.delayBlocks;
+          if (g.type === 'pushy' && params.pushyQuoteBias === undefined) params.pushyQuoteBias = g.params.pushyQuoteBias;
+          if (g.type === 'drift' && params.driftQuoteStep === undefined) params.driftQuoteStep = g.params.driftQuoteStep;
+        }
+      }
+      const mix = {};
+      if (total > 0) for (const [k, n] of Object.entries(mixCounts)) mix[k] = n / total;
+      const ps = firstPS || { kind: 'cross-venue', jitterStdDev: 0 };
+      let mp = null;
+      if (params.delayBlocks !== undefined || params.pushyQuoteBias !== undefined || params.driftQuoteStep !== undefined) {
+        mp = {
+          delayBlocks: params.delayBlocks ?? 0,
+          pushyQuoteBias: params.pushyQuoteBias ?? 0,
+          driftQuoteStep: params.driftQuoteStep ?? 0,
+        };
+      }
+      const agg = c.aggregator;
+      const epsilon = (agg && agg.kind === 'nudge') ? agg.epsilon : null;
+      return {
+        raw: c,
+        realPrice: c.realPrice,
+        aggregator: agg,
+        label: c.label,
+        seed: c.seed,
+        startDate: c.startDate,
+        endDate: c.endDate,
+        convergenceThreshold: c.convergenceThreshold,
+        validatorCount: total,
+        validatorMix: mix,
+        validatorPriceSource: { kind: ps.kind },
+        jitterStdDev: ps.jitterStdDev,
+        maliciousParams: mp,
+        epsilon,
+      };
+    }
+
+    // ══════════════════════════════════════════════
     // ── STATS TABLE ──
     // ══════════════════════════════════════════════
 
@@ -403,34 +461,38 @@
     const STATS_COLUMNS = [
       { key: 'label', label: 'Label', type: 'string', getter: sc => sc.config.label || 'default' },
       { key: 'dataSource', label: 'Data Source', type: 'string', getter: sc => {
-        const d = sc.config.dataSource;
+        const d = configView(sc.config).realPrice;
         if (!d || d.kind === 'candles') return 'candles';
-        const cv = (d.crossVenue && d.crossVenue.kind) || 'median';
+        const cv = (d.crossVenue && d.crossVenue.kind) || 'mean';
         return `trades(${(d.venues || []).join(',')}; ${cv})`;
       }},
       { key: 'validatorPriceSource', label: 'Validator Obs', type: 'string', getter: sc => {
-        const v = sc.config.validatorPriceSource;
-        return !v ? 'median' : v.kind;
+        return configView(sc.config).validatorPriceSource.kind;
       }},
       { key: 'aggregator', label: 'Aggregator', type: 'string', getter: sc => {
         const a = sc.config.aggregator;
-        if (!a) return 'nudge';
-        return a.kind === 'trimmed-mean' ? `trimmed-mean(k=${a.k})` : a.kind;
+        if (!a) return 'median';
+        return ((a.kind === 'median' || a.kind === 'mean') && a.k > 0)
+          ? `${a.kind}(k=${a.k})`
+          : a.kind;
       }},
-      { key: 'validators', label: 'Validators', type: 'number', getter: sc => sc.config.validatorCount },
+      { key: 'validators', label: 'Validators', type: 'number', getter: sc => configView(sc.config).validatorCount },
       { key: 'validatorMix', label: 'Validator Mix', type: 'string', getter: sc => {
-        const mix = sc.config.validatorMix || {};
-        const fracOf = v => typeof v === 'number' ? v : (v && v.fraction) || 0;
-        const parts = Object.entries(mix).map(([k, v]) => `${(fracOf(v)*100).toFixed(0)}% ${k}`);
-        const honestPct = 100 - Object.values(mix).reduce((a, v) => a + fracOf(v), 0) * 100;
+        const mix = configView(sc.config).validatorMix;
+        const parts = Object.entries(mix).map(([k, frac]) => `${(frac*100).toFixed(0)}% ${k}`);
+        const honestPct = 100 - Object.values(mix).reduce((a, v) => a + v, 0) * 100;
         return `${honestPct.toFixed(0)}% honest` + (parts.length ? ', ' + parts.join(', ') : '');
       }},
-      { key: 'epsilon', label: 'Epsilon', type: 'number', getter: sc => typeof sc.config.epsilon === 'number' ? sc.config.epsilon : 0 },
+      { key: 'epsilon', label: 'Epsilon', type: 'number', getter: sc => {
+        const e = configView(sc.config).epsilon;
+        return typeof e === 'number' ? e : 0;
+      }},
       { key: 'seed', label: 'Seed', type: 'number', getter: sc => sc.config.seed },
-      { key: 'jitter', label: 'Jitter', type: 'number', getter: sc => sc.config.jitterStdDev },
+      { key: 'jitter', label: 'Jitter', type: 'number', getter: sc => configView(sc.config).jitterStdDev },
       { key: 'maliciousParams', label: 'Malicious Params', type: 'string', getter: sc => {
-        const mp = sc.config.maliciousParams; if (!mp) return '—';
-        const present = new Set(Object.keys(sc.config.validatorMix || {}));
+        const v = configView(sc.config);
+        const mp = v.maliciousParams; if (!mp) return '—';
+        const present = new Set(Object.keys(v.validatorMix));
         const parts = [];
         if (present.has('delayed')) parts.push(`delay=${mp.delayBlocks}b`);
         if (present.has('pushy'))   parts.push(`pushyBias=${(mp.pushyQuoteBias*100).toFixed(2)}%`);
@@ -815,13 +877,15 @@
     let panelBuilt = false;
 
     function dataSourceVenues(meta) {
-      const ds = meta.scenarios[0]?.config?.dataSource;
-      return ds && ds.kind === 'trades' ? (ds.venues || []) : [];
+      const rp = meta.scenarios[0]?.config?.realPrice;
+      return rp && rp.kind === 'trades' ? (rp.venues || []) : [];
     }
 
     function defaultPriceSourceMode(meta) {
-      const v = meta.scenarios[0]?.config?.validatorPriceSource;
-      return v && v.kind === 'random-venue' ? 'random-venue' : 'median';
+      const c = meta.scenarios[0]?.config;
+      if (!c) return 'cross-venue';
+      const v = configView(c).validatorPriceSource;
+      return v.kind === 'random-venue' ? 'random-venue' : 'cross-venue';
     }
 
     /** Build the entire sidebar from /api/meta. Called once at startup. */
@@ -870,15 +934,15 @@
         allSeriesEntries.push({ el: lbl, cb, ...entry });
       };
 
-      // 1. Real Price (always present). Default visible only in median mode.
+      // 1. Real Price (always present). Default visible only in cross-venue mode.
       addGroup('Source');
       addRow({
         label: 'Real Price',
-        displayName: 'Real Price (median ground truth)',
+        displayName: 'Real Price (cross-venue ground truth)',
         color: REAL_COLOR,
         kind: 'realPrice',
-        defaultVisible: mode === 'median',
-        tooltip: 'Cross-venue median (in trades mode) or candle-interpolated price (in candles mode).\nUsed as the deviation reference for every oracle.',
+        defaultVisible: mode === 'cross-venue',
+        tooltip: 'Cross-venue real price (mean by default; configurable via --cross-venue) in trades mode,\nor candle-interpolated price in candles mode.\nUsed as the deviation reference for every oracle.',
       });
 
       // 2. Per-venue lines (default visible in random-venue mode).
@@ -925,17 +989,18 @@
 
     /** Returns the rich tooltip string for a scenario config (matches engine.ts:printConfig). */
     function scenarioTooltip(c) {
-      const aggCfg = c.aggregator;
-      const aggStr = !aggCfg ? 'nudge'
-        : aggCfg.kind === 'trimmed-mean' ? `trimmed-mean(k=${aggCfg.k})`
-        : aggCfg.kind;
-      const fracOf = v => typeof v === 'number' ? v : (v && v.fraction) || 0;
-      const mix = c.validatorMix || {};
-      const mixParts = Object.entries(mix).map(([k, v]) => `${(fracOf(v)*100).toFixed(1)}% ${k}`);
-      const honestPct = 100 - Object.values(mix).reduce((a, v) => a + fracOf(v), 0) * 100;
+      const v = configView(c);
+      const aggCfg = v.aggregator;
+      const aggStr = !aggCfg ? 'median'
+        : ((aggCfg.kind === 'median' || aggCfg.kind === 'mean') && aggCfg.k > 0)
+          ? `${aggCfg.kind}(k=${aggCfg.k})`
+          : aggCfg.kind;
+      const mix = v.validatorMix;
+      const mixParts = Object.entries(mix).map(([k, frac]) => `${(frac*100).toFixed(1)}% ${k}`);
+      const honestPct = 100 - Object.values(mix).reduce((a, frac) => a + frac, 0) * 100;
       const mixStr = `${honestPct.toFixed(1)}% honest` + (mixParts.length ? ', ' + mixParts.join(', ') : '');
-      const epsStr = typeof c.epsilon === 'number' ? c.epsilon.toFixed(6) : JSON.stringify(c.epsilon);
-      const mp = c.maliciousParams;
+      const epsStr = typeof v.epsilon === 'number' ? v.epsilon.toFixed(6) : (v.epsilon == null ? '\u2014' : JSON.stringify(v.epsilon));
+      const mp = v.maliciousParams;
       const malParts = [];
       if (mp) {
         const present = new Set(Object.keys(mix));
@@ -943,25 +1008,24 @@
         if (present.has('pushy'))   malParts.push(`pushyQuoteBias=${(mp.pushyQuoteBias*100).toFixed(2)}%`);
         if (present.has('drift'))   malParts.push(`driftQuoteStep=${(mp.driftQuoteStep*100).toFixed(3)}%`);
       }
-      const ds = c.dataSource;
-      const cvStr = ds && ds.kind === 'trades' ? ((ds.crossVenue && ds.crossVenue.kind) || 'median') : null;
+      const ds = v.realPrice;
+      const cvStr = ds && ds.kind === 'trades' ? ((ds.crossVenue && ds.crossVenue.kind) || 'mean') : null;
       const dsStr = !ds || ds.kind === 'candles'
         ? 'candles (Binance US 1m \u2192 6s interp)'
         : `trades (${(ds.venues || []).join(', ')}; cross-venue=${cvStr})`;
-      const vps = c.validatorPriceSource;
-      const vpsStr = !vps ? 'median' : vps.kind;
+      const vpsStr = v.validatorPriceSource.kind;
       const lines = [
-        c.label,
-        `data source  : ${dsStr}`,
+        v.label,
+        `real price   : ${dsStr}`,
         `validator obs: ${vpsStr}`,
         `aggregator   : ${aggStr}`,
-        `range        : ${c.startDate} \u2192 ${c.endDate}`,
-        `validators   : ${c.validatorCount} (${mixStr})`,
-        `epsilon      : ${epsStr}${aggCfg && aggCfg.kind !== 'nudge' ? ' (ignored)' : ''}`,
-        `jitter stddev: ${(c.jitterStdDev*100).toFixed(3)}%`,
+        `range        : ${v.startDate} \u2192 ${v.endDate}`,
+        `validators   : ${v.validatorCount} (${mixStr})`,
+        `epsilon      : ${epsStr}${aggCfg && aggCfg.kind !== 'nudge' ? ' (n/a)' : ''}`,
+        `jitter stddev: ${(v.jitterStdDev*100).toFixed(3)}%`,
       ];
       if (malParts.length) lines.push(`malicious    : ${malParts.join(', ')}`);
-      lines.push(`seed         : ${c.seed}`);
+      lines.push(`seed         : ${v.seed}`);
       return lines.join('\n');
     }
 
@@ -1369,20 +1433,28 @@
         serverMeta = await res.json();
 
         const configEl = document.getElementById('config-info');
-        const fmtAgg = (a) => !a ? 'nudge' : (a.kind === 'trimmed-mean' ? `trimmed-mean(k=${a.k})` : a.kind);
+        const fmtAgg = (a) => {
+          if (!a) return 'median';
+          if ((a.kind === 'median' || a.kind === 'mean') && a.k > 0) return `${a.kind}(k=${a.k})`;
+          return a.kind;
+        };
         const fmtDs = (d) => !d || d.kind === 'candles' ? 'candles' : `trades(${(d.venues || []).join(',')})`;
-        const fmtFrac = (v) => typeof v === 'number' ? v : (v && v.fraction) || 0;
         if (serverMeta.scenarios.length === 1) {
-          const c = serverMeta.scenarios[0].config;
+          const v = configView(serverMeta.scenarios[0].config);
+          const mix = v.validatorMix;
+          const mixParts = Object.entries(mix).map(([k, frac]) => `${(frac*100).toFixed(0)}% ${k}`);
+          const honestPct = 100 - Object.values(mix).reduce((a, frac) => a + frac, 0) * 100;
+          const mixStr = `${honestPct.toFixed(0)}% honest` + (mixParts.length ? ', ' + mixParts.join(', ') : '');
+          const epsStr = typeof v.epsilon === 'number' ? v.epsilon.toFixed(6) : (v.epsilon == null ? '—' : JSON.stringify(v.epsilon));
           configEl.innerHTML = [
-            `<span>Source: ${fmtDs(c.dataSource)}</span>`,
-            `<span>Aggregator: ${fmtAgg(c.aggregator)}</span>`,
-            `<span>Validators: ${c.validatorCount}</span>`,
-            `<span>Mix: ${(() => { const m = c.validatorMix||{}; const parts = Object.entries(m).map(([k,v])=>(fmtFrac(v)*100).toFixed(0)+'% '+k); const h = 100-Object.values(m).reduce((a,v)=>a+fmtFrac(v),0)*100; return h.toFixed(0)+'% honest'+(parts.length?', '+parts.join(', '):''); })()}</span>`,
-            `<span>Epsilon: ${typeof c.epsilon==='number'?c.epsilon.toFixed(6):JSON.stringify(c.epsilon)}</span>`,
-            `<span>Jitter: ${(c.jitterStdDev*100).toFixed(3)}%</span>`,
-            `<span>Seed: ${c.seed}</span>`,
-            `<span>${c.startDate} to ${c.endDate}</span>`,
+            `<span>Source: ${fmtDs(v.realPrice)}</span>`,
+            `<span>Aggregator: ${fmtAgg(v.aggregator)}</span>`,
+            `<span>Validators: ${v.validatorCount}</span>`,
+            `<span>Mix: ${mixStr}</span>`,
+            `<span>Epsilon: ${epsStr}</span>`,
+            `<span>Jitter: ${(v.jitterStdDev*100).toFixed(3)}%</span>`,
+            `<span>Seed: ${v.seed}</span>`,
+            `<span>${v.startDate} to ${v.endDate}</span>`,
           ].join('');
         } else {
           // Show aggregator breakdown if scenarios use different aggregators

@@ -1,105 +1,159 @@
 import { join } from "path";
 import { mkdirSync } from "fs";
 import { epsilonValue } from "../types.js";
-import type { SimulationConfig, SimulationResult, PricePoint, ScenarioMeta, ValidatorMix, EpsilonSpec, AggregatorConfig, MaliciousParams, ResolvedPriceSource, ValidatorPriceSource } from "../types.js";
-import { DEFAULT_CONFIG, DEFAULT_MALICIOUS_PARAMS } from "../config.js";
+import type {
+  AggregatorConfig,
+  RealPriceSpec,
+  EpsilonSpec,
+  ResolvedPriceSource,
+  ScenarioMeta,
+  SimulationConfig,
+  SimulationResult,
+  ValidatorParams,
+  ValidatorPriceSource,
+  ValidatorType,
+} from "../types.js";
+import { DEFAULT_CONFIG, DEFAULT_PRICE_SOURCE, DEFAULT_VALIDATOR_COUNT } from "../config.js";
 import { runSimulation, type BlockSink } from "../sim/engine.js";
 import { maxBlockDelta } from "../data/interpolator.js";
 import { ChunkWriter, writeIndex, scenarioDirName } from "../viz/writer.js";
 import { loadCriteria } from "./research-criteria.js";
 import { generateReport } from "./research-report.js";
-import { formatMix } from "../mix.js";
+import { buildValidators, formatValidators, type GroupSpec } from "../validators.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Glossary — what each agent does at a glance.
-// Full implementations: src/sim/validator.ts, src/sim/malicious.ts.
+// Glossary — what each agent does. Full implementations: src/sim/validator.ts,
+// src/sim/malicious.ts.
 //
-// Agents (validator types you can mix):
+// Agents (validator types in any group):
 //   honest    Submits an honestly-jittered observation of the real price.
-//             Nudge mode: bump = sign(jitteredPrice − lastPrice), as author
-//             selects the optimal number of in-direction bumps.
-//             Quote mode: submits the jittered price directly.
+//             Nudge: bump = sign(observed − lastPrice); as author, picks the
+//             optimal number of in-direction bumps.
+//             Quote: submits the jittered observation directly.
 //
 //   malicious Inverse strategy. Pushes price *away* from real.
-//             Nudge mode: bump direction flipped; as author activates
+//             Nudge: bump direction flipped; as author activates
 //             same-direction bumps (away-from-real).
-//             Quote mode: mirrors the honest quote across lastPrice
-//             (price = 2·lastPrice − honestQuote). Same magnitude, wrong sign.
+//             Quote: mirrors honest across lastPrice (2·last − honest).
 //
-//   pushy     Nudge mode: honest bump direction; as author activates ALL
-//             in-direction bumps (over-shoot via maximal push).
-//             Quote mode: submits real-price-plus-PUSHY_QUOTE_BIAS (5%) in
-//             the direction of motion. NOTE: this is an extreme outlier,
-//             which median trivially rejects below 50% — i.e. pushy was
-//             primarily an author-side attack and translates lossily.
+//   pushy     Nudge: honest direction; as author activates ALL in-direction
+//             bumps (over-shoot via maximal push).
+//             Quote: outlier real·(1 ± pushyQuoteBias). Trivially rejected
+//             by median; visible past mean(k) if k is small.
 //
 //   noop      Author-side censorship.
-//             Nudge mode: emits honest bumps but as author selects none
-//             (price freezes for that block).
-//             Quote mode: abstains from quoting; when authoring, the chain
-//             skips aggregation entirely (modeled in chain.ts) — same
-//             behavior as nudge mode at the author-block level.
+//             Nudge: emits honest bumps, as author selects none → freeze.
+//             Quote: abstains; as author drops the inherent → freeze.
 //
-//   delayed  Honest intent, but reads jittered price from DELAY_BLOCKS=10
-//            (60s) ago in both modes. Lags sharp moves.
+//   delayed  Honest intent, but reads its observation from `delayBlocks` ago.
 //
-//   drift    Persistent upward bias, regardless of real price.
-//            Nudge mode: always Bump.Up; as author activates all Up bumps.
-//            Quote mode: submits lastPrice·(1 + DRIFT_QUOTE_STEP) every block.
+//   drift    Persistent upward bias.
+//            Nudge: always Up; as author activates all Up bumps.
+//            Quote: lastPrice·(1 + driftQuoteStep) every block.
 //
 // Aggregators:
-//   nudge        Validators submit Up/Down. Block author picks subset.
+//   nudge        Validators submit Up/Down. Author picks subset.
 //                price' = lastPrice + (net activated bumps) × ε.
 //   median       Validators submit absolute prices. price' = median(quotes).
-//                Robust to outliers up to 50% adversarial (by count).
-//   trimmed-mean Validators submit absolute prices. Drop top k% and bottom
-//                k% by value, then average. Smoother than median; weaker
-//                outlier rejection if k is too small.
+//   median(k)    Sort, drop top k% and bottom k% by value, then median.
+//                k=0 (default) is the plain median.
+//   mean(k)      Sort, drop top k% and bottom k% by value, then arithmetic
+//                mean. k=0 is a plain mean.
 //
-// Adversarial knobs (MaliciousParams, defaults in src/config.ts):
-//   delayBlocks      How far behind `delayed` reads its price.
-//                    Default: 10 blocks (60s at 6s blocks).
-//   pushyQuoteBias   Quote-mode outlier magnitude for `pushy`, as a fraction
-//                    of real price. Default: 0.05 = 5%.
-//   driftQuoteStep   Quote-mode per-block multiplicative bias for `drift`.
-//                    Default: 0.001 = 0.1% per block.
-//
-// Each scenario can override these via mergeConfig({ maliciousParams: {...} }).
-// See `aggregator-comparison` below for a usage example.
+// Per-group ValidatorParams (delayBlocks / pushyQuoteBias / driftQuoteStep)
+// fall back to DEFAULT_VALIDATOR_PARAMS in src/config.ts. Each scenario can
+// override per-group via the `params` field of GroupSpec.
 // ─────────────────────────────────────────────────────────────────────────────
 
-// Adversarial parameter set used by the aggregator-comparison scenario.
-// Listed here so scanning scenarios.ts reveals exactly what each adversary
-// is doing. Override per-scenario by passing a different object via
-// mergeConfig({ maliciousParams: ... }).
-const COMPARISON_MALICIOUS_PARAMS: MaliciousParams = {
-  driftQuoteStep: 0.1,
-  pushyQuoteBias: 0.1,
+// Comparison adversary params used by `aggregator-comparison`. Stronger than
+// the defaults so the cross-aggregator differences are visible.
+const COMPARISON_PARAMS: Required<ValidatorParams> = {
   delayBlocks: 100,
+  pushyQuoteBias: 0.1,
+  driftQuoteStep: 0.1,
 };
 
+// ── Scenario context ────────────────────────────────────────────────────────
+//
+// Replaces the old `Partial<SimulationConfig>` overrides bag. The CLI builds
+// one of these from --start-date / --validators / --jitter / --aggregator /
+// etc., then hands it to a ScenarioFn.
+//
+// The ctx owns the *defaults* a scenario applies when it doesn't have a
+// stronger opinion: validatorCount, the price-source kind/jitter, the
+// aggregator (when the scenario doesn't sweep aggregators), and a default
+// epsilon (when the aggregator is nudge and the scenario doesn't sweep ε).
+export interface ScenarioCtx {
+  startDate: string;
+  endDate: string;
+  seed: number;
+  convergenceThreshold: number;
+  realPrice: RealPriceSpec;
+  /** Default aggregator (the scenario may override per-config). */
+  aggregator: AggregatorConfig;
+  /** Default per-group price source (the scenario may override per-group). */
+  priceSource: ValidatorPriceSource;
+  /** Total number of validators in each scenario sim. */
+  validatorCount: number;
+  /** Default epsilon to use when a scenario doesn't sweep ε itself. */
+  defaultEpsilon: EpsilonSpec;
+}
+
 export type ScenarioFn = (
-  baseConfig: Partial<SimulationConfig>,
+  ctx: ScenarioCtx,
   priceSource: ResolvedPriceSource,
   outputDir?: string,
   threadCount?: number,
 ) => Promise<SimulationResult[]>;
 
-function mergeConfig(overrides: Partial<SimulationConfig>): SimulationConfig {
-  return { ...DEFAULT_CONFIG, ...overrides };
+// ── Helpers used by every scenario ──────────────────────────────────────────
+
+/** Build a SimulationConfig from a context + group specs + label + optional aggregator override. */
+function makeConfig(
+  ctx: ScenarioCtx,
+  specs: GroupSpec[],
+  label: string,
+  aggregatorOverride?: AggregatorConfig,
+): SimulationConfig {
+  const validators = buildValidators(ctx.validatorCount, specs, ctx.priceSource);
+  return {
+    startDate: ctx.startDate,
+    endDate: ctx.endDate,
+    seed: ctx.seed,
+    convergenceThreshold: ctx.convergenceThreshold,
+    realPrice: ctx.realPrice,
+    aggregator: aggregatorOverride ?? ctx.aggregator,
+    label,
+    validators,
+  };
+}
+
+/** Convenience: nudge aggregator with the given epsilon (or ctx.defaultEpsilon). */
+function nudgeAgg(ctx: ScenarioCtx, epsilon?: EpsilonSpec): AggregatorConfig {
+  return { kind: "nudge", epsilon: epsilon ?? ctx.defaultEpsilon };
 }
 
 function aggregatorLabel(cfg: AggregatorConfig): string {
   switch (cfg.kind) {
-    case "nudge":        return "nudge";
-    case "median":       return "median";
-    case "trimmed-mean": return `trimmed-mean(k=${cfg.k})`;
+    case "nudge":  return "nudge";
+    case "median": return cfg.k && cfg.k > 0 ? `median(k=${cfg.k})` : "median";
+    case "mean":   return cfg.k && cfg.k > 0 ? `mean(k=${cfg.k})`   : "mean";
   }
+}
+
+/** Convert the legacy "ValidatorMix"-style record into GroupSpec[]. */
+function specsFromMix(mix: Record<string, number>): GroupSpec[] {
+  const out: GroupSpec[] = [];
+  for (const [name, frac] of Object.entries(mix)) {
+    if (name === "honest") continue;
+    if (frac <= 0) continue;
+    out.push({ type: name as Exclude<ValidatorType, "honest">, fraction: frac });
+  }
+  return out;
 }
 
 /**
  * Run a single simulation, optionally writing block data to a scenario subdirectory.
- * Returns the SimulationResult (config + summary, no metrics in memory).
  */
 function runOne(
   config: SimulationConfig,
@@ -136,8 +190,8 @@ function runOne(
 }
 
 /**
- * Run multiple configs as a scenario batch.
- * Uses a Bun Worker pool when threadCount > 1 and there are multiple configs.
+ * Run multiple configs as a scenario batch. Uses a Bun Worker pool when
+ * threadCount > 1 and there are multiple configs.
  */
 async function runBatch(
   configs: SimulationConfig[],
@@ -172,9 +226,6 @@ async function runBatch(
 
 /**
  * Distribute simulations across Bun Workers using a work-stealing pool.
- * Each worker gets its own copy of pricePoints on init, then runs simulations
- * sequentially. Workers write chunk files directly to their scenario directories.
- * Renders a live multi-line ANSI progress display.
  */
 async function runBatchParallel(
   configs: SimulationConfig[],
@@ -188,7 +239,6 @@ async function runBatchParallel(
   const workerURL = new URL("../sim/worker.ts", import.meta.url);
   const workers: Worker[] = [];
 
-  // Initialize workers: each receives a copy of pricePoints
   await Promise.all(
     Array.from({ length: workerCount }, () =>
       new Promise<void>((resolve, reject) => {
@@ -201,7 +251,6 @@ async function runBatchParallel(
     )
   );
 
-  // Per-worker display state
   const workerState: { label: string; pct: number }[] = Array.from(
     { length: workerCount },
     () => ({ label: "idle", pct: 0 }),
@@ -209,7 +258,6 @@ async function runBatchParallel(
   const workerIndexMap = new Map<Worker, number>();
   workers.forEach((w, i) => workerIndexMap.set(w, i));
 
-  // ANSI multi-line progress renderer
   let linesPrinted = 0;
   let lastRedraw = 0;
   const REDRAW_MS = 150;
@@ -219,7 +267,6 @@ async function runBatchParallel(
     if (!force && now - lastRedraw < REDRAW_MS) return;
     lastRedraw = now;
 
-    // Move cursor up to overwrite previous output
     if (linesPrinted > 0) process.stdout.write(`\x1B[${linesPrinted}A`);
 
     let lines = 0;
@@ -229,14 +276,12 @@ async function runBatchParallel(
       process.stdout.write(`\x1B[2K  Worker ${String(i + 1).padStart(2)}: ${bar} ${ws.label}\n`);
       lines++;
     }
-    const overallPct = ((completed / configs.length) * 100).toFixed(0);
     const overallBar = progressBar((completed / configs.length) * 100, 20);
     process.stdout.write(`\x1B[2K  Overall: ${overallBar} ${completed}/${configs.length} simulations\n`);
     lines++;
     linesPrinted = lines;
   }
 
-  // Work-stealing: assign tasks as workers become free
   const results: SimulationResult[] = new Array(configs.length);
   const metas: (ScenarioMeta | undefined)[] = new Array(configs.length);
   let nextTask = 0;
@@ -287,7 +332,6 @@ async function runBatchParallel(
     }
   });
 
-  // Final newline after progress display
   console.log();
 
   for (const w of workers) w.terminate();
@@ -300,12 +344,14 @@ function progressBar(pct: number, width: number): string {
 }
 
 function truncate(s: string, max: number): string {
-  return s.length <= max ? s : s.slice(0, max - 1) + "\u2026";
+  return s.length <= max ? s : s.slice(0, max - 1) + "…";
 }
 
 const RESEARCH_MULTIPLIERS = [0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
 
-const RESEARCH_MIXES: ValidatorMix[] = [
+/** Mixes used by the research scenarios — kept as a record-of-fractions for
+ *  readability (same shape as the old ValidatorMix). */
+const RESEARCH_MIXES: Record<string, number>[] = [
   {},
   { malicious: 0.1 },
   { malicious: 0.2 },
@@ -324,266 +370,211 @@ const RESEARCH_MIXES: ValidatorMix[] = [
   { drift: 0.33 },
 ];
 
+// ── Scenarios ───────────────────────────────────────────────────────────────
+
 export const scenarios: Record<string, ScenarioFn> = {
-  /** Baseline: 100% honest */
-  async honest(overrides, priceSource, outputDir, threadCount) {
+  /** Baseline: 100% honest. */
+  async honest(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: honest]`);
-    const config = mergeConfig({ ...overrides, validatorMix: {}, label: "honest (100%)" });
+    const config = makeConfig(ctx, [], "honest (100%)");
     return runBatch([config], priceSource, outputDir, threadCount);
   },
 
-  /** Sweep malicious fraction from 0% to 50% */
-  async "sweep-malicious"(overrides, priceSource, outputDir, threadCount) {
+  /** Sweep malicious fraction from 0% to 50%. */
+  async "sweep-malicious"(ctx, priceSource, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3, 0.4, 0.49, 0.5];
     const configs = fractions.map((frac) => {
       const label = `${(frac * 100).toFixed(0)}% malicious`;
-      return mergeConfig({ ...overrides, validatorMix: { malicious: frac }, label });
+      const specs = frac > 0 ? [{ type: "malicious" as const, fraction: frac }] : [];
+      return makeConfig(ctx, specs, label);
     });
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  /** Sweep all malicious variants with a fixed epsilon */
-  async "sweep-all-malicious"(overrides, priceSource, outputDir, threadCount) {
-    const mixes: ValidatorMix[] = [
-      {},                   // 0% (baseline)
-      { malicious: 0.1 },
-      { malicious: 0.2 },
-      { malicious: 0.33 },
-      { pushy: 0.1 },
-      { pushy: 0.2 },
-      { pushy: 0.33 },
-      { noop: 0.1 },
-      { noop: 0.2 },
-      { noop: 0.33 },
-      { delayed: 0.1 },
-      { delayed: 0.2 },
-      { delayed: 0.33 },
-      { drift: 0.1 },
-      { drift: 0.2 },
-      { drift: 0.33 },
-    ];
+  /** Sweep all malicious variants at fixed (default) ε. */
+  async "sweep-all-malicious"(ctx, priceSource, outputDir, threadCount) {
     const configs: SimulationConfig[] = [];
-
-    for (const mix of mixes) {
-      const label = formatMix(mix);
-      configs.push(mergeConfig({ ...overrides, validatorMix: mix, label }));
+    for (const mix of RESEARCH_MIXES) {
+      const specs = specsFromMix(mix);
+      const label = formatValidators(buildValidators(ctx.validatorCount, specs, ctx.priceSource));
+      configs.push(makeConfig(ctx, specs, label));
     }
-
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  async "sweep-malicious-and-epsilon"(overrides, priceSource, outputDir, threadCount) {
+  async "sweep-malicious-and-epsilon"(ctx, priceSource, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3];
-    const base = epsilonValue(DEFAULT_CONFIG.epsilon);
-    const epsilons: EpsilonSpec[] = [base / 5, DEFAULT_CONFIG.epsilon, base * 5];
+    const base = epsilonValue(ctx.defaultEpsilon);
+    const epsilons: EpsilonSpec[] = [base / 5, ctx.defaultEpsilon, base * 5];
     const configs: SimulationConfig[] = [];
-
     for (const frac of fractions) {
-      for (const epsilon of epsilons) {
-        const label = `${(frac * 100).toFixed(0)}% malicious, epsilon=${epsilonValue(epsilon).toFixed(6)}`;
-        configs.push(mergeConfig({ ...overrides, validatorMix: { malicious: frac }, epsilon, label }));
+      for (const eps of epsilons) {
+        const label = `${(frac * 100).toFixed(0)}% malicious, epsilon=${epsilonValue(eps).toFixed(6)}`;
+        const specs = frac > 0 ? [{ type: "malicious" as const, fraction: frac }] : [];
+        configs.push(makeConfig(ctx, specs, label, nudgeAgg(ctx, eps)));
       }
     }
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  async "sweep-pushy-and-epsilon"(overrides, priceSource, outputDir, threadCount) {
+  async "sweep-pushy-and-epsilon"(ctx, priceSource, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3];
-    const base = epsilonValue(DEFAULT_CONFIG.epsilon);
-    const epsilons: EpsilonSpec[] = [base / 5, DEFAULT_CONFIG.epsilon, base * 5];
+    const base = epsilonValue(ctx.defaultEpsilon);
+    const epsilons: EpsilonSpec[] = [base / 5, ctx.defaultEpsilon, base * 5];
     const configs: SimulationConfig[] = [];
-
     for (const frac of fractions) {
-      for (const epsilon of epsilons) {
-        const label = `${(frac * 100).toFixed(0)}% pushy, epsilon=${epsilonValue(epsilon).toFixed(6)}`;
-        configs.push(mergeConfig({ ...overrides, validatorMix: { pushy: frac }, epsilon, label }));
+      for (const eps of epsilons) {
+        const label = `${(frac * 100).toFixed(0)}% pushy, epsilon=${epsilonValue(eps).toFixed(6)}`;
+        const specs = frac > 0 ? [{ type: "pushy" as const, fraction: frac }] : [];
+        configs.push(makeConfig(ctx, specs, label, nudgeAgg(ctx, eps)));
       }
     }
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  /** Vary epsilon to find optimal value */
-  async "epsilon-sweep"(overrides, priceSource, outputDir, threadCount) {
+  /** Vary epsilon to find an optimum (always runs the nudge aggregator). */
+  async "epsilon-sweep"(ctx, priceSource, outputDir, threadCount) {
     const multipliers = [0.25, 0.5, 1, 2, 4];
-    const autoConfig = mergeConfig(overrides);
     const maxDelta = maxBlockDelta(priceSource.pricePoints);
-    const baseEpsilon = maxDelta / autoConfig.validatorCount;
-
+    const baseEpsilon = maxDelta / ctx.validatorCount;
     const configs = multipliers.map((mult) => {
       const eps = baseEpsilon * mult;
       const label = `epsilon=${eps.toFixed(6)} (${mult}x)`;
-      return mergeConfig({ ...overrides, epsilon: eps, label });
+      return makeConfig(ctx, [], label, nudgeAgg(ctx, eps));
     });
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  /** Stress test: 49% malicious */
-  async stress(overrides, priceSource, outputDir, threadCount) {
+  /** Stress test: 49% malicious. */
+  async stress(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: stress]`);
-    const config = mergeConfig({
-      ...overrides,
-      validatorMix: { malicious: 0.49 },
-      label: "stress (49% malicious)",
-    });
-    return runBatch([config], priceSource, outputDir, threadCount);
+    const specs: GroupSpec[] = [{ type: "malicious", fraction: 0.49 }];
+    return runBatch([makeConfig(ctx, specs, "stress (49% malicious)")], priceSource, outputDir, threadCount);
   },
 
-  /** For all malicious variants, show 49% and 50% */
-  async "edge-malicious"(overrides, priceSource, outputDir, threadCount) {
-    const mixes: ValidatorMix[] = [
-      { malicious: 0.49 },
-      { malicious: 0.50 },
-      { pushy: 0.49 },
-      { pushy: 0.50 },
-      { noop: 0.49 },
-      { noop: 0.50 },
-      { delayed: 0.49 },
-      { delayed: 0.50 },
-      { drift: 0.49 },
-      { drift: 0.50 },
-    ];
+  /** Edge case: 49% / 50% across all malicious variants. */
+  async "edge-malicious"(ctx, priceSource, outputDir, threadCount) {
+    const types: Exclude<ValidatorType, "honest">[] = ["malicious", "pushy", "noop", "delayed", "drift"];
     const configs: SimulationConfig[] = [];
-    for (const mix of mixes) {
-      configs.push(mergeConfig({ ...overrides, validatorMix: mix, label: formatMix(mix) }));
-  }
+    for (const type of types) {
+      for (const frac of [0.49, 0.50]) {
+        const specs: GroupSpec[] = [{ type, fraction: frac }];
+        const label = `${(frac * 100).toFixed(0)}% ${type}`;
+        configs.push(makeConfig(ctx, specs, label));
+      }
+    }
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  async "research-absolute-eps"(overrides, priceSource, outputDir, threadCount) {
+  async "research-absolute-eps"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: research-absolute-eps]`);
     const criteria = loadCriteria();
-    const base = mergeConfig({ ...overrides, convergenceThreshold: criteria.convergenceThreshold });
-
-    const autoEpsilon = 1 / base.validatorCount / 10;
+    const autoEpsilon = 1 / ctx.validatorCount / 10;
     console.log(`  Auto-epsilon base: ${autoEpsilon.toFixed(6)}`);
 
-    const multipliers = RESEARCH_MULTIPLIERS;
-    const mixes = RESEARCH_MIXES;
-
     const epsilonMultipliers = new Map<number, number>();
-    for (const mult of multipliers) {
+    for (const mult of RESEARCH_MULTIPLIERS) {
       epsilonMultipliers.set(autoEpsilon * mult, mult);
     }
 
     const configs: SimulationConfig[] = [];
-    for (const mult of multipliers) {
+    for (const mult of RESEARCH_MULTIPLIERS) {
       const eps = autoEpsilon * mult;
-      for (const mix of mixes) {
-        const mixDesc = formatMix(mix);
+      for (const mix of RESEARCH_MIXES) {
+        const specs = specsFromMix(mix);
+        const mixDesc = formatValidators(buildValidators(ctx.validatorCount, specs, ctx.priceSource));
         const label = `eps=${eps.toFixed(6)} (${mult}x), ${mixDesc}`;
-        configs.push(mergeConfig({
-          ...overrides,
-          epsilon: eps,
-          validatorMix: mix,
+        const cfg: SimulationConfig = {
+          ...makeConfig(ctx, specs, label, nudgeAgg(ctx, eps)),
           convergenceThreshold: criteria.convergenceThreshold,
-          label,
-        }));
+        };
+        configs.push(cfg);
       }
     }
 
-    console.log(`  Grid: ${multipliers.length} epsilons x ${mixes.length} mixes = ${configs.length} simulations`);
-
+    console.log(`  Grid: ${RESEARCH_MULTIPLIERS.length} epsilons x ${RESEARCH_MIXES.length} mixes = ${configs.length} simulations`);
     const results = await runBatch(configs, priceSource, outputDir, threadCount);
-
-    const reportPath = outputDir
-      ? join(outputDir, "research_report.json")
-      : "research_report.json";
+    const reportPath = outputDir ? join(outputDir, "research_report.json") : "research_report.json";
     generateReport(results, epsilonMultipliers, criteria, autoEpsilon, reportPath);
+    return results;
+  },
 
+  async "research-ratio-eps"(ctx, priceSource, outputDir, threadCount) {
+    console.log(`\n[Scenario: research-ratio-eps]`);
+    const criteria = loadCriteria();
+    const autoRatio = 0.01 / ctx.validatorCount;
+    console.log(`  Auto-ratio base: ${(autoRatio * 100).toFixed(6)}% per bump (1% collective / ${ctx.validatorCount} validators)`);
+
+    const epsilonMultipliers = new Map<number, number>();
+    for (const mult of RESEARCH_MULTIPLIERS) {
+      epsilonMultipliers.set(autoRatio * mult, mult);
+    }
+
+    const configs: SimulationConfig[] = [];
+    for (const mult of RESEARCH_MULTIPLIERS) {
+      const ratio = autoRatio * mult;
+      for (const mix of RESEARCH_MIXES) {
+        const specs = specsFromMix(mix);
+        const mixDesc = formatValidators(buildValidators(ctx.validatorCount, specs, ctx.priceSource));
+        const label = `ratio=${(ratio * 100).toFixed(4)}% (${mult}x), ${mixDesc}`;
+        const cfg: SimulationConfig = {
+          ...makeConfig(ctx, specs, label, nudgeAgg(ctx, { ratio })),
+          convergenceThreshold: criteria.convergenceThreshold,
+        };
+        configs.push(cfg);
+      }
+    }
+
+    console.log(`  Grid: ${RESEARCH_MULTIPLIERS.length} ratios x ${RESEARCH_MIXES.length} mixes = ${configs.length} simulations`);
+    const results = await runBatch(configs, priceSource, outputDir, threadCount);
+    const reportPath = outputDir ? join(outputDir, "research_report.json") : "research_report.json";
+    generateReport(results, epsilonMultipliers, criteria, autoRatio, reportPath);
     return results;
   },
 
   /**
-   * Cross-aggregator malicious-fraction sweep.
+   * Cross-aggregator malicious-fraction sweep. `pushy` and `noop` are
+   * primarily author-side attacks under nudge — their quote translations are
+   * weaker / structurally different. See TASKS.md §C.
    *
-   * Compares the three aggregator rules under identical conditions:
-   *   - nudge        (current design: bumps + ε)
-   *   - median       (validators submit absolute prices, runtime medians)
-   *   - trimmed-mean (validators submit absolute prices, drop top/bottom 10%)
-   *
-   * Adversaries: only the strategies that translate cleanly to both nudge and
-   * quote modes are included here. `pushy` and `noop` are excluded — both are
-   * primarily *author-side* attacks in the nudge protocol and have weakened or
-   * structurally-different analogs under runtime aggregation. A separate
-   * scenario could surface those if needed.
-   *
-   * Cross-product: 3 aggregators × 3 malicious types × 7 fractions = 63 sims.
-   * Each scenario label is "<aggregator> · <type>@<pct>%", which is what shows
-   * up in the viz overlay legend.
-   *
-   * IMPORTANT: under median/trimmed-mean, ε is meaningless and ignored. The
-   * runs use whatever ε is passed in (auto by default) but it doesn't affect
-   * those aggregators' price updates.
+   * Cross-product: 2 aggregators × (1 honest + 2 types × 4 fractions) = 18.
    */
-  async "aggregator-comparison"(overrides, priceSource, outputDir, threadCount) {
+  async "aggregator-comparison"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: aggregator-comparison]`);
-
     const aggregators: AggregatorConfig[] = [
-      { kind: "nudge" },
+      nudgeAgg(ctx),
       { kind: "median" },
-      { kind: "trimmed-mean", k: 0.33 },
     ];
-    const adversaryTypes = ["malicious", "pushy"] as const;
-    // Non-zero fractions only — the honest (0%) baseline is added once per
-    // aggregator outside the type loop. Otherwise we'd run the same
-    // all-honest sim once per adversary type per aggregator.
+    const adversaryTypes: Exclude<ValidatorType, "honest">[] = ["malicious", "pushy"];
     const fractions = [0.10, 0.33, 0.49, 0.5];
 
     const configs: SimulationConfig[] = [];
     for (const agg of aggregators) {
-      // One honest baseline per aggregator.
-      configs.push(mergeConfig({
-        ...overrides,
-        aggregator: agg,
-        validatorMix: {},
-        maliciousParams: COMPARISON_MALICIOUS_PARAMS,
-        label: `${aggregatorLabel(agg)} · honest`,
-      }));
+      // Baseline (honest) per aggregator.
+      configs.push(makeConfig(ctx, [], `${aggregatorLabel(agg)} · honest`, agg));
 
       for (const type of adversaryTypes) {
         for (const frac of fractions) {
           const label = `${aggregatorLabel(agg)} · ${type}@${(frac * 100).toFixed(0)}%`;
-          configs.push(mergeConfig({
-            ...overrides,
-            aggregator: agg,
-            validatorMix: { [type]: frac },
-            maliciousParams: COMPARISON_MALICIOUS_PARAMS,
-            label,
-          }));
+          const specs: GroupSpec[] = [{ type, fraction: frac, params: COMPARISON_PARAMS }];
+          configs.push(makeConfig(ctx, specs, label, agg));
         }
       }
     }
 
-    const mp = COMPARISON_MALICIOUS_PARAMS;
-    console.log(`  Grid: ${aggregators.length} aggregators × (1 honest + ${adversaryTypes.length} adversary types × ${fractions.length} fractions) = ${configs.length} simulations`);
-    console.log(`  Adversaries (with quote-mode behavior):`);
-    console.log(`    malicious : inverse direction (nudge) / mirror across lastPrice (quote)`);
-    console.log(`    pushy     : max-push as author (nudge) / outlier real·(1 ± ${mp.pushyQuoteBias}) (quote, lossy)`);
-
+    console.log(`  Grid: ${aggregators.length} aggregators × (1 honest + ${adversaryTypes.length} types × ${fractions.length} fractions) = ${configs.length}`);
+    console.log(`  Comparison knobs: pushyQuoteBias=${(COMPARISON_PARAMS.pushyQuoteBias * 100).toFixed(1)}%, delayBlocks=${COMPARISON_PARAMS.delayBlocks}, driftQuoteStep=${(COMPARISON_PARAMS.driftQuoteStep * 100).toFixed(1)}%`);
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
   /**
    * Compare validator-observation modes under realistic per-trade data.
-   *
-   * MUST be run with --data-source=trades and ≥2 venues, otherwise the
-   * "random-venue" arm has nothing to draw from and will throw.
-   *
-   * Each pair of runs uses identical config except for the validator
-   * observation source:
-   *   - median       : every validator sees the cross-venue median (current default).
-   *   - random-venue : each validator query picks a random venue from the
-   *                    loaded set. Honest validators now disagree more
-   *                    (per-venue noise), which interacts with the aggregator.
-   *
-   * Cross-product: 2 obs sources × 3 aggregators × 4 malicious fractions = 24 sims.
-   * Useful expected shape:
-   *   - With nudge aggregator + random-venue, honest validators waste more
-   *     up/down nudges canceling each other → tracking lag.
-   *   - With median aggregator + random-venue, the runtime already aggregates,
-   *     so the impact should be much smaller.
+   * Requires a trades data source with ≥1 venue. Sweeps:
+   *   - 2 obs modes (cross-venue, random-venue)
+   *   - 3 aggregators (nudge, median, mean(k=0.1))
+   *   - 4 malicious fractions (0, 10%, 33%, 49%)
    */
-  async "validator-observation"(overrides, priceSource, outputDir, threadCount) {
+  async "validator-observation"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: validator-observation]`);
     if (!priceSource.venuePrices) {
       throw new Error(
@@ -592,91 +583,37 @@ export const scenarios: Record<string, ScenarioFn> = {
       );
     }
 
-    const obsModes: ValidatorPriceSource[] = [
-      { kind: "median" },
-      { kind: "random-venue" },
-    ];
+    const obsKinds: ("cross-venue" | "random-venue")[] = ["cross-venue", "random-venue"];
     const aggregators: AggregatorConfig[] = [
-      { kind: "nudge" },
+      nudgeAgg(ctx),
       { kind: "median" },
-      { kind: "trimmed-mean", k: 0.1 },
+      { kind: "mean", k: 0.1 },
     ];
-    const adversaryTypes = ["malicious"] as const;
     const fractions = [0, 0.10, 0.33, 0.49];
 
     const configs: SimulationConfig[] = [];
-    for (const obs of obsModes) {
+    for (const obs of obsKinds) {
+      const ps: ValidatorPriceSource = { kind: obs, jitterStdDev: ctx.priceSource.jitterStdDev };
+      const obsCtx: ScenarioCtx = { ...ctx, priceSource: ps };
       for (const agg of aggregators) {
         for (const frac of fractions) {
-          const mix: ValidatorMix = frac === 0 ? {} : { malicious: frac };
           const aggLabel = aggregatorLabel(agg);
-          const obsLabel = obs.kind;
           const advLabel = frac === 0 ? "honest" : `mal@${(frac * 100).toFixed(0)}%`;
-          configs.push(mergeConfig({
-            ...overrides,
-            aggregator: agg,
-            validatorMix: mix,
-            validatorPriceSource: obs,
-            label: `${obsLabel} obs · ${aggLabel} · ${advLabel}`,
-          }));
+          const specs: GroupSpec[] = frac === 0 ? [] : [{ type: "malicious", fraction: frac }];
+          const label = `${obs} obs · ${aggLabel} · ${advLabel}`;
+          configs.push(makeConfig(obsCtx, specs, label, agg));
         }
       }
     }
 
-    console.log(`  Grid: ${obsModes.length} obs modes × ${aggregators.length} aggregators × ${fractions.length} fractions = ${configs.length} simulations`);
-    console.log(`  Observation modes:`);
-    console.log(`    median       : every validator sees the cross-venue median + jitter`);
-    console.log(`    random-venue : every validator query picks a random venue + jitter`);
-
+    console.log(`  Grid: ${obsKinds.length} obs modes × ${aggregators.length} aggregators × ${fractions.length} fractions = ${configs.length}`);
     return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  async "research-ratio-eps"(overrides, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: research-ratio-eps]`);
-    const criteria = loadCriteria();
-    const base = mergeConfig({ ...overrides, convergenceThreshold: criteria.convergenceThreshold });
-
-    // 1% collective move / validatorCount = per-bump ratio
-    const autoRatio = 0.01 / base.validatorCount;
-    console.log(`  Auto-ratio base: ${(autoRatio * 100).toFixed(6)}% per bump (1% collective / ${base.validatorCount} validators)`);
-
-    const multipliers = RESEARCH_MULTIPLIERS;
-    const mixes = RESEARCH_MIXES;
-
-    const epsilonMultipliers = new Map<number, number>();
-    for (const mult of multipliers) {
-      epsilonMultipliers.set(autoRatio * mult, mult);
-    }
-
-    const configs: SimulationConfig[] = [];
-    for (const mult of multipliers) {
-      const ratio = autoRatio * mult;
-      for (const mix of mixes) {
-        const mixDesc = formatMix(mix);
-        const label = `ratio=${(ratio * 100).toFixed(4)}% (${mult}x), ${mixDesc}`;
-        configs.push(mergeConfig({
-          ...overrides,
-          epsilon: { ratio },
-          validatorMix: mix,
-          convergenceThreshold: criteria.convergenceThreshold,
-          label,
-        }));
-      }
-    }
-
-    console.log(`  Grid: ${multipliers.length} ratios x ${mixes.length} mixes = ${configs.length} simulations`);
-
-    const results = await runBatch(configs, priceSource, outputDir, threadCount);
-
-    const reportPath = outputDir
-      ? join(outputDir, "research_report.json")
-      : "research_report.json";
-    generateReport(results, epsilonMultipliers, criteria, autoRatio, reportPath);
-
-    return results;
   },
 };
 
 export function listScenarios(): string[] {
   return Object.keys(scenarios);
 }
+
+// Re-export for callers (main.ts) that need to spell the default ctx.
+export { DEFAULT_CONFIG, DEFAULT_PRICE_SOURCE, DEFAULT_VALIDATOR_COUNT };

@@ -17,76 +17,95 @@ export interface PricePoint {
   price: number;
 }
 
-export interface BumpSubmission {
-  validatorIndex: number;
-  bump: Bump;
-}
-
-// ── Aggregator selection ──
-//
+// ── Aggregator selection ────────────────────────────────────────────────────
 // AggregatorMode is the bare tag (used in summaries, labels, registries).
 // AggregatorConfig is the *configured* form including any per-aggregator
 // parameters. They are kept separate so SimulationSummary stays a flat enum
 // while config can carry parameters cleanly.
 //
 // Behaviors:
-//   "nudge"        : current design — validators emit Up/Down, author picks subset,
-//                    runtime applies (net × ε). Only mode that uses ε.
-//   "median"       : validators submit absolute price quotes, runtime takes the
-//                    median. Robust to outliers up to <50% adversarial.
-//   "trimmed-mean" : validators submit absolute price quotes, runtime drops the
-//                    top k% and bottom k% by value, then averages the rest.
-//                    Smooths jitter better than median; weaker outlier rejection.
-export type AggregatorMode = "nudge" | "median" | "trimmed-mean";
+//   "nudge"  : validators emit Up/Down, author picks subset, runtime applies
+//              (net × ε). Only mode that uses ε. Epsilon lives on the
+//              aggregator config (was top-level before).
+//   "median" : validators submit absolute price quotes; runtime sorts, drops
+//              the top `k` and bottom `k` by value, then takes the median of
+//              what remains. k defaults to 0 (plain median). Trimming before
+//              the median rarely changes the price (median is already
+//              outlier-robust) but reflects in the activated-vs-total counts.
+//   "mean"   : same trim step, then arithmetic mean of the survivors. k
+//              defaults to 0 (plain mean across all quotes). Smoother than
+//              median; weaker outlier rejection at small k.
+export type AggregatorMode = "nudge" | "median" | "mean";
+
+// Epsilon specification: how much the oracle price moves per activated bump.
+// - number: absolute step size (e.g. 0.00033)
+// - "auto": auto-compute from price data (max 6s delta / validator count)
+// - { ratio: number }: per-bump fraction of current oracle price
+export type EpsilonSpec = number | "auto" | { ratio: number };
+export type EpsilonMode = "abs" | "ratio";
 
 export type AggregatorConfig =
-  | { kind: "nudge" }
-  | { kind: "median" }
-  | { kind: "trimmed-mean"; k: number };  // k = fraction trimmed from each tail (e.g. 0.1 = drop top 10% + bottom 10%)
+  | { kind: "nudge"; epsilon: EpsilonSpec }
+  | { kind: "median"; k?: number }    // k = fraction trimmed from each tail before median; default 0
+  | { kind: "mean"; k?: number };     // k = fraction trimmed from each tail before mean;   default 0
 
 export function aggregatorMode(cfg: AggregatorConfig): AggregatorMode {
   return cfg.kind;
 }
 
-// ── Price-data source selection ──────────────────────────────────────────────
+export function epsilonValue(spec: EpsilonSpec): number {
+  if (spec === "auto") return 0;
+  if (typeof spec === "number") return spec;
+  return spec.ratio;
+}
+
+export function epsilonMode(spec: EpsilonSpec): EpsilonMode {
+  if (typeof spec === "object" && "ratio" in spec) return "ratio";
+  return "abs";
+}
+
+// ── Price-data source selection ─────────────────────────────────────────────
 // The simulator can be fed by two pipelines, both producing PricePoint[]:
 //   "candles" : Binance US 1-minute OHLC linearly interpolated to 6s blocks
 //               (existing path; fast iteration, smooths intra-minute dynamics).
 //   "trades"  : per-trade data from one or more spot venues, bucketed to 6s
-//               VWAP per venue, then median across venues per block.
-//               (new path; preserves intra-minute volatility, reflects
-//               cross-venue price discovery).
-export type VenueId = "binance" | "kraken" | "bybit" | "gate";
+//               VWAP per venue, then combined via `crossVenue`.
+export type VenueId = "binance" | "kraken" | "bybit" | "gate" | "okx" | "coinbase";
 
 // How per-venue 6s VWAPs are combined into a single cross-venue real price
 // per block. The result is the "ground truth" the oracle is compared against
-// and the source of the median validators see in `validatorPriceSource: median`.
-//   "median"  : middle value across venues (current default; matches the old behavior).
-//             For 4 venues this averages the middle 2 — naturally damps a single outlier.
-//   "vwap"    : volume-weighted across venues. Quiet venues contribute less; the
-//             active market dominates. Falls back to median of carry-forward
-//             values for blocks where no venue has fresh trades.
+// and the source the validators see when their priceSource is "cross-venue".
 //   "mean"    : simple arithmetic mean across venues. Equal weight regardless
-//             of activity — illiquid venues pull as much as active ones.
+//               of activity. **Default.** Matches the philosophical "fair"
+//               price the simulation is trying to discover.
+//   "median"  : middle value across venues. Naturally damps a single outlier.
+//   "vwap"    : volume-weighted across venues. Quiet venues contribute less.
 export type CrossVenueSpec =
+  | { kind: "mean" }
   | { kind: "median" }
-  | { kind: "vwap" }
-  | { kind: "mean" };
+  | { kind: "vwap" };
 
-export type DataSourceSpec =
+// How the real (ground-truth) price for the simulation is produced.
+// Two pipelines, both yielding a 6s-aligned PricePoint[]:
+//   "candles" — Binance US 1m OHLC interpolated to 6s.
+//   "trades"  — per-trade dumps from one or more venues, bucketed to 6s VWAP
+//               per venue, then combined via `crossVenue` (default: mean).
+export type RealPriceSpec =
   | { kind: "candles" }
   | { kind: "trades"; venues: VenueId[]; crossVenue?: CrossVenueSpec };
 
-// Where each validator gets its own observation of the price.
-//   "median"        : every validator sees the cross-venue median (or candle-
-//                     interpolated value), with per-validator Gaussian jitter
-//                     applied on top. The current/default behavior.
-//   "random-venue"  : every validator query picks a random venue from the
-//                     loaded set and observes that venue's price (with jitter
-//                     applied on top). Only valid when dataSource.kind=="trades".
+// Per-validator price observation strategy. Each group carries its own copy,
+// so different groups can observe the price differently in the same sim.
+//   "cross-venue"  : validator sees the cross-venue real price (what the
+//                    chart calls Real Price), with Gaussian jitter on top.
+//   "random-venue" : validator picks a random venue per query and sees that
+//                    venue's price, with Gaussian jitter on top. Only valid
+//                    when realPrice.kind == "trades".
+//
+// `jitterStdDev` is folded in here (was a top-level config knob). 0 = no jitter.
 export type ValidatorPriceSource =
-  | { kind: "median" }
-  | { kind: "random-venue" };
+  | { kind: "cross-venue"; jitterStdDev: number }
+  | { kind: "random-venue"; jitterStdDev: number };
 
 /** What `loadPriceSource` returns: the resolved 6s price grid plus, when in
  *  trades mode, per-venue carry-forward-filled price arrays of the same length. */
@@ -95,23 +114,40 @@ export interface ResolvedPriceSource {
   venuePrices?: Record<VenueId, number[]>;
 }
 
-// ── Malicious validator parameters ───────────────────────────────────────────
-// All knobs that govern adversarial behavior. Surfaced on SimulationConfig so
-// scenarios can vary them and so they show up in stdout / UI alongside the
-// rest of the run config.
-export interface MaliciousParams {
-  /** How many blocks behind DelayedValidator reads its price (default 10 = 60s at 6s blocks). */
-  delayBlocks: number;
-  /** PushyMaliciousValidator quote-mode outlier magnitude, as a fraction of real price (default 0.05 = 5%). */
-  pushyQuoteBias: number;
-  /** DriftValidator quote-mode per-block multiplicative bias (default 0.001 = 0.1% per block). */
-  driftQuoteStep: number;
+// ── Validator groups ────────────────────────────────────────────────────────
+// Each group is a (type, count, priceSource, params) tuple. Replaces the
+// old top-level (validatorCount, validatorMix, jitterStdDev,
+// validatorPriceSource, maliciousParams) bundle. A simulation's full
+// validator set is the concatenation of all groups, in order.
+export type ValidatorType = "honest" | "malicious" | "pushy" | "noop" | "delayed" | "drift";
+
+/** Type-specific behavior knobs. Required keys depend on `type`:
+ *    delayed → delayBlocks
+ *    pushy   → pushyQuoteBias
+ *    drift   → driftQuoteStep
+ *  Other types ignore this object. Defaults applied in engine if omitted. */
+export interface ValidatorParams {
+  /** delayed: how many 6s blocks behind the validator reads. */
+  delayBlocks?: number;
+  /** pushy: quote-mode outlier magnitude as a fraction of real price. */
+  pushyQuoteBias?: number;
+  /** drift: quote-mode per-block multiplicative bias. */
+  driftQuoteStep?: number;
 }
 
-// What a single validator submits per block. Aggregators consume an array of these.
-// - "nudge"  : signed direction only (current behavior)
-// - "quote"  : absolute price (used by median / trimmed-mean)
-// - "abstain": validator opted not to submit (used by NoopValidator under non-nudge aggregators)
+export interface ValidatorGroup {
+  type: ValidatorType;
+  count: number;
+  priceSource: ValidatorPriceSource;
+  params?: ValidatorParams;
+}
+
+// ── Submissions / inherent ──────────────────────────────────────────────────
+// A single validator's input for a block. Aggregators consume an array of these
+// (after the block author has picked which to include in the inherent).
+//   "nudge"   : signed direction only (used by nudge aggregator)
+//   "quote"   : absolute price (used by median / mean)
+//   "abstain" : validator opted not to submit
 export type Submission =
   | { kind: "nudge"; validatorIndex: number; bump: Bump }
   | { kind: "quote"; validatorIndex: number; price: number }
@@ -131,53 +167,19 @@ export interface BlockMetrics {
   deviationPct: number; // percentage deviation
 }
 
-// Per-type entry: plain number = fraction with default jitter, or object for custom jitter.
-// Example: 0.33 or { fraction: 0.33, jitter: 0.005 }
-export type ValidatorMixEntry = number | { fraction?: number; jitter?: number };
-
-// Maps validator type name to its config.
-// "honest" is implicit: its fraction = 1 - sum(all other fractions).
-// A "honest" key is allowed to override jitter only (fraction is ignored).
-// Example: { malicious: 0.2, pushy: { fraction: 0.1, jitter: 0.005 } }
-export type ValidatorMix = Record<string, ValidatorMixEntry>;
-
-// Epsilon specification: how much the oracle price moves per activated bump.
-// - number: absolute step size (e.g. 0.00033)
-// - "auto": auto-compute from price data
-// - { ratio: number }: per-bump fraction of current oracle price (e.g. 0.0001 = 0.01% per bump)
-export type EpsilonSpec = number | "auto" | { ratio: number };
-
-export type EpsilonMode = "abs" | "ratio";
-
-export function epsilonValue(spec: EpsilonSpec): number {
-  if (spec === "auto") return 0;
-  if (typeof spec === "number") return spec;
-  return spec.ratio;
-}
-
-export function epsilonMode(spec: EpsilonSpec): EpsilonMode {
-  if (typeof spec === "object" && "ratio" in spec) return "ratio";
-  return "abs";
-}
-
+// ── SimulationConfig ────────────────────────────────────────────────────────
+// `validators` is required. `aggregator` and `realPrice` have engine defaults.
 export interface SimulationConfig {
-  startDate: string; // YYYY-MM-DD
+  startDate: string;
   endDate: string;
-  validatorCount: number;
-  validatorMix: ValidatorMix; // fractions for non-honest validator types
-  epsilon: EpsilonSpec;
+  validators: ValidatorGroup[];
   seed: number;
-  jitterStdDev: number; // price jitter std dev as fraction (e.g. 0.001 = 0.1%)
-  convergenceThreshold: number; // deviation % threshold for convergence (default 0.1)
+  convergenceThreshold: number; // % deviation threshold for "converged"
   label: string;
-  /** Aggregation rule + per-aggregator parameters. Defaults to { kind: "nudge" }. */
+  /** Aggregation rule + per-aggregator params. Default applied in engine. */
   aggregator?: AggregatorConfig;
-  /** Per-validator-type adversarial knobs. Defaults to DEFAULT_MALICIOUS_PARAMS in config.ts. */
-  maliciousParams?: MaliciousParams;
-  /** Where the price feed comes from. Defaults to { kind: "candles" } (back-compat). */
-  dataSource?: DataSourceSpec;
-  /** Where each validator gets its observation. Defaults to { kind: "median" }. */
-  validatorPriceSource?: ValidatorPriceSource;
+  /** How the ground-truth real price is produced. Default applied in engine. */
+  realPrice?: RealPriceSpec;
 }
 
 export interface SimulationResult {
@@ -188,33 +190,28 @@ export interface SimulationResult {
 export interface SimulationSummary {
   /// Total number of blocks in the simulation
   totalBlocks: number;
-  /// Aggregation rule that produced this run (recorded so labels/charts are unambiguous).
+  /// Aggregation rule that produced this run.
   aggregator: AggregatorMode;
-  /// The resolved epsilon value used in the simulation (absolute step, or per-bump ratio).
-  /// Only meaningful when aggregator === "nudge"; ignored for "median" / "trimmed-mean".
+  /// The resolved epsilon value used in the simulation. Only meaningful when
+  /// aggregator === "nudge"; 0 / "abs" for the quote aggregators.
   epsilon: number;
-  /// Whether epsilon is an absolute step ("abs") or a fraction of oracle price ("ratio")
   epsilonMode: EpsilonMode;
-  /// The threshold used for convergence (in %), and the convergance itself.
-  ///
-  /// If set to 1%, blocks in which deviation was less than 1% are counted as converged.
+  /// Convergence threshold (in %) and the resulting rate.
   convergenceThreshold: number;
   convergenceRate: number;
-  /// The arithmetic mean (aka. average) deviation in the simulation.
+  /// Mean / max deviation across the simulation.
   meanDeviation: number;
   meanDeviationPct: number;
-  /// The max deviation in the simulation.
   maxDeviation: number;
   maxDeviationPct: number;
   /// The integral of the deviation over time.
   deviationIntegral: number;
   /// The maximum rate of deviation change.
   maxDeviationRate: number;
-  /// Longest consecutive streak of blocks where deviationPct >= convergenceThreshold.
+  /// Longest consecutive streak of blocks where deviationPct >= threshold.
   maxConsecutiveBlocksAboveThreshold: number;
-  /// 95th percentile of deviationPct across all blocks.
+  /// Distribution tails of deviationPct.
   p95DeviationPct: number;
-  /// 99th percentile of deviationPct across all blocks.
   p99DeviationPct: number;
 }
 

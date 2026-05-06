@@ -2,19 +2,23 @@ import type { PricePoint, ValidatorPriceSource, VenueId } from "../types.js";
 import { gaussianRandom } from "../rng.js";
 
 /**
- * Simulates an external price endpoint that each validator queries.
+ * Simulates the price feed seen by validators.
  *
- * Two modes of operation:
- *   - Cross-venue median (or candle-interpolated) price as ground truth.
- *     Available always via getRealPrice / getJitteredPrice.
- *   - Per-venue series, available only when the simulation was started with
- *     `--data-source=trades`. Surfaced via getPriceByVenue and
- *     getPriceByRandomVenue. These throw if no per-venue data was loaded.
+ * Two layers:
+ *   - Cross-venue real price (`pricePoints`) — the ground truth for the
+ *     simulation. Computed once by `combineVenues` per the active
+ *     `CrossVenueSpec` (default: mean across venues).
+ *   - Per-venue series — only present when the simulation was loaded with
+ *     `--data-source=trades`. Each `VenueId` maps to a carry-forward-filled
+ *     price array of the same length as `pricePoints`.
+ *
+ * Validators reach into this via `observe(priceSource, ...)`, which
+ *   - picks the underlying value (cross-venue real OR a random venue), then
+ *   - applies Gaussian jitter from `priceSource.jitterStdDev`.
  */
 export class PriceEndpoint {
   private points: PricePoint[];
   private venueIds: VenueId[];
-  /** Per-venue carry-forward-filled price arrays, same length as `points`. */
   private venuePrices: Record<VenueId, number[]> | undefined;
 
   constructor(points: PricePoint[], venuePrices?: Record<VenueId, number[]>) {
@@ -23,37 +27,28 @@ export class PriceEndpoint {
     this.venueIds = venuePrices ? (Object.keys(venuePrices) as VenueId[]) : [];
   }
 
-  /** Get the cross-venue median (or candle) real price at a given block index. */
+  /** Cross-venue real price at block `i` (clamped to series end). */
   getRealPrice(blockIndex: number): number {
     const idx = Math.min(blockIndex, this.points.length - 1);
     return this.points[idx].price;
   }
 
-  /** Get the timestamp at a given block index. */
   getTimestamp(blockIndex: number): number {
     const idx = Math.min(blockIndex, this.points.length - 1);
     return this.points[idx].timestamp;
   }
 
-  /** Real price + Gaussian jitter scaled by jitterStdDev (a fraction of price). */
-  getJitteredPrice(blockIndex: number, rng: () => number, jitterStdDev: number): number {
-    const real = this.getRealPrice(blockIndex);
-    if (jitterStdDev === 0) return real;
-    return gaussianRandom(rng, real, real * jitterStdDev);
-  }
-
-  /** True iff per-venue prices are available (i.e. simulation is in trades mode). */
+  /** True iff per-venue prices are loaded (i.e. `--data-source=trades`). */
   hasVenues(): boolean {
     return this.venueIds.length > 0;
   }
 
-  /** All venue ids that have a loaded price series, in the order they were loaded. */
+  /** All venue ids in the loaded set, in load order. */
   availableVenues(): VenueId[] {
     return this.venueIds.slice();
   }
 
-  /** Get a specific venue's price at the given block. Throws if the simulation is
-   *  not in trades mode, or if the venue is not among the loaded set. */
+  /** Specific venue's price at block `i`. Throws if venues aren't loaded. */
   getPriceByVenue(venue: VenueId, blockIndex: number): number {
     if (!this.venuePrices) {
       throw new Error(
@@ -71,9 +66,7 @@ export class PriceEndpoint {
     return series[idx];
   }
 
-  /** Pick a random venue (uniform over the loaded set) and return its price at
-   *  the given block. Throws if not in trades mode. The provided RNG is used so
-   *  the choice is reproducible per validator. */
+  /** Pick a uniformly random venue and return its price at block `i`. */
   getPriceByRandomVenue(rng: () => number, blockIndex: number): number {
     if (!this.venuePrices || this.venueIds.length === 0) {
       throw new Error(
@@ -85,26 +78,21 @@ export class PriceEndpoint {
     return this.getPriceByVenue(v, blockIndex);
   }
 
-  /** Composes "which underlying source" + jitter for a validator's observation.
-   *  Centralizes the price-source dispatch so every validator type uses identical
-   *  logic and jitter is always applied uniformly on top.
-   *
-   *  - source.kind === "median": jittered cross-venue median (current default).
-   *  - source.kind === "random-venue": jittered price from a random venue. */
+  /**
+   * Validator observation: dispatch on `priceSource.kind`, then apply
+   * Gaussian jitter scaled by `priceSource.jitterStdDev`. Centralizes the
+   * lookup so every validator type uses identical logic.
+   */
   observe(
     source: ValidatorPriceSource,
     blockIndex: number,
     rng: () => number,
-    jitterStdDev: number,
   ): number {
-    let basePrice: number;
-    if (source.kind === "random-venue") {
-      basePrice = this.getPriceByRandomVenue(rng, blockIndex);
-    } else {
-      basePrice = this.getRealPrice(blockIndex);
-    }
-    if (jitterStdDev === 0) return basePrice;
-    return gaussianRandom(rng, basePrice, basePrice * jitterStdDev);
+    const basePrice = source.kind === "random-venue"
+      ? this.getPriceByRandomVenue(rng, blockIndex)
+      : this.getRealPrice(blockIndex);
+    if (source.jitterStdDev === 0) return basePrice;
+    return gaussianRandom(rng, basePrice, basePrice * source.jitterStdDev);
   }
 
   get totalBlocks(): number {

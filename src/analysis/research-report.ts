@@ -1,8 +1,14 @@
 import { join } from "path";
 import { epsilonValue, epsilonMode as getEpsilonMode } from "../types.js";
-import type { SimulationResult, EpsilonMode } from "../types.js";
+import type { AggregatorConfig, EpsilonSpec, SimulationResult, EpsilonMode } from "../types.js";
 import { scoreSimulation, scoreEpsilons, type ResearchCriteria, type EpsilonScore } from "./research-criteria.js";
-import { formatMix } from "../mix.js";
+import { formatValidators } from "../validators.js";
+
+function configEpsilonSpec(cfg: { aggregator?: AggregatorConfig }): EpsilonSpec {
+  const a = cfg.aggregator;
+  if (!a || a.kind !== "nudge") return 0;
+  return a.epsilon;
+}
 
 interface DetailRow {
   epsilon: number;
@@ -51,10 +57,11 @@ export function generateReport(
   // Build detail rows
   const details: DetailRow[] = [];
   for (const r of results) {
-    const eps = epsilonValue(r.config.epsilon);
-    const mode = getEpsilonMode(r.config.epsilon);
+    const spec = configEpsilonSpec(r.config);
+    const eps = epsilonValue(spec);
+    const mode = getEpsilonMode(spec);
     const mult = epsilonMultipliers.get(eps) ?? 0;
-    const mix = formatMix(r.config.validatorMix);
+    const mix = formatValidators(r.config.validators);
     details.push({
       epsilon: eps,
       epsilonMode: mode,

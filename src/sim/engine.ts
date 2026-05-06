@@ -1,26 +1,46 @@
-import type { SimulationConfig, SimulationResult, BlockMetrics, SimulationSummary, PricePoint, EpsilonMode, AggregatorConfig, MaliciousParams, ResolvedPriceSource, ValidatorPriceSource } from "../types.js";
-import { mixFraction, mixJitter } from "../mix.js";
+import type {
+  AggregatorConfig,
+  BlockMetrics,
+  RealPriceSpec,
+  EpsilonMode,
+  EpsilonSpec,
+  ResolvedPriceSource,
+  SimulationConfig,
+  SimulationResult,
+  SimulationSummary,
+  ValidatorGroup,
+  ValidatorParams,
+  PricePoint,
+} from "../types.js";
 import { mulberry32 } from "../rng.js";
 import { PriceEndpoint } from "./price-endpoint.js";
 import { HonestValidator, type ValidatorAgent } from "./validator.js";
-import { MaliciousValidator, PushyMaliciousValidator, NoopValidator, DelayedValidator, DriftValidator } from "./malicious.js";
+import {
+  MaliciousValidator,
+  PushyMaliciousValidator,
+  NoopValidator,
+  DelayedValidator,
+  DriftValidator,
+} from "./malicious.js";
 import { Chain } from "./chain.js";
 import { makeAggregator } from "./aggregator.js";
 import { maxBlockDelta } from "../data/interpolator.js";
-import { BLOCK_TIME_SECONDS, DEFAULT_MALICIOUS_PARAMS } from "../config.js";
+import { BLOCK_TIME_SECONDS, DEFAULT_VALIDATOR_PARAMS } from "../config.js";
+import { totalValidators } from "../validators.js";
 
-// Registry of validator constructors keyed by name.
-// Every entry must have the same constructor signature as HonestValidator.
+// Constructor signature shared by every validator type. The unified ctor
+// keeps engine code small — each group just instantiates `count` of one
+// constructor with its own (priceSource, params).
 type ValidatorCtor = new (
   index: number,
   endpoint: PriceEndpoint,
   rng: () => number,
-  jitterStdDev: number,
-  params: MaliciousParams,
-  priceSource: ValidatorPriceSource,
+  priceSource: ValidatorGroup["priceSource"],
+  params: Required<ValidatorParams>,
 ) => ValidatorAgent;
 
-const VALIDATOR_REGISTRY: Record<string, ValidatorCtor> = {
+const VALIDATOR_REGISTRY: Record<ValidatorGroup["type"], ValidatorCtor> = {
+  honest: HonestValidator,
   malicious: MaliciousValidator,
   pushy: PushyMaliciousValidator,
   noop: NoopValidator,
@@ -28,8 +48,35 @@ const VALIDATOR_REGISTRY: Record<string, ValidatorCtor> = {
   drift: DriftValidator,
 };
 
-// Callback invoked for each block during simulation. Return value is ignored.
 export type BlockSink = (block: BlockMetrics) => void;
+
+const DEFAULT_AGGREGATOR: AggregatorConfig = { kind: "median" };
+
+/** Resolve a partial ValidatorParams against engine defaults. */
+function resolveParams(p: ValidatorParams | undefined): Required<ValidatorParams> {
+  return { ...DEFAULT_VALIDATOR_PARAMS, ...(p ?? {}) };
+}
+
+/** Resolve EpsilonSpec into a numeric value + mode. Only meaningful for nudge. */
+function resolveEpsilon(
+  spec: EpsilonSpec,
+  pricePoints: PricePoint[],
+  validatorCount: number,
+  log: boolean,
+): { epsilon: number; mode: EpsilonMode } {
+  if (spec === "auto") {
+    const maxDelta = maxBlockDelta(pricePoints);
+    let eps = maxDelta / Math.max(1, validatorCount);
+    if (eps === 0) eps = 0.0001;
+    if (log) console.log(`  Auto epsilon: ${eps.toFixed(6)} (maxDelta=${maxDelta.toFixed(4)}, validators=${validatorCount})`);
+    return { epsilon: eps, mode: "abs" };
+  }
+  if (typeof spec === "object" && "ratio" in spec) {
+    if (log) console.log(`  Ratio epsilon: ${(spec.ratio * 100).toFixed(4)}% per bump`);
+    return { epsilon: spec.ratio, mode: "ratio" };
+  }
+  return { epsilon: spec, mode: "abs" };
+}
 
 export function runSimulation(
   config: SimulationConfig,
@@ -40,96 +87,59 @@ export function runSimulation(
 ): SimulationResult {
   const pricePoints = source.pricePoints;
   if (!quiet) printConfig(config, pricePoints);
+
   const rng = mulberry32(config.seed);
   const endpoint = new PriceEndpoint(pricePoints, source.venuePrices);
 
-  // Validate that requested validator-price-source mode is compatible with
-  // the loaded data source. random-venue requires per-venue series.
-  const validatorPriceSource: ValidatorPriceSource = config.validatorPriceSource ?? { kind: "median" };
-  if (validatorPriceSource.kind === "random-venue" && !endpoint.hasVenues()) {
-    throw new Error(
-      `validatorPriceSource="random-venue" requires --data-source=trades; ` +
-      `current run has no per-venue prices loaded.`,
-    );
-  }
-
-  // Resolve epsilon spec into a numeric value + mode
-  let epsilon: number;
-  let epsilonMode: EpsilonMode;
-  if (config.epsilon === "auto") {
-    const maxDelta = maxBlockDelta(pricePoints);
-    epsilon = maxDelta / config.validatorCount;
-    if (epsilon === 0) epsilon = 0.0001; // safety floor
-    epsilonMode = "abs";
-    if (!quiet) console.log(`  Auto epsilon: ${epsilon.toFixed(6)} (maxDelta=${maxDelta.toFixed(4)}, validators=${config.validatorCount})`);
-  } else if (typeof config.epsilon === "object" && "ratio" in config.epsilon) {
-    epsilon = config.epsilon.ratio;
-    epsilonMode = "ratio";
-    if (!quiet) console.log(`  Ratio epsilon: ${(epsilon * 100).toFixed(4)}% per bump`);
-  } else {
-    epsilon = config.epsilon;
-    epsilonMode = "abs";
-  }
-
-  // Create validators from mix
-  const validators: ValidatorAgent[] = [];
-  const mix = config.validatorMix;
-
-  // Calculate counts for each non-honest type
-  const typeCounts: { name: string; count: number; ctor: ValidatorCtor; jitter: number }[] = [];
-  let nonHonestTotal = 0;
-  for (const [name, entry] of Object.entries(mix)) {
-    if (name === "honest") continue; // honest entry is jitter-only, not a type
-    const ctor = VALIDATOR_REGISTRY[name];
-    if (!ctor) {
-      throw new Error(`Unknown validator type "${name}". Available: ${Object.keys(VALIDATOR_REGISTRY).join(", ")}`);
+  // Validate every group's priceSource against the loaded data.
+  for (const g of config.validators) {
+    if (g.priceSource.kind === "random-venue" && !endpoint.hasVenues()) {
+      throw new Error(
+        `Validator group "${g.type}" requested priceSource=random-venue but the loaded ` +
+        `data source has no per-venue prices. Use --data-source=trades.`,
+      );
     }
-    const fraction = mixFraction(entry);
-    const count = Math.floor(config.validatorCount * fraction);
-    typeCounts.push({ name, count, ctor, jitter: mixJitter(entry, config.jitterStdDev) });
-    nonHonestTotal += count;
   }
 
-  const honestCount = config.validatorCount - nonHonestTotal;
-  if (honestCount < 0) {
-    throw new Error(`Validator mix fractions sum to more than 1.0`);
+  const validatorCount = totalValidators(config.validators);
+  if (validatorCount === 0) {
+    throw new Error("SimulationConfig.validators is empty (or sums to 0 count).");
   }
 
-  // Resolve adversarial knobs (each scenario can override these in its config).
-  const maliciousParams: MaliciousParams = config.maliciousParams ?? DEFAULT_MALICIOUS_PARAMS;
+  // Resolve aggregator + (if nudge) epsilon.
+  const aggregatorCfg: AggregatorConfig = config.aggregator ?? DEFAULT_AGGREGATOR;
+  const aggregator = makeAggregator(aggregatorCfg);
+  let epsilon = 0;
+  let epsilonMode: EpsilonMode = "abs";
+  if (aggregatorCfg.kind === "nudge") {
+    const resolved = resolveEpsilon(aggregatorCfg.epsilon, pricePoints, validatorCount, !quiet);
+    epsilon = resolved.epsilon;
+    epsilonMode = resolved.mode;
+  }
 
+  // Instantiate validators in group order. Each gets a unique index and a
+  // mulberry32 derived from `seed + index + 1`.
+  const validators: ValidatorAgent[] = new Array(validatorCount);
   let nextIndex = 0;
-
-  // Honest validators first (use per-type jitter if "honest" key is in the mix)
-  const honestJitter = mix["honest"] ? mixJitter(mix["honest"], config.jitterStdDev) : config.jitterStdDev;
-  for (let i = 0; i < honestCount; i++) {
-    validators.push(new HonestValidator(nextIndex, endpoint, mulberry32(config.seed + nextIndex + 1), honestJitter, maliciousParams, validatorPriceSource));
-    nextIndex++;
-  }
-
-  // Non-honest types (each with its own jitter)
-  for (const { name, count, ctor, jitter } of typeCounts) {
-    for (let i = 0; i < count; i++) {
-      validators.push(new ctor(nextIndex, endpoint, mulberry32(config.seed + nextIndex + 1), jitter, maliciousParams, validatorPriceSource));
+  for (const g of config.validators) {
+    const Ctor = VALIDATOR_REGISTRY[g.type];
+    const params = resolveParams(g.params);
+    for (let i = 0; i < g.count; i++) {
+      validators[nextIndex] = new Ctor(
+        nextIndex,
+        endpoint,
+        mulberry32(config.seed + nextIndex + 1),
+        g.priceSource,
+        params,
+      );
       nextIndex++;
     }
   }
 
-  // Build description for logging
-  const parts = [`${honestCount} honest`];
-  for (const { name, count } of typeCounts) {
-    if (count > 0) parts.push(`${count} ${name}`);
-  }
-
-  // Resolve aggregator (defaults to nudge for back-compat)
-  const aggregatorCfg: AggregatorConfig = config.aggregator ?? { kind: "nudge" };
-  const aggregator = makeAggregator(aggregatorCfg);
-
-  // Initialize chain
   const initialPrice = pricePoints[0].price;
   const chain = new Chain(initialPrice, epsilon, epsilonMode, validators, endpoint, rng, aggregator);
 
-  // Run simulation with incremental summary computation
+  // Run simulation with incremental summary computation.
   const totalBlocks = endpoint.totalBlocks;
   const convergenceThreshold = config.convergenceThreshold;
 
@@ -145,13 +155,17 @@ export function runSimulation(
   const allDeviationPcts = new Float64Array(totalBlocks);
   let prevBlock: BlockMetrics | null = null;
 
-  if (!quiet) console.log(`  Running ${totalBlocks.toLocaleString()} blocks (${parts.join(", ")})...`);
+  if (!quiet) {
+    const groupParts = config.validators
+      .filter(g => g.count > 0)
+      .map(g => `${g.count} ${g.type}`);
+    console.log(`  Running ${totalBlocks.toLocaleString()} blocks (${groupParts.join(", ")})...`);
+  }
 
   const progressInterval = Math.max(1, Math.floor(totalBlocks / 100));
   for (let i = 0; i < totalBlocks; i++) {
     const m = chain.nextBlock();
 
-    // Incremental summary: finalize the *previous* block's trapezoidal integral
     if (prevBlock !== null) {
       const devEnd = m.realPrice !== 0
         ? (Math.abs(m.realPrice - prevBlock.oraclePrice) / m.realPrice) * 100
@@ -185,7 +199,6 @@ export function runSimulation(
   }
   if (!quiet) process.stdout.write(`\r  Progress: 100%${" ".repeat(40)}\n`);
 
-  // Last block's integral contribution (no next block)
   if (prevBlock !== null) {
     deviationIntegral += prevBlock.deviationPct * BLOCK_TIME_SECONDS;
   }
@@ -215,60 +228,85 @@ export function runSimulation(
     console.log(`  Max deviation rate: ${summary.maxDeviationRate.toFixed(6)} %/s`);
   }
 
-  const resolvedEpsilon = epsilonMode === "ratio" ? { ratio: epsilon } : epsilon;
-  return { config: { ...config, epsilon: resolvedEpsilon }, summary };
+  // Persist the resolved aggregator (concrete numeric epsilon) so .simdata
+  // and the UI never have to re-resolve "auto".
+  const resolvedAggregator: AggregatorConfig = aggregatorCfg.kind === "nudge"
+    ? { kind: "nudge", epsilon: epsilonMode === "ratio" ? { ratio: epsilon } : epsilon }
+    : aggregatorCfg;
+
+  return { config: { ...config, aggregator: resolvedAggregator }, summary };
 }
 
-/** Print a structured snapshot of the run config so each simulation start is greppable. */
+/** Print a structured snapshot of the run config. Greppable, one block per sim. */
 function printConfig(config: SimulationConfig, pricePoints?: PricePoint[]): void {
-  const agg = config.aggregator ?? { kind: "nudge" };
-  const aggStr = agg.kind === "trimmed-mean" ? `trimmed-mean(k=${agg.k})` : agg.kind;
-  const mixEntries = Object.entries(config.validatorMix);
-  const mixStr = mixEntries.length === 0
-    ? "100% honest"
-    : mixEntries.map(([k, v]) => {
-        const frac = typeof v === "number" ? v : (v.fraction ?? 0);
-        return `${k}=${(frac * 100).toFixed(1)}%`;
-      }).join(", ");
-  let epsStr: string;
-  if (config.epsilon === "auto") epsStr = "auto";
-  else if (typeof config.epsilon === "object" && "ratio" in config.epsilon) epsStr = `ratio=${(config.epsilon.ratio * 100).toFixed(4)}%/bump`;
-  else epsStr = config.epsilon.toString();
+  const agg = config.aggregator ?? DEFAULT_AGGREGATOR;
+  const aggStr = (agg.kind === "median" || agg.kind === "mean") && agg.k && agg.k > 0
+    ? `${agg.kind}(k=${agg.k})`
+    : agg.kind;
 
-  const mp = config.maliciousParams ?? DEFAULT_MALICIOUS_PARAMS;
-  // Mention only the params whose validator types are present in the mix —
-  // otherwise the printout balloons with irrelevant knobs.
-  const present = new Set(Object.keys(config.validatorMix));
+  // Build a one-liner mix string from the validators array.
+  const total = totalValidators(config.validators);
+  const parts: string[] = [];
+  let honest = 0;
+  for (const g of config.validators) {
+    if (g.type === "honest") honest += g.count;
+    else if (g.count > 0) parts.push(`${((g.count / total) * 100).toFixed(1)}% ${g.type}`);
+  }
+  const honestPct = ((honest / total) * 100).toFixed(1);
+  const mixStr = `${honestPct}% honest` + (parts.length ? ", " + parts.join(", ") : "");
+
+  // Epsilon string only printed for nudge.
+  let epsStr = "—";
+  if (agg.kind === "nudge") {
+    if (agg.epsilon === "auto") epsStr = "auto";
+    else if (typeof agg.epsilon === "object" && "ratio" in agg.epsilon) epsStr = `ratio=${(agg.epsilon.ratio * 100).toFixed(4)}%/bump`;
+    else epsStr = agg.epsilon.toString();
+  }
+
+  // Surface the param knobs of the malicious types actually present.
+  const presentTypes = new Set(config.validators.filter(g => g.count > 0).map(g => g.type));
   const malParts: string[] = [];
-  if (present.has("delayed")) malParts.push(`delayBlocks=${mp.delayBlocks}`);
-  if (present.has("pushy"))   malParts.push(`pushyQuoteBias=${(mp.pushyQuoteBias * 100).toFixed(2)}%`);
-  if (present.has("drift"))   malParts.push(`driftQuoteStep=${(mp.driftQuoteStep * 100).toFixed(3)}%`);
+  for (const g of config.validators) {
+    if (g.count === 0) continue;
+    const p = resolveParams(g.params);
+    if (g.type === "delayed") malParts.push(`delayBlocks=${p.delayBlocks}`);
+    if (g.type === "pushy")   malParts.push(`pushyQuoteBias=${(p.pushyQuoteBias * 100).toFixed(2)}%`);
+    if (g.type === "drift")   malParts.push(`driftQuoteStep=${(p.driftQuoteStep * 100).toFixed(3)}%`);
+  }
 
-  const ds = config.dataSource ?? { kind: "candles" } as const;
-  const dsStr = ds.kind === "candles"
+  const rp: RealPriceSpec = config.realPrice ?? { kind: "candles" };
+  const rpStr = rp.kind === "candles"
     ? "candles (Binance US 1m → interp 6s)"
-    : `trades (${ds.venues.join(", ")}, cross-venue=${ds.crossVenue?.kind ?? "median"})  ⚠ intra-minute volatility preserved`;
-  const vps = config.validatorPriceSource ?? { kind: "median" };
+    : `trades (${rp.venues.join(", ")}, cross-venue=${rp.crossVenue?.kind ?? "mean"})`;
+
+  // Distinct priceSource kinds across groups (usually just one).
+  const psKinds = new Set(config.validators.map(g => g.priceSource.kind));
+  const psStr = psKinds.size === 1 ? [...psKinds][0] : [...psKinds].join("/");
+  const jitters = new Set(config.validators.map(g => g.priceSource.jitterStdDev));
+  const jitterStr = jitters.size === 1
+    ? `${([...jitters][0] * 100).toFixed(3)}%`
+    : [...jitters].map(j => `${(j * 100).toFixed(3)}%`).join("/");
 
   console.log(`\n  ┌─ ${config.label}`);
-  console.log(`  │  data source  : ${dsStr}`);
-  console.log(`  │  validator obs: ${vps.kind === "random-venue" ? "random-venue (each query picks a random venue)" : "cross-venue median (or candle real price)"}`);
+  console.log(`  │  real price   : ${rpStr}`);
+  console.log(`  │  validator obs: ${psStr}`);
   console.log(`  │  aggregator   : ${aggStr}`);
   console.log(`  │  range        : ${config.startDate} → ${config.endDate}`);
-  console.log(`  │  validators   : ${config.validatorCount} (${mixStr})`);
-  console.log(`  │  epsilon      : ${epsStr}${agg.kind !== "nudge" ? "  (ignored by this aggregator)" : ""}`);
-  if (ds.kind === "trades" && pricePoints && pricePoints.length > 1) {
+  console.log(`  │  validators   : ${total} (${mixStr})`);
+  console.log(`  │  epsilon      : ${epsStr}${agg.kind !== "nudge" ? "  (n/a)" : ""}`);
+  if (rp.kind === "trades" && pricePoints && pricePoints.length > 1) {
     const md = maxBlockDelta(pricePoints);
-    const autoEps = md / config.validatorCount;
-    console.log(`  │  trade-mode ε : maxBlockDelta=${md.toFixed(6)}, auto-ε ≈ ${autoEps.toFixed(6)} (validators=${config.validatorCount})`);
+    const autoEps = md / total;
+    console.log(`  │  trade-mode ε : maxBlockDelta=${md.toFixed(6)}, auto-ε ≈ ${autoEps.toFixed(6)} (validators=${total})`);
   }
-  console.log(`  │  jitter stddev: ${(config.jitterStdDev * 100).toFixed(3)}%`);
+  console.log(`  │  jitter stddev: ${jitterStr}`);
   if (malParts.length > 0) console.log(`  │  malicious    : ${malParts.join(", ")}`);
   console.log(`  │  seed         : ${config.seed}`);
   console.log(`  └─ convergence  : <${config.convergenceThreshold}% deviation`);
+  // Avoid an unused-var warning for presentTypes when no malicious knobs are present.
+  void presentTypes;
 }
 
-/** Compute the p-th percentile (0-1) of a Float64Array by sorting a copy. */
 function percentile(arr: Float64Array, p: number): number {
   if (arr.length === 0) return 0;
   const sorted = arr.slice().sort();

@@ -1,9 +1,23 @@
 import type { BlockMetrics, EpsilonMode, Submission } from "../types.js";
-import type { ValidatorAgent } from "./validator.js";
+import type { ProduceCtx, ValidatorAgent } from "./validator.js";
 import type { PriceEndpoint } from "./price-endpoint.js";
 import type { Aggregator } from "./aggregator.js";
-import { NoopValidator } from "./malicious.js";
 
+/**
+ * The strict per-block flow modeled here matches the spec:
+ *
+ *   1. Chain asks every validator for its `input` (a nudge or quote).
+ *   2. Chain selects one random validator as block author.
+ *   3. Chain hands all gossiped inputs to the author.
+ *      Author returns the block-inherent (subset selected to include).
+ *   4. Chain hands the inherent to its aggregator (the runtime).
+ *      Aggregator computes the new price.
+ *   5. Deviation vs. real price (mean of venues by default) is recorded.
+ *
+ * No carve-outs. Behaviors like "noop author freezes the chain" fall out
+ * naturally because NoopValidator.produceInherent returns [] and the
+ * aggregator holds the price on empty inherent.
+ */
 export class Chain {
   block: number = 0;
   lastPrice: number;
@@ -38,53 +52,37 @@ export class Chain {
     const realPrice = this.endpoint.getRealPrice(blockIndex);
     const timestamp = this.endpoint.getTimestamp(blockIndex);
 
-    // Effective epsilon for this block (only consulted by NudgeAggregator).
     const effectiveEps = this.epsilonMode === "ratio"
       ? this.lastPrice * this.epsilon
       : this.epsilon;
 
-    // Pick author from ALL validators. Author still matters for nudge mode
-    // (selects bumps) and for the noop-author special case below.
+    const ctx: ProduceCtx = {
+      lastPrice: this.lastPrice,
+      blockIndex,
+      epsilon: effectiveEps,
+    };
+
+    // 1. Gather one input per validator (offchain gossip).
+    const inputKind = this.aggregator.inputKind;
+    const inputs: Submission[] = new Array(this.validators.length);
+    for (let i = 0; i < this.validators.length; i++) {
+      inputs[i] = this.validators[i].produceInput(inputKind, ctx);
+    }
+
+    // 2. Pick a uniformly random author from ALL validators.
     const author = this.validators[Math.floor(this.rng() * this.validators.length)];
 
-    // Noop-author special case: in nudge mode this is naturally enforced by
-    // NoopValidator.producePrice() returning all-false. Under runtime aggregation
-    // the author has no aggregation power, so the closest analog is "the author
-    // refused to include the inherent at all" — we model that by skipping
-    // aggregation entirely and holding the price.
-    const noopAuthorBlocked =
-      this.aggregator.submissionKind === "quote" && author instanceof NoopValidator;
+    // 3. Author selects which inputs go into the block inherent.
+    const inherent = author.produceInherent(inputs, ctx);
 
-    let totalBumps = 0;
-    let activatedBumps = 0;
-    let netDirection = 0;
-
-    if (!noopAuthorBlocked) {
-      // Collect submissions in the shape this aggregator wants.
-      const submissions: Submission[] = new Array(this.validators.length);
-      if (this.aggregator.submissionKind === "nudge") {
-        for (let i = 0; i < this.validators.length; i++) {
-          const v = this.validators[i];
-          submissions[i] = { kind: "nudge", validatorIndex: v.index, bump: v.produceBump(this.lastPrice, blockIndex) };
-        }
-      } else {
-        for (let i = 0; i < this.validators.length; i++) {
-          submissions[i] = this.validators[i].produceQuote(this.lastPrice, blockIndex);
-        }
-      }
-
-      const out = this.aggregator.aggregate({
-        submissions,
-        lastPrice: this.lastPrice,
-        author,
-        epsilon: effectiveEps,
-        blockIndex,
-      });
-      this.lastPrice = out.newPrice;
-      totalBumps = out.totalBumps;
-      activatedBumps = out.activatedBumps;
-      netDirection = out.netDirection;
-    }
+    // 4. Aggregator (runtime) consumes the inherent → new price.
+    const out = this.aggregator.apply({
+      inputs,
+      inherent,
+      lastPrice: this.lastPrice,
+      epsilon: effectiveEps,
+    });
+    this.lastPrice = out.newPrice;
 
     const deviation = Math.abs(realPrice - this.lastPrice);
     const deviationPct = realPrice !== 0 ? (deviation / realPrice) * 100 : 0;
@@ -96,9 +94,9 @@ export class Chain {
       oraclePrice: this.lastPrice,
       authorIndex: author.index,
       authorIsHonest: author.isHonest,
-      totalBumps,
-      activatedBumps,
-      netDirection,
+      totalBumps: out.totalBumps,
+      activatedBumps: out.activatedBumps,
+      netDirection: out.netDirection,
       deviation,
       deviationPct,
     };

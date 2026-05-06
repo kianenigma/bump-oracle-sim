@@ -1,7 +1,14 @@
 import { epsilonValue, epsilonMode as getEpsilonMode } from "../types.js";
-import type { SimulationSummary, SimulationResult, EpsilonMode } from "../types.js";
+import type { AggregatorConfig, EpsilonSpec, SimulationSummary, SimulationResult, EpsilonMode } from "../types.js";
 import { BLOCK_TIME_SECONDS } from "../config.js";
-import { isBaselineMix, hasAdversaryAtFraction } from "../mix.js";
+import { isBaselineValidators, hasGroupAtFraction } from "../validators.js";
+
+/** Pull the EpsilonSpec out of a config's aggregator (only nudge has one). */
+function configEpsilonSpec(cfg: { aggregator?: AggregatorConfig }): EpsilonSpec {
+  const a = cfg.aggregator;
+  if (!a || a.kind !== "nudge") return 0;
+  return a.epsilon;
+}
 
 export interface ResearchCriteria {
   // Weights (0-1). Higher = more important in the composite score.
@@ -137,8 +144,9 @@ export function scoreEpsilons(
   // Group results by epsilon key (mode:value) to avoid collisions between abs and ratio
   const byEpsilonKey = new Map<string, SimulationResult[]>();
   for (const r of results) {
-    const mode = getEpsilonMode(r.config.epsilon);
-    const eps = epsilonValue(r.config.epsilon);
+    const spec = configEpsilonSpec(r.config);
+    const mode = getEpsilonMode(spec);
+    const eps = epsilonValue(spec);
     const key = `${mode}:${eps}`;
     if (!byEpsilonKey.has(key)) byEpsilonKey.set(key, []);
     byEpsilonKey.get(key)!.push(r);
@@ -146,17 +154,22 @@ export function scoreEpsilons(
 
   const scores: EpsilonScore[] = [];
 
+  // Adversary types we care about for the resilience score. Any of them
+  // present at ~33% triggers the worst-case-at-33% calculation.
+  const ADVERSARY_TYPES = ["malicious", "pushy", "noop", "delayed", "drift"] as const;
+
   for (const [key, group] of byEpsilonKey) {
     const [modeStr, epsStr] = key.split(":");
     const mode = modeStr as EpsilonMode;
     const epsilon = parseFloat(epsStr);
 
-    const baseline = group.find(r => isBaselineMix(r.config.validatorMix));
+    const baseline = group.find(r => isBaselineValidators(r.config.validators));
     const baselineScore = baseline ? scoreSimulation(baseline.summary, criteria) : 0;
 
     let worstScore33 = 1;
     for (const r of group) {
-      if (hasAdversaryAtFraction(r.config.validatorMix, 0.33)) {
+      const matches = ADVERSARY_TYPES.some(t => hasGroupAtFraction(r.config.validators, t, 0.33));
+      if (matches) {
         const s = scoreSimulation(r.summary, criteria);
         if (s < worstScore33) worstScore33 = s;
       }

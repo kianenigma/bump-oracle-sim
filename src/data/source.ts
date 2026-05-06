@@ -1,4 +1,4 @@
-import type { CrossVenueSpec, DataSourceSpec, ResolvedPriceSource, VenueId } from "../types.js";
+import type { CrossVenueSpec, RealPriceSpec, ResolvedPriceSource, VenueId } from "../types.js";
 import { fetchCandles } from "./fetcher.js";
 import { interpolateToBlocks } from "./interpolator.js";
 import { CANDLE_INTERVAL } from "../config.js";
@@ -7,6 +7,8 @@ import { BinanceSpotSource } from "./trades/venues/binance.js";
 import { BybitSpotSource } from "./trades/venues/bybit.js";
 import { GateSpotSource } from "./trades/venues/gate.js";
 import { KrakenSpotSource } from "./trades/venues/kraken.js";
+import { OkxSpotSource } from "./trades/venues/okx.js";
+import { CoinbaseSpotSource } from "./trades/venues/coinbase.js";
 import type { VenueBucket, VenueSpotSource } from "./trades/types.js";
 
 /**
@@ -19,7 +21,7 @@ import type { VenueBucket, VenueSpotSource } from "./trades/types.js";
  *   intra-minute volatility and reflects cross-venue price discovery.
  */
 export async function loadPriceSource(
-  spec: DataSourceSpec,
+  spec: RealPriceSpec,
   startDate: string,
   endDate: string,
 ): Promise<ResolvedPriceSource> {
@@ -33,10 +35,12 @@ export async function loadPriceSource(
 /** Return a venue source instance by id. */
 function makeVenueSource(id: VenueId): VenueSpotSource {
   switch (id) {
-    case "binance": return new BinanceSpotSource();
-    case "bybit":   return new BybitSpotSource();
-    case "gate":    return new GateSpotSource();
-    case "kraken":  return new KrakenSpotSource();
+    case "binance":  return new BinanceSpotSource();
+    case "bybit":    return new BybitSpotSource();
+    case "gate":     return new GateSpotSource();
+    case "kraken":   return new KrakenSpotSource();
+    case "okx":      return new OkxSpotSource();
+    case "coinbase": return new CoinbaseSpotSource();
   }
 }
 

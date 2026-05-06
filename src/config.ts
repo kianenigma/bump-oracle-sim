@@ -1,30 +1,48 @@
-import type { MaliciousParams, SimulationConfig, VenueId } from "./types.js";
+import type {
+  SimulationConfig,
+  ValidatorGroup,
+  ValidatorParams,
+  ValidatorPriceSource,
+  VenueId,
+} from "./types.js";
 
-export const DEFAULT_MALICIOUS_PARAMS: MaliciousParams = {
+// All venues currently supported by the trade-data pipeline.
+export const ALL_VENUES: VenueId[] = ["binance", "kraken", "bybit", "gate", "okx", "coinbase"];
+
+// Default per-group price observation: each query picks a random venue with
+// 0.1% Gaussian jitter on top. Folded into every group unless a group's
+// `priceSource` overrides it.
+export const DEFAULT_PRICE_SOURCE: ValidatorPriceSource = {
+  kind: "random-venue",
+  jitterStdDev: 0.001,
+};
+
+// Defaults for the type-specific param keys. Engine fills these in when a
+// group's `params` is missing or partial.
+export const DEFAULT_VALIDATOR_PARAMS: Required<ValidatorParams> = {
   delayBlocks: 10,         // 60s at 6s blocks
   pushyQuoteBias: 0.05,    // 5% outlier in motion direction (quote mode)
   driftQuoteStep: 0.001,   // 0.1% upward bias per block (quote mode)
 };
 
-// All venues currently supported by the trade-data pipeline.
-export const ALL_VENUES: VenueId[] = ["binance", "kraken", "bybit", "gate"];
+export const DEFAULT_VALIDATOR_COUNT = 300;
+
+// 100% honest baseline at the default count and price source.
+const DEFAULT_VALIDATORS: ValidatorGroup[] = [
+  { type: "honest", count: DEFAULT_VALIDATOR_COUNT, priceSource: DEFAULT_PRICE_SOURCE },
+];
 
 export const DEFAULT_CONFIG: SimulationConfig = {
   startDate: "2025-01-01",
   endDate: "2025-01-07",
-  validatorCount: 300,
-  validatorMix: {}, // 100% honest by default
-  epsilon: 1 / 300 / 10, // price can move at most a 0.1$ per block
+  validators: DEFAULT_VALIDATORS,
   seed: 42,
-  jitterStdDev: 0.001, // 0.1% price jitter
   convergenceThreshold: 0.5, // 0.5% deviation threshold for convergence
   label: "default",
-  aggregator: { kind: "nudge" },
-  maliciousParams: DEFAULT_MALICIOUS_PARAMS,
-  // Defaults reflect the realistic setup: validators query individual venues
-  // (random per query) and the cross-venue median is used as ground truth.
-  dataSource: { kind: "trades", venues: ALL_VENUES, crossVenue: { kind: "median" } },
-  validatorPriceSource: { kind: "random-venue" },
+  aggregator: { kind: "median" },
+  // Realistic default: validators query individual venues (random per query)
+  // and the cross-venue MEAN is the ground truth.
+  realPrice: { kind: "trades", venues: ALL_VENUES, crossVenue: { kind: "mean" } },
 };
 
 export const BLOCK_TIME_SECONDS = 6;

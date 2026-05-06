@@ -1,122 +1,128 @@
-import { Bump } from "../types.js";
-import type { AggregatorConfig, BumpSubmission, Submission } from "../types.js";
-import type { ValidatorAgent } from "./validator.js";
+import type { AggregatorConfig, Submission } from "../types.js";
 
-// Context handed to every aggregator on every block. The aggregator decides
-// which fields it uses — e.g. NudgeAggregator is the only one that consults
-// `author` and `epsilon`; MedianAggregator only looks at `submissions`.
+/**
+ * The block author has already trimmed `inputs` down to `inherent`.
+ * The aggregator just applies it. This mirrors the runtime side of the
+ * spec: the runtime never sees individual gossiped inputs — only the
+ * inherent the author chose to include.
+ *
+ * `inputs` is also threaded through so we can report total-vs-activated
+ * counts on BlockMetrics, but the aggregator's price math only ever
+ * looks at `inherent`.
+ */
 export interface AggregatorContext {
-  submissions: Submission[];
+  inputs: Submission[];      // all gossiped (for metrics only)
+  inherent: Submission[];    // author's selection — drives price math
   lastPrice: number;
-  author: ValidatorAgent;
-  epsilon: number;
-  blockIndex: number;
+  epsilon: number;           // 0 for non-nudge aggregators
 }
 
 export interface AggregateOutcome {
   newPrice: number;
-  // For BlockMetrics reporting. Only the nudge aggregator produces meaningful
-  // values here; others report 0 / 0.
   totalBumps: number;
   activatedBumps: number;
   netDirection: number;
 }
 
 export interface Aggregator {
-  /** Tag used in summaries and labels. Mirrors AggregatorConfig.kind. */
-  readonly mode: "nudge" | "median" | "trimmed-mean";
-  /** What submission shape this aggregator expects validators to produce. */
-  readonly submissionKind: "nudge" | "quote";
-  aggregate(ctx: AggregatorContext): AggregateOutcome;
+  readonly mode: "nudge" | "median" | "mean";
+  readonly inputKind: "nudge" | "quote";
+  apply(ctx: AggregatorContext): AggregateOutcome;
 }
 
 // ── NudgeAggregator ─────────────────────────────────────────────────────────
-// Faithful port of the original chain.ts arithmetic. Validators emit Up/Down
-// nudges; the block author picks a subset; the runtime adds (net × ε).
+// price' = lastPrice + (Σ activated bumps) × ε.
+// `inputs` carries everyone's gossiped nudges (for the totalBumps metric);
+// `inherent` is the author's selection — only those count toward the price.
 export class NudgeAggregator implements Aggregator {
   readonly mode = "nudge" as const;
-  readonly submissionKind = "nudge" as const;
+  readonly inputKind = "nudge" as const;
 
-  aggregate(ctx: AggregatorContext): AggregateOutcome {
-    const bumps: BumpSubmission[] = [];
-    for (const s of ctx.submissions) {
-      if (s.kind === "nudge") bumps.push({ validatorIndex: s.validatorIndex, bump: s.bump });
-    }
-    const mask = ctx.author.producePrice(bumps, ctx.lastPrice, ctx.epsilon, ctx.blockIndex);
+  apply(ctx: AggregatorContext): AggregateOutcome {
+    let totalBumps = 0;
+    for (const s of ctx.inputs) if (s.kind === "nudge") totalBumps++;
+
     let net = 0;
     let activated = 0;
-    for (let i = 0; i < bumps.length; i++) {
-      if (mask[i]) {
-        net += bumps[i].bump; // Up=+1, Down=-1
-        activated++;
-      }
+    for (const s of ctx.inherent) {
+      if (s.kind !== "nudge") continue;
+      net += s.bump; // Up=+1, Down=-1
+      activated++;
     }
     return {
       newPrice: ctx.lastPrice + net * ctx.epsilon,
-      totalBumps: bumps.length,
+      totalBumps,
       activatedBumps: activated,
       netDirection: net,
     };
   }
 }
 
+// Sort, trim `floor(n × k)` from each tail, return [trimmedSorted, trimCount].
+// If trimming would empty the set, falls back to no-trim (caller decides what
+// to do with the unmodified sorted array).
+function sortAndTrim(quotes: number[], k: number): { sorted: number[]; trim: number } {
+  quotes.sort((a, b) => a - b);
+  const trim = Math.floor(quotes.length * k);
+  return quotes.length - 2 * trim <= 0
+    ? { sorted: quotes, trim: 0 }
+    : { sorted: quotes, trim };
+}
+
 // ── MedianAggregator ────────────────────────────────────────────────────────
-// Validators submit absolute price quotes; runtime takes the median. Robust to
-// outliers up to (but not including) 50% adversarial validators. With zero
-// quotes (e.g. all-noop), price is held.
+// Optionally trims top/bottom k% of the inherent quotes by value, then takes
+// the median of what remains. Empty inherent → hold price.
 export class MedianAggregator implements Aggregator {
   readonly mode = "median" as const;
-  readonly submissionKind = "quote" as const;
+  readonly inputKind = "quote" as const;
 
-  aggregate(ctx: AggregatorContext): AggregateOutcome {
-    const quotes = collectQuotes(ctx.submissions);
+  constructor(private k: number = 0) {
+    if (k < 0 || k >= 0.5) throw new Error(`median k must be in [0, 0.5), got ${k}`);
+  }
+
+  apply(ctx: AggregatorContext): AggregateOutcome {
+    const quotes = collectQuotes(ctx.inherent);
     if (quotes.length === 0) {
       return { newPrice: ctx.lastPrice, totalBumps: 0, activatedBumps: 0, netDirection: 0 };
     }
-    quotes.sort((a, b) => a - b);
-    const newPrice = median(quotes);
+    const { sorted, trim } = sortAndTrim(quotes, this.k);
+    const newPrice = medianOfRange(sorted, trim, sorted.length - trim);
     return {
       newPrice,
       totalBumps: quotes.length,
-      activatedBumps: quotes.length,
+      activatedBumps: quotes.length - 2 * trim,
       netDirection: Math.sign(newPrice - ctx.lastPrice),
     };
   }
 }
 
-// ── TrimmedMeanAggregator ───────────────────────────────────────────────────
-// Validators submit absolute price quotes; runtime drops the top `k` and
-// bottom `k` by value, then averages the rest. `k` is a fraction of the total
-// number of submissions per side (e.g. k=0.1 with 100 quotes drops 10 high
-// and 10 low). If trimming would empty the set, falls back to median.
-export class TrimmedMeanAggregator implements Aggregator {
-  readonly mode = "trimmed-mean" as const;
-  readonly submissionKind = "quote" as const;
+// ── MeanAggregator ──────────────────────────────────────────────────────────
+// Optionally trims top/bottom k% by value, then arithmetic mean of survivors.
+// k=0 is a plain mean across all quotes. If trimming would empty the set,
+// falls back to median(all) so the price still updates.
+export class MeanAggregator implements Aggregator {
+  readonly mode = "mean" as const;
+  readonly inputKind = "quote" as const;
 
-  constructor(private k: number) {
-    if (k < 0 || k >= 0.5) throw new Error(`trimmed-mean k must be in [0, 0.5), got ${k}`);
+  constructor(private k: number = 0) {
+    if (k < 0 || k >= 0.5) throw new Error(`mean k must be in [0, 0.5), got ${k}`);
   }
 
-  aggregate(ctx: AggregatorContext): AggregateOutcome {
-    const quotes = collectQuotes(ctx.submissions);
+  apply(ctx: AggregatorContext): AggregateOutcome {
+    const quotes = collectQuotes(ctx.inherent);
     if (quotes.length === 0) {
       return { newPrice: ctx.lastPrice, totalBumps: 0, activatedBumps: 0, netDirection: 0 };
     }
-    quotes.sort((a, b) => a - b);
-    const trim = Math.floor(quotes.length * this.k);
-    const remaining = quotes.length - 2 * trim;
-    let newPrice: number;
-    if (remaining <= 0) {
-      newPrice = median(quotes);
-    } else {
-      let sum = 0;
-      for (let i = trim; i < quotes.length - trim; i++) sum += quotes[i];
-      newPrice = sum / remaining;
-    }
+    const { sorted, trim } = sortAndTrim(quotes, this.k);
+    const lo = trim;
+    const hi = sorted.length - trim;
+    let sum = 0;
+    for (let i = lo; i < hi; i++) sum += sorted[i];
+    const newPrice = sum / (hi - lo);
     return {
       newPrice,
       totalBumps: quotes.length,
-      activatedBumps: Math.max(0, quotes.length - 2 * trim),
+      activatedBumps: hi - lo,
       netDirection: Math.sign(newPrice - ctx.lastPrice),
     };
   }
@@ -126,9 +132,9 @@ export class TrimmedMeanAggregator implements Aggregator {
 
 export function makeAggregator(cfg: AggregatorConfig): Aggregator {
   switch (cfg.kind) {
-    case "nudge":        return new NudgeAggregator();
-    case "median":       return new MedianAggregator();
-    case "trimmed-mean": return new TrimmedMeanAggregator(cfg.k);
+    case "nudge":  return new NudgeAggregator();
+    case "median": return new MedianAggregator(cfg.k ?? 0);
+    case "mean":   return new MeanAggregator(cfg.k ?? 0);
   }
 }
 
@@ -140,10 +146,10 @@ function collectQuotes(submissions: Submission[]): number[] {
   return out;
 }
 
-/** Median of a pre-sorted ascending array. Caller must sort. */
-function median(sorted: number[]): number {
-  const n = sorted.length;
+/** Median of `sorted[lo, hi)`. Caller guarantees lo < hi. */
+function medianOfRange(sorted: number[], lo: number, hi: number): number {
+  const n = hi - lo;
   if (n === 0) return 0;
-  const mid = Math.floor(n / 2);
+  const mid = lo + Math.floor(n / 2);
   return n % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
 }

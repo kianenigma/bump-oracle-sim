@@ -1,32 +1,53 @@
 import { parseArgs } from "util";
-import { mkdirSync, existsSync, statSync, rmSync } from "fs";
+import { mkdirSync, existsSync, rmSync } from "fs";
 import { join } from "path";
 import { cpus } from "os";
-import { DEFAULT_CONFIG, CANDLE_INTERVAL, ALL_VENUES } from "./config.js";
+import {
+  ALL_VENUES,
+  DEFAULT_CONFIG,
+  DEFAULT_PRICE_SOURCE,
+  DEFAULT_VALIDATOR_COUNT,
+} from "./config.js";
 import { epsilonValue } from "./types.js";
-import type { SimulationConfig, SimulationResult, ScenarioMeta, EpsilonSpec, AggregatorConfig, DataSourceSpec, VenueId, ValidatorPriceSource, CrossVenueSpec } from "./types.js";
-import { parseMixCli, formatMix } from "./mix.js";
+import type {
+  AggregatorConfig,
+  CrossVenueSpec,
+  RealPriceSpec,
+  EpsilonSpec,
+  ScenarioMeta,
+  SimulationConfig,
+  ValidatorPriceSource,
+  VenueId,
+} from "./types.js";
+import {
+  buildValidators,
+  formatValidators,
+  parseValidatorsCli,
+  isBaselineValidators,
+} from "./validators.js";
 import { loadPriceSource } from "./data/source.js";
 import { runSimulation } from "./sim/engine.js";
 import { ChunkWriter, writeIndex, loadIndex, scenarioDirName } from "./viz/writer.js";
 import { startServer } from "./viz/server.js";
-import { scenarios, listScenarios } from "./analysis/scenarios.js";
+import { scenarios, listScenarios, type ScenarioCtx } from "./analysis/scenarios.js";
 import { loadCriteria } from "./analysis/research-criteria.js";
 import { generateReport } from "./analysis/research-report.js";
+
+const DEFAULT_EPSILON: EpsilonSpec = 1 / DEFAULT_VALIDATOR_COUNT / 10;
 
 const { values: args } = parseArgs({
   args: Bun.argv.slice(2),
   options: {
     "start-date": { type: "string", default: DEFAULT_CONFIG.startDate },
     "end-date": { type: "string", default: DEFAULT_CONFIG.endDate },
-    epsilon: { type: "string", default: DEFAULT_CONFIG.epsilon.toString() },
-    validators: { type: "string", default: String(DEFAULT_CONFIG.validatorCount) },
+    epsilon: { type: "string", default: String(DEFAULT_EPSILON) },
+    validators: { type: "string", default: String(DEFAULT_VALIDATOR_COUNT) },
     mix: { type: "string", default: "" },
     seed: { type: "string", default: String(DEFAULT_CONFIG.seed) },
     output: { type: "string", default: "output.simdata" },
     scenario: { type: "string" },
     "fetch-only": { type: "boolean", default: false },
-    jitter: { type: "string", default: String(DEFAULT_CONFIG.jitterStdDev) },
+    jitter: { type: "string", default: String(DEFAULT_PRICE_SOURCE.jitterStdDev) },
     "convergence-threshold": { type: "string", default: String(DEFAULT_CONFIG.convergenceThreshold) },
     "list-scenarios": { type: "boolean", default: false },
     port: { type: "string", default: "3000" },
@@ -40,7 +61,7 @@ const { values: args } = parseArgs({
     threads: { type: "string", default: String(cpus().length) },
     force: { type: "boolean", default: false },
     aggregator: { type: "string" },
-    "trimmed-mean-k": { type: "string", default: "0.1" },
+    "aggregator-k": { type: "string", default: "0" },
     "data-source": { type: "string", default: "trades" },
     venues: { type: "string" },
     "cross-venue": { type: "string" },
@@ -58,38 +79,38 @@ Usage: bun run src/main.ts [options]
 Options:
   --start-date <YYYY-MM-DD>    Start date (default: ${DEFAULT_CONFIG.startDate})
   --end-date <YYYY-MM-DD>      End date (default: ${DEFAULT_CONFIG.endDate})
-  --epsilon <value>              Epsilon: number (absolute), "auto", or "ratio:0.01" (default: ${DEFAULT_CONFIG.epsilon})
-  --validators <number>         Number of validators (default: ${DEFAULT_CONFIG.validatorCount})
-  --mix <spec>                  Validator mix, e.g. "malicious=0.2,pushy=0.1" (rest are honest)
-  --seed <number>               Random seed (default: ${DEFAULT_CONFIG.seed})
-  --output <path>               Output directory (default: output.simdata)
-  --scenario <name>             Named scenario (use --list-scenarios to see options)
-  --fetch-only                  Only fetch and cache price data, don't simulate
-  --jitter <fraction>           Price jitter std dev as fraction (default: ${DEFAULT_CONFIG.jitterStdDev})
-  --convergence-threshold <%>   Convergence threshold in % (default: ${DEFAULT_CONFIG.convergenceThreshold})
-  --list-scenarios              List available named scenarios
-  --port <number>               Server port (default: 3000)
-  --data <path>                 Serve existing .simdata directory without re-running simulation
-  --label <substring>           Filter scenarios by label (case-insensitive substring, use with --data)
-  --index <N>                   Filter to a single scenario by index (use with --data)
-  --from <YYYY-MM-DD>           View time range start (use with --data)
-  --to <YYYY-MM-DD>             View time range end (use with --data)
-  --reanalyze                   Re-run scoring/report on existing --data without re-simulating
-  --no-open                     Don't auto-open browser
-  --threads <number>            Worker threads for batch scenarios (default: CPU count)
-  --force                       Overwrite existing output directory
-  --aggregator <mode>           Aggregation rule: "nudge" (default), "median", or "trimmed-mean"
-  --trimmed-mean-k <fraction>   Fraction trimmed from each tail when using trimmed-mean (default: 0.1)
-  --data-source <kind>          "trades" (default, per-trade multi-venue) or "candles" (Binance US 1m)
-  --venues <list>                Comma-separated venue ids (default: all four). Only used with --data-source=trades.
-                                  Available venues: ${ALL_VENUES.join(", ")}
-  --cross-venue <rule>           How to combine per-venue prices into the ground-truth real price:
-                                  "median" (default), "vwap" (volume-weighted across venues), or "mean".
-                                  Only used with --data-source=trades.
-  --price-source <mode>          "random-venue" (default; each query picks a random venue) or
-                                  "median" (every validator sees the cross-venue median).
-                                  random-venue requires --data-source=trades.
-  --help                        Show this help
+  --epsilon <value>            Epsilon: number (absolute), "auto", or "ratio:0.01"
+                                Used when --aggregator=nudge (default: ${DEFAULT_EPSILON})
+  --validators <number>        Number of validators (default: ${DEFAULT_VALIDATOR_COUNT})
+  --mix <spec>                 Validator mix, e.g. "malicious=0.2,pushy=0.1" (rest are honest)
+  --seed <number>              Random seed (default: ${DEFAULT_CONFIG.seed})
+  --output <path>              Output directory (default: output.simdata)
+  --scenario <name>            Named scenario (use --list-scenarios to see options)
+  --fetch-only                 Only fetch and cache price data, don't simulate
+  --jitter <fraction>          Price jitter std dev as fraction (default: ${DEFAULT_PRICE_SOURCE.jitterStdDev})
+  --convergence-threshold <%>  Convergence threshold in % (default: ${DEFAULT_CONFIG.convergenceThreshold})
+  --list-scenarios             List available named scenarios
+  --port <number>              Server port (default: 3000)
+  --data <path>                Serve existing .simdata directory without re-running simulation
+  --label <substring>          Filter scenarios by label (use with --data)
+  --index <N>                  Filter to a single scenario by index (use with --data)
+  --from <YYYY-MM-DD>          View time range start (use with --data)
+  --to <YYYY-MM-DD>            View time range end (use with --data)
+  --reanalyze                  Re-run scoring/report on existing --data without re-simulating
+  --no-open                    Don't auto-open browser
+  --threads <number>           Worker threads for batch scenarios (default: CPU count)
+  --force                      Overwrite existing output directory
+  --aggregator <mode>          Aggregation rule: "nudge", "median" (default), or "mean"
+  --aggregator-k <fraction>    For median/mean: trim this fraction from each tail before aggregating (default: 0).
+                                 k=0 → plain median / plain mean. k>0 → trim then median / mean.
+  --data-source <kind>         "trades" (default, per-trade multi-venue) or "candles" (Binance US 1m)
+  --venues <list>              Comma-separated venue ids, or "all" (default).
+                                Available venues: ${ALL_VENUES.join(", ")}
+  --cross-venue <rule>         How to combine per-venue prices into the ground-truth real price:
+                                "mean" (default), "median", "vwap". Only with --data-source=trades.
+  --price-source <mode>        "random-venue" (default; random venue per query) or "cross-venue".
+                                random-venue requires --data-source=trades.
+  --help                       Show this help
 `);
   process.exit(0);
 }
@@ -99,36 +120,39 @@ if (args["list-scenarios"]) {
   process.exit(0);
 }
 
-
-function parsePriceSourceArg(raw: string | undefined): ValidatorPriceSource | undefined {
+function parsePriceSourceKindArg(raw: string | undefined): "cross-venue" | "random-venue" | undefined {
   if (raw === undefined) return undefined;
-  if (raw === "median") return { kind: "median" };
-  if (raw === "random-venue") return { kind: "random-venue" };
-  console.error(`Invalid --price-source: "${raw}". Expected: median, random-venue.`);
+  if (raw === "cross-venue" || raw === "random-venue") return raw;
+  // Back-compat: old "median" alias for the cross-venue observation mode.
+  if (raw === "median") return "cross-venue";
+  console.error(`Invalid --price-source: "${raw}". Expected: cross-venue, random-venue.`);
   process.exit(1);
 }
 
 function parseCrossVenueArg(raw: string | undefined): CrossVenueSpec {
-  if (raw === undefined) return { kind: "median" };
-  if (raw === "median" || raw === "vwap" || raw === "mean") return { kind: raw };
-  console.error(`Invalid --cross-venue: "${raw}". Expected: median, vwap, mean.`);
+  if (raw === undefined) return { kind: "mean" };
+  if (raw === "mean" || raw === "median" || raw === "vwap") return { kind: raw };
+  console.error(`Invalid --cross-venue: "${raw}". Expected: mean, median, vwap.`);
   process.exit(1);
 }
 
-function parseDataSourceArg(kind: string, venuesRaw: string | undefined, crossVenueRaw: string | undefined): DataSourceSpec {
+function parseRealPriceArg(kind: string, venuesRaw: string | undefined, crossVenueRaw: string | undefined): RealPriceSpec {
   if (kind === "candles") {
     if (venuesRaw) console.error(`Warning: --venues ignored when --data-source=candles`);
     if (crossVenueRaw) console.error(`Warning: --cross-venue ignored when --data-source=candles`);
     return { kind: "candles" };
   }
   if (kind === "trades") {
-    const list = venuesRaw
-      ? venuesRaw.split(",").map((s) => s.trim()).filter(Boolean)
-      : ALL_VENUES.slice();
-    for (const v of list) {
-      if (!ALL_VENUES.includes(v as VenueId)) {
-        console.error(`Invalid venue "${v}". Available: ${ALL_VENUES.join(", ")}`);
-        process.exit(1);
+    let list: string[];
+    if (!venuesRaw || venuesRaw === "all") {
+      list = ALL_VENUES.slice();
+    } else {
+      list = venuesRaw.split(",").map((s) => s.trim()).filter(Boolean);
+      for (const v of list) {
+        if (!ALL_VENUES.includes(v as VenueId)) {
+          console.error(`Invalid venue "${v}". Available: ${ALL_VENUES.join(", ")}, or "all"`);
+          process.exit(1);
+        }
       }
     }
     if (list.length === 0) {
@@ -141,12 +165,12 @@ function parseDataSourceArg(kind: string, venuesRaw: string | undefined, crossVe
   process.exit(1);
 }
 
-function parseAggregatorArg(raw: string | undefined, k: number): AggregatorConfig | undefined {
+function parseAggregatorArg(raw: string | undefined, k: number, epsilon: EpsilonSpec): AggregatorConfig | undefined {
   if (raw === undefined) return undefined;
-  if (raw === "nudge") return { kind: "nudge" };
-  if (raw === "median") return { kind: "median" };
-  if (raw === "trimmed-mean") return { kind: "trimmed-mean", k };
-  console.error(`Invalid --aggregator: "${raw}". Expected: nudge, median, trimmed-mean.`);
+  if (raw === "nudge") return { kind: "nudge", epsilon };
+  if (raw === "median") return k > 0 ? { kind: "median", k } : { kind: "median" };
+  if (raw === "mean") return k > 0 ? { kind: "mean", k } : { kind: "mean" };
+  console.error(`Invalid --aggregator: "${raw}". Expected: nudge, median, mean.`);
   process.exit(1);
 }
 
@@ -162,7 +186,6 @@ function parseEpsilonArg(raw: string): EpsilonSpec {
   return val;
 }
 
-/** Ensure outputDir is ready. Error if it already exists (unless --force). */
 function ensureOutputDir(dir: string, force: boolean): void {
   if (existsSync(dir)) {
     if (force) {
@@ -175,7 +198,15 @@ function ensureOutputDir(dir: string, force: boolean): void {
   mkdirSync(dir, { recursive: true });
 }
 
-// ── Mode: re-run analysis on existing results ──
+/** Resolved-epsilon helper for reanalyze: pulls the numeric ε out of an
+ *  AggregatorConfig (0 for non-nudge). */
+function configEpsilon(config: SimulationConfig): number {
+  const a = config.aggregator;
+  if (!a || a.kind !== "nudge") return 0;
+  return epsilonValue(a.epsilon);
+}
+
+// ── Mode: re-run analysis on existing results ──────────────────────────────
 if (args.reanalyze) {
   if (!args.data) {
     console.error("Error: --reanalyze requires --data <path>");
@@ -184,25 +215,21 @@ if (args.reanalyze) {
   const idx = await loadIndex(args.data);
   const criteria = loadCriteria();
 
-  // Reconstruct SimulationResult[] from index
   const results = idx.scenarios.map((s) => ({ config: s.config, summary: s.summary }));
 
-  // Read autoEpsilon from existing report, or derive from stored epsilons
   const reportPath = join(args.data, "research_report.json");
   let autoEpsilon: number;
   if (existsSync(reportPath)) {
     const prev = JSON.parse(await Bun.file(reportPath).text());
     autoEpsilon = prev.autoEpsilon;
   } else {
-    // Fallback: assume 1.0x multiplier exists — find the most common epsilon among baseline runs
-    const baselines = results.filter((r) => Object.keys(r.config.validatorMix).length === 0);
-    const epsilons = baselines.map((r) => epsilonValue(r.config.epsilon));
+    const baselines = results.filter((r) => isBaselineValidators(r.config.validators));
+    const epsilons = baselines.map((r) => configEpsilon(r.config));
     autoEpsilon = epsilons.length > 0 ? epsilons[Math.floor(epsilons.length / 2)] : 0.0001;
     console.log(`  Warning: no previous research_report.json found, inferred autoEpsilon=${autoEpsilon.toFixed(6)}`);
   }
 
-  // Reconstruct multiplier map
-  const uniqueEpsilons = [...new Set(results.map((r) => epsilonValue(r.config.epsilon)))];
+  const uniqueEpsilons = [...new Set(results.map((r) => configEpsilon(r.config)))];
   const epsilonMultipliers = new Map<number, number>();
   for (const eps of uniqueEpsilons) {
     epsilonMultipliers.set(eps, eps / autoEpsilon);
@@ -214,12 +241,11 @@ if (args.reanalyze) {
   process.exit(0);
 }
 
-// ── Mode: serve existing .simdata directory ──
+// ── Mode: serve existing .simdata directory ────────────────────────────────
 if (args.data) {
   console.log(`\nLoading simulation data from ${args.data}...`);
   const port = parseInt(args.port!);
 
-  // Resolve --label / --index filters
   let filterIndices: number[] | undefined;
   if (args.label || args.index) {
     const idx = await loadIndex(args.data);
@@ -266,19 +292,20 @@ if (args.data) {
   process.exit(0);
 }
 
-// ── Shared: fetch and simulate ──
+// ── Shared: fetch and simulate ─────────────────────────────────────────────
+
 const startDate = args["start-date"]!;
 const endDate = args["end-date"]!;
 
-const dataSource = parseDataSourceArg(args["data-source"]!, args.venues, args["cross-venue"]);
+const realPrice = parseRealPriceArg(args["data-source"]!, args.venues, args["cross-venue"]);
 
-if (dataSource.kind === "candles") {
+if (realPrice.kind === "candles") {
   console.log(`\nFetching DOT/USDT data (candles): ${startDate} to ${endDate}`);
 } else {
-  console.log(`\nLoading DOT/USDT data (trades, venues: ${dataSource.venues.join(", ")}): ${startDate} to ${endDate}`);
+  console.log(`\nLoading DOT/USDT data (trades, venues: ${realPrice.venues.join(", ")}, cross-venue=${realPrice.crossVenue?.kind ?? "mean"}): ${startDate} to ${endDate}`);
 }
 
-const priceSource = await loadPriceSource(dataSource, startDate, endDate);
+const priceSource = await loadPriceSource(realPrice, startDate, endDate);
 
 if (args["fetch-only"]) {
   console.log(`\nFetch complete. ${priceSource.pricePoints.length.toLocaleString()} price points loaded.`);
@@ -286,6 +313,28 @@ if (args["fetch-only"]) {
 }
 
 console.log(`  Generated ${priceSource.pricePoints.length.toLocaleString()} price points`);
+
+// Resolve user knobs
+const validatorCount = parseInt(args.validators!);
+const seed = parseInt(args.seed!);
+const jitterStdDev = parseFloat(args.jitter!);
+const convergenceThreshold = parseFloat(args["convergence-threshold"]!);
+const epsilon = parseEpsilonArg(args.epsilon!);
+
+// Default validator price-source: random-venue if trades data, cross-venue if candles.
+let priceSourceKind = parsePriceSourceKindArg(args["price-source"]);
+if (priceSourceKind === undefined) {
+  priceSourceKind = realPrice.kind === "candles" ? "cross-venue" : "random-venue";
+}
+const ctxPriceSource: ValidatorPriceSource = { kind: priceSourceKind, jitterStdDev };
+
+const aggregatorOverride = parseAggregatorArg(
+  args.aggregator,
+  parseFloat(args["aggregator-k"]!),
+  epsilon,
+);
+const ctxAggregator: AggregatorConfig = aggregatorOverride
+  ?? (DEFAULT_CONFIG.aggregator ?? { kind: "median" });
 
 // Determine output directory
 const userSetOutput = Bun.argv.slice(2).includes("--output");
@@ -298,27 +347,6 @@ if (userSetOutput) {
   outputDir = args.output!;
 }
 
-const aggregatorOverride = parseAggregatorArg(args.aggregator, parseFloat(args["trimmed-mean-k"]!));
-let priceSourceOverride = parsePriceSourceArg(args["price-source"]);
-// If user explicitly picked --data-source=candles without specifying
-// --price-source, default to median observation (random-venue is
-// structurally impossible without per-venue data and would just throw).
-if (dataSource.kind === "candles" && priceSourceOverride === undefined) {
-  priceSourceOverride = { kind: "median" };
-}
-const baseOverrides: Partial<SimulationConfig> = {
-  startDate,
-  endDate,
-  validatorCount: parseInt(args.validators!),
-  seed: parseInt(args.seed!),
-  jitterStdDev: parseFloat(args.jitter!),
-  epsilon: parseEpsilonArg(args.epsilon!),
-  convergenceThreshold: parseFloat(args["convergence-threshold"]!),
-  dataSource,
-  ...(aggregatorOverride ? { aggregator: aggregatorOverride } : {}),
-  ...(priceSourceOverride ? { validatorPriceSource: priceSourceOverride } : {}),
-};
-
 ensureOutputDir(outputDir, !!args.force);
 
 const threadCount = parseInt(args.threads!);
@@ -329,16 +357,34 @@ if (args.scenario) {
     console.error(`Unknown scenario: ${args.scenario}. Available: ${listScenarios().join(", ")}`);
     process.exit(1);
   }
-  await scenarioFn(baseOverrides, priceSource, outputDir, threadCount);
+  const ctx: ScenarioCtx = {
+    startDate,
+    endDate,
+    seed,
+    convergenceThreshold,
+    realPrice,
+    aggregator: ctxAggregator,
+    priceSource: ctxPriceSource,
+    validatorCount,
+    defaultEpsilon: epsilon,
+  };
+  await scenarioFn(ctx, priceSource, outputDir, threadCount);
 } else {
   // Single simulation
-  const mix = parseMixCli(args.mix!);
-  const mixDesc = formatMix(mix);
+  const parsed = parseValidatorsCli(args.mix!, ctxPriceSource);
+  const honestPS: ValidatorPriceSource = parsed.honestJitter !== undefined
+    ? { ...ctxPriceSource, jitterStdDev: parsed.honestJitter }
+    : ctxPriceSource;
+  const validators = buildValidators(validatorCount, parsed.specs, ctxPriceSource, honestPS);
   const config: SimulationConfig = {
-    ...DEFAULT_CONFIG,
-    ...baseOverrides,
-    validatorMix: mix,
-    label: mixDesc,
+    startDate,
+    endDate,
+    seed,
+    convergenceThreshold,
+    realPrice,
+    aggregator: ctxAggregator,
+    label: formatValidators(validators),
+    validators,
   };
   console.log(`\n[Single simulation]`);
   const dirName = scenarioDirName(config.label, 0);
