@@ -84,6 +84,21 @@ export class Chain {
     });
     this.lastPrice = out.newPrice;
 
+    // Inherent composition. Abstains are excluded (they never end up in an
+    // inherent in practice, but the guard keeps the count semantically clean).
+    // Non-honest = any validator with isHonest === false (malicious, pushy,
+    // noop, delayed, drift). The percentage is reported alongside the raw
+    // counts so the CSV reader doesn't have to renormalize when comparing
+    // blocks with different inherent sizes.
+    let inherentTotal = 0;
+    let inherentNonHonest = 0;
+    for (const s of inherent) {
+      if (s.kind === "abstain") continue;
+      inherentTotal++;
+      if (!this.validators[s.validatorIndex].isHonest) inherentNonHonest++;
+    }
+    const inherentNonHonestPct = inherentTotal === 0 ? 0 : (inherentNonHonest / inherentTotal) * 100;
+
     const deviation = Math.abs(realPrice - this.lastPrice);
     const deviationPct = realPrice !== 0 ? (deviation / realPrice) * 100 : 0;
 
@@ -94,9 +109,13 @@ export class Chain {
       oraclePrice: this.lastPrice,
       authorIndex: author.index,
       authorIsHonest: author.isHonest,
+      authorType: author.type,
       totalBumps: out.totalBumps,
       activatedBumps: out.activatedBumps,
       netDirection: out.netDirection,
+      inherentTotal,
+      inherentNonHonest,
+      inherentNonHonestPct,
       deviation,
       deviationPct,
     };

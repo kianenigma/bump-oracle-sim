@@ -43,7 +43,6 @@ In each inherent, we go over all possible validators.
 The nudge aggregator can also have this, but it would simply be a noop, and the confidence of
 everyone remains at 1.
 
-
 # UI
 We should have a way to show the confidence metric of our validators in the UI. We should add a new
 tab, that contains this information. A simple chart would do, but I should be able to select

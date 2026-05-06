@@ -16,7 +16,7 @@ import type {
 import { DEFAULT_CONFIG, DEFAULT_PRICE_SOURCE, DEFAULT_VALIDATOR_COUNT } from "../config.js";
 import { runSimulation, type BlockSink } from "../sim/engine.js";
 import { maxBlockDelta } from "../data/interpolator.js";
-import { ChunkWriter, writeIndex, scenarioDirName } from "../viz/writer.js";
+import { ChunkWriter, CsvWriter, combineSinks, writeIndex, scenarioDirName } from "../viz/writer.js";
 import { loadCriteria } from "./research-criteria.js";
 import { generateReport } from "./research-report.js";
 import { buildValidators, formatValidators, type GroupSpec } from "../validators.js";
@@ -146,11 +146,10 @@ function nudgeAgg(ctx: ScenarioCtx, epsilon?: EpsilonSpec): AggregatorConfig {
 }
 
 function aggregatorLabel(cfg: AggregatorConfig): string {
-  switch (cfg.kind) {
-    case "nudge":  return "nudge";
-    case "median": return cfg.k && cfg.k > 0 ? `median(k=${cfg.k})` : "median";
-    case "mean":   return cfg.k && cfg.k > 0 ? `mean(k=${cfg.k})`   : "mean";
-  }
+  const parts: string[] = [];
+  if ((cfg.kind === "median" || cfg.kind === "mean") && cfg.k && cfg.k > 0) parts.push(`k=${cfg.k}`);
+  if (cfg.minInputs !== undefined) parts.push(`min=${cfg.minInputs}`);
+  return parts.length > 0 ? `${cfg.kind}(${parts.join(",")})` : cfg.kind;
 }
 
 /** Convert the legacy "ValidatorMix"-style record into GroupSpec[]. */
@@ -173,13 +172,15 @@ function runOne(
   outputDir: string | undefined,
   scenarioIndex: number,
 ): { result: SimulationResult; meta?: ScenarioMeta } {
-  let sink: BlockSink | undefined;
   let writer: ChunkWriter | undefined;
+  let csv: CsvWriter | undefined;
+  let sink: BlockSink | undefined;
 
   const dirName = scenarioDirName(config.label, scenarioIndex);
   if (outputDir) {
     writer = new ChunkWriter(join(outputDir, dirName));
-    sink = writer.sink;
+    csv = new CsvWriter(join(outputDir, `${dirName}.csv`));
+    sink = combineSinks(writer.sink, csv.sink);
   }
 
   const result = runSimulation(config, priceSource, sink);
@@ -187,6 +188,7 @@ function runOne(
   let meta: ScenarioMeta | undefined;
   if (writer) {
     const info = writer.finish();
+    csv?.finish();
     meta = {
       config: result.config,
       summary: result.summary,
@@ -549,15 +551,16 @@ export const scenarios: Record<string, ScenarioFn> = {
    * primarily author-side attacks under nudge — their quote translations are
    * weaker / structurally different. See TASKS.md §C.
    *
-   * Cross-product: 2 aggregators × (1 honest + 2 types × 4 fractions) = 18.
+   * Cross-product: 3 aggregators × (1 honest + 2 types × 4 fractions) = 27.
    */
   async "aggregator-comparison"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: aggregator-comparison]`);
     const aggregators: AggregatorConfig[] = [
       nudgeAgg(ctx),
-      { kind: "median" },
+      { kind: "median", minInputs: 0 },
+      { kind: "median", minInputs: Math.floor(2 * ctx.validatorCount / 3) + 1 },
     ];
-    const adversaryTypes: Exclude<ValidatorType, "honest">[] = ["malicious", "pushy"];
+    const adversaryTypes: Exclude<ValidatorType, "honest">[] = ["malicious", "pushy", "noop", "drift"];
     const fractions = [0.10, 0.33, 0.49, 0.5];
 
     const configs: SimulationConfig[] = [];

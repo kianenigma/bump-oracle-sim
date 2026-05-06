@@ -173,6 +173,50 @@ export async function loadChunk(outputDir: string, scenarioDir: string, chunkInd
   return Bun.file(path).json();
 }
 
+/**
+ * Streams a per-block CSV with the columns requested by the analyst:
+ *   block, timestamp, authorIndex, authorType, maliciousInherentPct,
+ *   oraclePrice, realPrice.
+ *
+ * One file per validator-mix run, written at the .simdata root so all
+ * scenarios in a batch sit side-by-side.
+ */
+export class CsvWriter {
+  private writer: ReturnType<ReturnType<typeof Bun.file>["writer"]>;
+
+  constructor(path: string) {
+    Bun.write(path, ""); // truncate
+    this.writer = Bun.file(path).writer();
+    this.writer.write(
+      "block,timestamp,authorIndex,authorType,inherentTotal,inherentNonHonest,inherentNonHonestPct,oraclePrice,realPrice,priceDiff\n",
+    );
+  }
+
+  get sink(): BlockSink {
+    return (m: BlockMetrics) => {
+      // Signed diff: oracle - real. Positive = oracle is above real.
+      const diff = m.oraclePrice - m.realPrice;
+      this.writer.write(
+        `${m.block},${m.timestamp},${m.authorIndex},${m.authorType},` +
+        `${m.inherentTotal},${m.inherentNonHonest},${m.inherentNonHonestPct.toFixed(4)},` +
+        `${m.oraclePrice},${m.realPrice},${diff}\n`,
+      );
+    };
+  }
+
+  finish(): void {
+    this.writer.end();
+  }
+}
+
+/** Compose multiple BlockSinks into one. Order of invocation is left-to-right. */
+export function combineSinks(...sinks: (BlockSink | undefined)[]): BlockSink | undefined {
+  const active = sinks.filter((s): s is BlockSink => s !== undefined);
+  if (active.length === 0) return undefined;
+  if (active.length === 1) return active[0];
+  return (m: BlockMetrics) => { for (const s of active) s(m); };
+}
+
 export function scenarioDirName(label: string, index: number): string {
   const slug = label
     .toLowerCase()

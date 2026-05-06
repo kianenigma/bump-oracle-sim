@@ -23,7 +23,7 @@ import {
   DriftValidator,
 } from "./malicious.js";
 import { Chain } from "./chain.js";
-import { makeAggregator } from "./aggregator.js";
+import { makeAggregator, defaultMinInputs } from "./aggregator.js";
 import { maxBlockDelta } from "../data/interpolator.js";
 import { BLOCK_TIME_SECONDS, DEFAULT_VALIDATOR_PARAMS } from "../config.js";
 import { totalValidators } from "../validators.js";
@@ -108,7 +108,9 @@ export function runSimulation(
 
   // Resolve aggregator + (if nudge) epsilon.
   const aggregatorCfg: AggregatorConfig = config.aggregator ?? DEFAULT_AGGREGATOR;
-  const aggregator = makeAggregator(aggregatorCfg);
+  const resolvedMinInputs = aggregatorCfg.minInputs ?? defaultMinInputs(aggregatorCfg.kind, validatorCount);
+  const aggregator = makeAggregator(aggregatorCfg, validatorCount);
+  if (!quiet) console.log(`  Aggregator min inputs: ${resolvedMinInputs}/${validatorCount}`);
   let epsilon = 0;
   let epsilonMode: EpsilonMode = "abs";
   if (aggregatorCfg.kind === "nudge") {
@@ -228,11 +230,16 @@ export function runSimulation(
     console.log(`  Max deviation rate: ${summary.maxDeviationRate.toFixed(6)} %/s`);
   }
 
-  // Persist the resolved aggregator (concrete numeric epsilon) so .simdata
-  // and the UI never have to re-resolve "auto".
+  // Persist the resolved aggregator (concrete numeric epsilon, concrete
+  // minInputs) so .simdata and the UI never have to re-resolve "auto" or
+  // the validator-count-dependent default.
   const resolvedAggregator: AggregatorConfig = aggregatorCfg.kind === "nudge"
-    ? { kind: "nudge", epsilon: epsilonMode === "ratio" ? { ratio: epsilon } : epsilon }
-    : aggregatorCfg;
+    ? {
+        kind: "nudge",
+        epsilon: epsilonMode === "ratio" ? { ratio: epsilon } : epsilon,
+        minInputs: resolvedMinInputs,
+      }
+    : { ...aggregatorCfg, minInputs: resolvedMinInputs };
 
   return { config: { ...config, aggregator: resolvedAggregator }, summary };
 }
@@ -240,9 +247,10 @@ export function runSimulation(
 /** Print a structured snapshot of the run config. Greppable, one block per sim. */
 function printConfig(config: SimulationConfig, pricePoints?: PricePoint[]): void {
   const agg = config.aggregator ?? DEFAULT_AGGREGATOR;
-  const aggStr = (agg.kind === "median" || agg.kind === "mean") && agg.k && agg.k > 0
-    ? `${agg.kind}(k=${agg.k})`
-    : agg.kind;
+  const aggParts: string[] = [];
+  if ((agg.kind === "median" || agg.kind === "mean") && agg.k && agg.k > 0) aggParts.push(`k=${agg.k}`);
+  if (agg.minInputs !== undefined) aggParts.push(`minInputs=${agg.minInputs}`);
+  const aggStr = aggParts.length > 0 ? `${agg.kind}(${aggParts.join(", ")})` : agg.kind;
 
   // Build a one-liner mix string from the validators array.
   const total = totalValidators(config.validators);

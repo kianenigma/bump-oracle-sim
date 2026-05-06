@@ -27,7 +27,7 @@ import {
 } from "./validators.js";
 import { loadPriceSource } from "./data/source.js";
 import { runSimulation } from "./sim/engine.js";
-import { ChunkWriter, writeIndex, loadIndex, scenarioDirName } from "./viz/writer.js";
+import { ChunkWriter, CsvWriter, combineSinks, writeIndex, loadIndex, scenarioDirName } from "./viz/writer.js";
 import { startServer } from "./viz/server.js";
 import { scenarios, listScenarios, type ScenarioCtx } from "./analysis/scenarios.js";
 import { loadCriteria } from "./analysis/research-criteria.js";
@@ -389,8 +389,10 @@ if (args.scenario) {
   console.log(`\n[Single simulation]`);
   const dirName = scenarioDirName(config.label, 0);
   const writer = new ChunkWriter(join(outputDir, dirName));
-  const result = runSimulation(config, priceSource, writer.sink);
+  const csv = new CsvWriter(join(outputDir, `${dirName}.csv`));
+  const result = runSimulation(config, priceSource, combineSinks(writer.sink, csv.sink));
   const info = writer.finish();
+  csv.finish();
 
   const meta: ScenarioMeta = {
     config: result.config,

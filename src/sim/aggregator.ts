@@ -34,13 +34,27 @@ export interface Aggregator {
 // price' = lastPrice + (Σ activated bumps) × ε.
 // `inputs` carries everyone's gossiped nudges (for the totalBumps metric);
 // `inherent` is the author's selection — only those count toward the price.
+//
+// `minInputs` defaults to 0 — a sparse inherent already holds price naturally
+// (net = 0 → no bump). The knob is exposed for symmetry with the quote
+// aggregators, not because nudge needs it.
 export class NudgeAggregator implements Aggregator {
   readonly mode = "nudge" as const;
   readonly inputKind = "nudge" as const;
 
+  constructor(private minInputs: number = 0) {
+    if (minInputs < 0) throw new Error(`nudge minInputs must be ≥ 0, got ${minInputs}`);
+  }
+
   apply(ctx: AggregatorContext): AggregateOutcome {
     let totalBumps = 0;
     for (const s of ctx.inputs) if (s.kind === "nudge") totalBumps++;
+
+    let nudgeCount = 0;
+    for (const s of ctx.inherent) if (s.kind === "nudge") nudgeCount++;
+    if (nudgeCount < this.minInputs) {
+      return { newPrice: ctx.lastPrice, totalBumps, activatedBumps: 0, netDirection: 0 };
+    }
 
     let net = 0;
     let activated = 0;
@@ -81,14 +95,15 @@ export class MedianAggregator implements Aggregator {
   readonly mode = "median" as const;
   readonly inputKind = "quote" as const;
 
-  constructor(private k: number = 0) {
+  constructor(private k: number = 0, private minInputs: number = 0) {
     if (k < 0 || k >= 0.5) throw new Error(`median k must be in [0, 0.5), got ${k}`);
+    if (minInputs < 0) throw new Error(`median minInputs must be ≥ 0, got ${minInputs}`);
   }
 
   apply(ctx: AggregatorContext): AggregateOutcome {
     const totalQuotes = countQuotes(ctx.inputs);
     const quotes = collectQuotes(ctx.inherent);
-    if (quotes.length === 0) {
+    if (quotes.length < this.minInputs || quotes.length === 0) {
       return { newPrice: ctx.lastPrice, totalBumps: totalQuotes, activatedBumps: 0, netDirection: 0 };
     }
     const { sorted, trim } = sortAndTrim(quotes, this.k);
@@ -113,14 +128,15 @@ export class MeanAggregator implements Aggregator {
   readonly mode = "mean" as const;
   readonly inputKind = "quote" as const;
 
-  constructor(private k: number = 0) {
+  constructor(private k: number = 0, private minInputs: number = 0) {
     if (k < 0 || k >= 0.5) throw new Error(`mean k must be in [0, 0.5), got ${k}`);
+    if (minInputs < 0) throw new Error(`mean minInputs must be ≥ 0, got ${minInputs}`);
   }
 
   apply(ctx: AggregatorContext): AggregateOutcome {
     const totalQuotes = countQuotes(ctx.inputs);
     const quotes = collectQuotes(ctx.inherent);
-    if (quotes.length === 0) {
+    if (quotes.length < this.minInputs || quotes.length === 0) {
       return { newPrice: ctx.lastPrice, totalBumps: totalQuotes, activatedBumps: 0, netDirection: 0 };
     }
     const { sorted, trim } = sortAndTrim(quotes, this.k);
@@ -140,11 +156,21 @@ export class MeanAggregator implements Aggregator {
 
 // ── Factory ─────────────────────────────────────────────────────────────────
 
-export function makeAggregator(cfg: AggregatorConfig): Aggregator {
+/** Polkadot assumes ≥ 2/3 honest validators. Requiring `floor(2/3·N) + 1`
+ *  inputs to update guarantees that more than half of the contributing
+ *  data points come from honest validators, protecting median (and bounding
+ *  the influence on mean). For nudge, the natural default is 0. */
+export function defaultMinInputs(kind: AggregatorConfig["kind"], validatorCount: number): number {
+  if (kind === "nudge") return 0;
+  return Math.floor((2 / 3) * validatorCount) + 1;
+}
+
+export function makeAggregator(cfg: AggregatorConfig, validatorCount: number): Aggregator {
+  const minInputs = cfg.minInputs ?? defaultMinInputs(cfg.kind, validatorCount);
   switch (cfg.kind) {
-    case "nudge":  return new NudgeAggregator();
-    case "median": return new MedianAggregator(cfg.k ?? 0);
-    case "mean":   return new MeanAggregator(cfg.k ?? 0);
+    case "nudge":  return new NudgeAggregator(minInputs);
+    case "median": return new MedianAggregator(cfg.k ?? 0, minInputs);
+    case "mean":   return new MeanAggregator(cfg.k ?? 0, minInputs);
   }
 }
 

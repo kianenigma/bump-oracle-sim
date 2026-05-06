@@ -44,10 +44,17 @@ export type AggregatorMode = "nudge" | "median" | "mean";
 export type EpsilonSpec = number | "auto" | { ratio: number };
 export type EpsilonMode = "abs" | "ratio";
 
+// `minInputs`: minimum number of relevant submissions in the inherent for the
+// aggregator to update the price. If fewer arrive, the price is held.
+//   nudge  default = 0      (a 0-bump inherent already holds price naturally)
+//   median default = floor(2/3 × N) + 1   (≥ 50%+1 must be honest under
+//   mean   default = floor(2/3 × N) + 1    Polkadot's 2/3-honest assumption,
+//                                          so the median/mean is protected)
+// Defaults are resolved by the engine once it knows N.
 export type AggregatorConfig =
-  | { kind: "nudge"; epsilon: EpsilonSpec }
-  | { kind: "median"; k?: number }    // k = fraction trimmed from each tail before median; default 0
-  | { kind: "mean"; k?: number };     // k = fraction trimmed from each tail before mean;   default 0
+  | { kind: "nudge"; epsilon: EpsilonSpec; minInputs?: number }
+  | { kind: "median"; k?: number; minInputs?: number }    // k = fraction trimmed from each tail before median; default 0
+  | { kind: "mean"; k?: number; minInputs?: number };     // k = fraction trimmed from each tail before mean;   default 0
 
 export function aggregatorMode(cfg: AggregatorConfig): AggregatorMode {
   return cfg.kind;
@@ -165,9 +172,16 @@ export interface BlockMetrics {
   oraclePrice: number;
   authorIndex: number;
   authorIsHonest: boolean;
+  authorType: ValidatorType;
   totalBumps: number;
   activatedBumps: number;
   netDirection: number; // positive = up, negative = down
+  /** Number of non-abstain submissions the author placed in the inherent. */
+  inherentTotal: number;
+  /** Of `inherentTotal`, how many came from non-honest validators. */
+  inherentNonHonest: number;
+  /** Convenience: 100 × inherentNonHonest / inherentTotal. 0 if empty. */
+  inherentNonHonestPct: number;
   deviation: number; // absolute difference real - oracle
   deviationPct: number; // percentage deviation
 }

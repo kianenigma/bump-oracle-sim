@@ -21,9 +21,9 @@ export const DEFAULT_PRICE_SOURCE: ValidatorPriceSource = {
 // group's `params` is missing or partial.
 export const DEFAULT_VALIDATOR_PARAMS: Required<ValidatorParams> = {
   delayBlocks: 10,             // 60s at 6s blocks
-  pushyQuoteBias: 0.05,        // 5% outlier in motion direction (quote mode)
-  maliciousQuoteBias: 0.05,    // 5% outlier OPPOSITE motion (quote mode)
-  driftQuoteStep: 0.001,       // 0.1% upward bias per block (quote mode)
+  pushyQuoteBias: 0.1,        // 5% outlier in motion direction (quote mode)
+  maliciousQuoteBias: 0.1,    // 5% outlier OPPOSITE motion (quote mode)
+  driftQuoteStep: 0.1,       // 0.1% upward bias per block (quote mode)
 };
 
 export const DEFAULT_VALIDATOR_COUNT = 300;
