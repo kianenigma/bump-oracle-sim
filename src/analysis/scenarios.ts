@@ -83,6 +83,7 @@ const COMPARISON_PARAMS: Required<ValidatorParams> = {
   pushyQuoteBias: 0.5,
   maliciousQuoteBias: 0.5,
   driftQuoteStep: 0.1,
+  withholderDirection: "up",
 };
 
 // ── Scenario context ────────────────────────────────────────────────────────
@@ -189,6 +190,13 @@ function runOne(
   if (writer) {
     const info = writer.finish();
     csv?.finish();
+    // Per-validator-index type vector. Cheap to always emit (N strings) and
+    // unconditionally useful for any client that wants per-validator labels
+    // — including the Confidence tab in the UI.
+    const validatorTypes: ValidatorType[] = [];
+    for (const g of result.config.validators) {
+      for (let i = 0; i < g.count; i++) validatorTypes.push(g.type);
+    }
     meta = {
       config: result.config,
       summary: result.summary,
@@ -197,6 +205,7 @@ function runOne(
       timeRange: info.timeRange,
       chunkTimeRanges: info.chunkTimeRanges,
       dir: dirName,
+      validatorTypes,
     };
   }
 
@@ -558,7 +567,7 @@ export const scenarios: Record<string, ScenarioFn> = {
     const aggregators: AggregatorConfig[] = [
       nudgeAgg(ctx),
       { kind: "median", minInputs: 0 },
-      { kind: "median", minInputs: Math.floor(2 * ctx.validatorCount / 3) + 1 },
+      { kind: "median", minInputs: Math.floor(2 * ctx.validatorCount / 3) },
     ];
     const adversaryTypes: Exclude<ValidatorType, "honest">[] = ["malicious", "pushy", "noop", "drift"];
     const fractions = [0.10, 0.33, 0.49, 0.5];
@@ -622,6 +631,85 @@ export const scenarios: Record<string, ScenarioFn> = {
     }
 
     console.log(`  Grid: ${obsKinds.length} obs modes × ${aggregators.length} aggregators × ${fractions.length} fractions = ${configs.length}`);
+    return runBatch(configs, priceSource, outputDir, threadCount);
+  },
+
+  /**
+   * Withholder demonstration. The `withholder` validator is a coordinated
+   * 1/3-cabal that abstains *only* when honest publication would push the
+   * oracle in a chosen direction. At 1/3 saturation this trips the default
+   *  median minInputs = 2N/3 + 1 freeze-branch — but selectively, so the
+   * oracle ratchets only against the attack direction.
+   *
+   * Compares against existing 1/3-cabals (malicious, pushy — bounded by
+   * jitter; noop — full freeze). Confidence tracking is OFF here so the
+   * raw attack is visible. See `withholder-vs-confidence` for the defended
+   * version.
+   */
+  async "withholder-baseline"(ctx, priceSource, outputDir, threadCount) {
+    console.log(`\n[Scenario: withholder-baseline]`);
+    const f = 1 / 3;
+    const configs: SimulationConfig[] = [
+      makeConfig(ctx, [], "baseline-honest"),
+      makeConfig(ctx, [{ type: "malicious", fraction: f }], "malicious-1/3"),
+      makeConfig(ctx, [{ type: "pushy",     fraction: f }], "pushy-1/3"),
+      makeConfig(ctx, [{ type: "noop",      fraction: f }], "noop-1/3"),
+      makeConfig(ctx, [{ type: "withholder", fraction: f, params: { withholderDirection: "up" } }],
+                 "withholder-up-1/3"),
+      makeConfig(ctx, [{ type: "withholder", fraction: f, params: { withholderDirection: "down" } }],
+                 "withholder-down-1/3"),
+    ];
+    return runBatch(configs, priceSource, outputDir, threadCount);
+  },
+
+  /**
+   * Same threat model as `withholder-baseline`, but with the default
+   * confidence-update callback wired into the median aggregator. After ~100
+   * blocks of selective abstention, withholders hit confidence 0 and are
+   * permanently excluded. The active set drops to the honest 200 and the
+   * rescaled minInputs (~134) lets the chain continue cleanly.
+   */
+  async "withholder-vs-confidence"(ctx, priceSource, outputDir, threadCount) {
+    console.log(`\n[Scenario: withholder-vs-confidence]`);
+    const f = 1 / 3;
+    const aggWithConfidence: AggregatorConfig = {
+      kind: "median",
+      confidence: "default",
+      permanentExclusion: true,
+    };
+    const configs: SimulationConfig[] = [
+      makeConfig(ctx, [], "baseline-honest", aggWithConfidence),
+      makeConfig(ctx, [{ type: "malicious", fraction: f }], "malicious-1/3", aggWithConfidence),
+      makeConfig(ctx, [{ type: "pushy",     fraction: f }], "pushy-1/3",     aggWithConfidence),
+      makeConfig(ctx, [{ type: "noop",      fraction: f }], "noop-1/3",      aggWithConfidence),
+      makeConfig(ctx, [{ type: "withholder", fraction: f, params: { withholderDirection: "up" } }],
+                 "withholder-up-1/3", aggWithConfidence),
+      makeConfig(ctx, [{ type: "withholder", fraction: f, params: { withholderDirection: "down" } }],
+                 "withholder-down-1/3", aggWithConfidence),
+    ];
+    return runBatch(configs, priceSource, outputDir, threadCount);
+  },
+
+  /**
+   * Sanity check: confidence tracking should NOT punish honest validators
+   * even at higher-than-default jitter, and should expose how it treats
+   * `delayed` validators (honest intent, stale observation). Useful for
+   * spotting bad parameter choices in the default callback.
+   */
+  async "confidence-stress"(ctx, priceSource, outputDir, threadCount) {
+    console.log(`\n[Scenario: confidence-stress]`);
+    const aggWithConfidence: AggregatorConfig = {
+      kind: "median",
+      confidence: "default",
+      permanentExclusion: true,
+    };
+    const highJitter: ValidatorPriceSource = { ...ctx.priceSource, jitterStdDev: 0.005 };
+    const ctxHigh: ScenarioCtx = { ...ctx, priceSource: highJitter };
+    const configs: SimulationConfig[] = [
+      makeConfig(ctx,     [], "100% honest, default jitter", aggWithConfidence),
+      makeConfig(ctxHigh, [], "100% honest, 5x jitter",      aggWithConfidence),
+      makeConfig(ctx,     [{ type: "delayed", fraction: 1 / 3 }], "33% delayed", aggWithConfidence),
+    ];
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 };

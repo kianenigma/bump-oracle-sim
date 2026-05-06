@@ -6,6 +6,8 @@ import type {
   BlockChunk,
   ApiMetaResponse,
   ApiDataResponse,
+  ApiConfidenceResponse,
+  ConfidenceSeries,
   LinePoint,
   ValidatorGroup,
   ValidatorType,
@@ -254,6 +256,96 @@ async function buildDataResponse(
   };
 }
 
+// ── Confidence API ──────────────────────────────────────────────────────────
+
+/** Load (timestamp, sampleVector) pairs from sampled chunks within [from, to]. */
+async function loadConfidenceSamples(
+  outputDir: string,
+  scenarioIndex: number,
+  meta: ScenarioMeta,
+  from: number,
+  to: number,
+): Promise<Array<{ timestamp: number; sample: number[] }>> {
+  const out: Array<{ timestamp: number; sample: number[] }> = [];
+  const dir = scenarioDir(meta, scenarioIndex);
+  for (let c = 0; c < meta.chunkCount; c++) {
+    if (meta.chunkTimeRanges && meta.chunkTimeRanges[c]) {
+      const cr = meta.chunkTimeRanges[c];
+      if (cr.to < from || cr.from > to) continue;
+    }
+    const chunk = await loadChunkCached(outputDir, dir, c);
+    const cs = chunk.confidenceSamples;
+    if (!cs || cs.ticks.length === 0) continue;
+    for (let i = 0; i < cs.ticks.length; i++) {
+      const tick = cs.ticks[i];
+      const ts = chunk.timestamps[tick];
+      if (ts < from || ts > to) continue;
+      out.push({ timestamp: ts, sample: cs.samples[i] });
+    }
+  }
+  return out;
+}
+
+/** Build per-type aggregate (mean confidence) lines + optional per-validator
+ *  lines from the loaded samples. */
+function buildConfidenceSeries(
+  samples: Array<{ timestamp: number; sample: number[] }>,
+  validatorTypes: ValidatorType[],
+  includeIndices: number[] | null,
+): { typeAggregates: ConfidenceSeries[]; perValidator?: ConfidenceSeries[] } {
+  // Discover type buckets present.
+  const typeIndices = new Map<ValidatorType, number[]>();
+  for (let i = 0; i < validatorTypes.length; i++) {
+    const t = validatorTypes[i];
+    let bucket = typeIndices.get(t);
+    if (!bucket) {
+      bucket = [];
+      typeIndices.set(t, bucket);
+    }
+    bucket.push(i);
+  }
+
+  const typeAggregates: ConfidenceSeries[] = [];
+  for (const [type, indices] of typeIndices) {
+    const points: LinePoint[] = [];
+    for (const s of samples) {
+      let sum = 0;
+      let count = 0;
+      for (const idx of indices) {
+        const v = s.sample[idx];
+        if (typeof v === "number") {
+          sum += v;
+          count++;
+        }
+      }
+      points.push({ time: s.timestamp, value: count > 0 ? sum / count : 0 });
+    }
+    typeAggregates.push({
+      validatorIndex: -1,
+      type,
+      label: `${type} aggregate (${indices.length})`,
+      points,
+    });
+  }
+
+  let perValidator: ConfidenceSeries[] | undefined;
+  if (includeIndices && includeIndices.length > 0) {
+    perValidator = includeIndices.map((idx) => {
+      const points: LinePoint[] = samples.map((s) => ({
+        time: s.timestamp,
+        value: s.sample[idx] ?? 0,
+      }));
+      return {
+        validatorIndex: idx,
+        type: validatorTypes[idx] ?? "honest",
+        points,
+      };
+    });
+  }
+
+  return { typeAggregates, perValidator };
+}
+
 export async function startServer(
   outputDir: string,
   port: number,
@@ -340,6 +432,64 @@ export async function startServer(
         });
 
         return new Response(JSON.stringify({ block, timestamp: blockTimestamp, authors }), {
+          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        });
+      }
+
+      if (url.pathname === "/api/confidence") {
+        const scenarioRaw = url.searchParams.get("scenario") ?? "0";
+        const from = parseFloat(url.searchParams.get("from") ?? "0");
+        const to = parseFloat(url.searchParams.get("to") ?? String(Date.now() / 1000));
+        const validatorsParam = url.searchParams.get("validators");
+
+        const scenarioIndex = parseInt(scenarioRaw);
+        if (isNaN(scenarioIndex) || scenarioIndex < 0 || scenarioIndex >= index.scenarios.length) {
+          return new Response(JSON.stringify({ error: "Invalid scenario index" }), {
+            status: 400,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+        if (filterIndices && !filterIndices.includes(scenarioIndex)) {
+          return new Response(JSON.stringify({ error: "Scenario not allowed" }), {
+            status: 403,
+            headers: { "Content-Type": "application/json" },
+          });
+        }
+
+        const meta = index.scenarios[scenarioIndex];
+        const validatorTypes = meta.validatorTypes;
+        if (!validatorTypes) {
+          // Confidence tracking wasn't enabled for this scenario.
+          const empty: ApiConfidenceResponse = {
+            scenarioIndex,
+            from,
+            to,
+            typeAggregates: [],
+            validatorTypes: [],
+          };
+          return new Response(JSON.stringify(empty), {
+            headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+          });
+        }
+
+        const includeIndices = validatorsParam
+          ? validatorsParam
+              .split(",")
+              .map((s) => parseInt(s.trim()))
+              .filter((n) => !isNaN(n) && n >= 0 && n < validatorTypes.length)
+          : null;
+
+        const samples = await loadConfidenceSamples(outputDir, scenarioIndex, meta, from, to);
+        const { typeAggregates, perValidator } = buildConfidenceSeries(samples, validatorTypes, includeIndices);
+        const resp: ApiConfidenceResponse = {
+          scenarioIndex,
+          from,
+          to,
+          typeAggregates,
+          ...(perValidator ? { perValidator } : {}),
+          validatorTypes,
+        };
+        return new Response(JSON.stringify(resp), {
           headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
         });
       }

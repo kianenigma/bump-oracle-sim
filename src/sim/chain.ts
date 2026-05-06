@@ -116,6 +116,7 @@ export class Chain {
       inherentTotal,
       inherentNonHonest,
       inherentNonHonestPct,
+      priceUpdated: out.priceUpdated,
       deviation,
       deviationPct,
     };

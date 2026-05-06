@@ -21,11 +21,12 @@ import {
   NoopValidator,
   DelayedValidator,
   DriftValidator,
+  WithholderValidator,
 } from "./malicious.js";
 import { Chain } from "./chain.js";
 import { makeAggregator, defaultMinInputs } from "./aggregator.js";
 import { maxBlockDelta } from "../data/interpolator.js";
-import { BLOCK_TIME_SECONDS, DEFAULT_VALIDATOR_PARAMS } from "../config.js";
+import { BLOCK_TIME_SECONDS, CONFIDENCE_SAMPLE_INTERVAL, DEFAULT_VALIDATOR_PARAMS } from "../config.js";
 import { totalValidators } from "../validators.js";
 
 // Constructor signature shared by every validator type. The unified ctor
@@ -46,6 +47,7 @@ const VALIDATOR_REGISTRY: Record<ValidatorGroup["type"], ValidatorCtor> = {
   noop: NoopValidator,
   delayed: DelayedValidator,
   drift: DriftValidator,
+  withholder: WithholderValidator,
 };
 
 export type BlockSink = (block: BlockMetrics) => void;
@@ -165,8 +167,16 @@ export function runSimulation(
   }
 
   const progressInterval = Math.max(1, Math.floor(totalBlocks / 100));
+  // Sample the first block (i==0) and every CONFIDENCE_SAMPLE_INTERVAL after.
+  // The chain doesn't know about sampling — engine attaches the snapshot
+  // to BlockMetrics and the writer persists it.
+  const sampleConfidence = aggregator.tracksConfidence;
   for (let i = 0; i < totalBlocks; i++) {
     const m = chain.nextBlock();
+
+    if (sampleConfidence && (i % CONFIDENCE_SAMPLE_INTERVAL === 0 || i === totalBlocks - 1)) {
+      m.confidenceSnapshot = aggregator.confidenceSnapshot();
+    }
 
     if (prevBlock !== null) {
       const devEnd = m.realPrice !== 0

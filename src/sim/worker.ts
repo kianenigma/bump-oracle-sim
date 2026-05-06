@@ -1,7 +1,7 @@
 import { join } from "path";
 import { runSimulation } from "./engine.js";
 import { ChunkWriter, CsvWriter, combineSinks, scenarioDirName } from "../viz/writer.js";
-import type { ResolvedPriceSource, SimulationConfig, ScenarioMeta } from "../types.js";
+import type { ResolvedPriceSource, SimulationConfig, ScenarioMeta, ValidatorType } from "../types.js";
 
 declare var self: Worker;
 
@@ -39,6 +39,10 @@ self.onmessage = (event: MessageEvent) => {
     if (writer) {
       const info = writer.finish();
       csv?.finish();
+      const validatorTypes: ValidatorType[] = [];
+      for (const g of result.config.validators) {
+        for (let i = 0; i < g.count; i++) validatorTypes.push(g.type);
+      }
       meta = {
         config: result.config,
         summary: result.summary,
@@ -47,6 +51,7 @@ self.onmessage = (event: MessageEvent) => {
         timeRange: info.timeRange,
         chunkTimeRanges: info.chunkTimeRanges,
         dir: dirName,
+        validatorTypes,
       };
     }
 

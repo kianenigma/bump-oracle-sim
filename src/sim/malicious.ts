@@ -205,6 +205,70 @@ export class DelayedValidator extends BaseValidator {
   }
 }
 
+// ── WithholderValidator ─────────────────────────────────────────────────────
+// Coordinated 1/3-cabal attack on the median + (2/3+1) min-inputs rule.
+//
+// Each withholder abstains iff its honest observation would push the oracle
+// in `params.withholderDirection`; otherwise it submits an honest quote. At
+// 1/3 saturation, simultaneous abstention drops the inherent quote count
+// from N to (2N/3) — one short of the default `minInputs = 2N/3 + 1` — so
+// the aggregator holds price for that block. The chain therefore moves only
+// AGAINST the attack direction, and the oracle ratchets systematically
+// away from real over any period in which real drifts in the suppressed
+// direction.
+//
+// Coordination is implicit: every withholder evaluates the same condition
+// against the same observable (its own jittered observation vs lastPrice).
+// No shared state / message-passing assumption is needed.
+//
+// Defence: confidence tracking. After ~100 abstain blocks the cabal hits
+// confidence=0, gets excluded, the active set shrinks to the honest 200,
+// and the rescaled minInputs lets the chain resume on honests alone.
+export class WithholderValidator extends BaseValidator {
+  readonly type: ValidatorType = "withholder";
+
+  /** True iff publishing an honest quote would push the oracle in the
+   *  attack direction (and so we want to abstain). */
+  private suppressing(observed: number, lastPrice: number): boolean {
+    return this.params.withholderDirection === "up"
+      ? observed > lastPrice
+      : observed < lastPrice;
+  }
+
+  produceInput(inputKind: InputKind, ctx: ProduceCtx): Submission {
+    const observed = this.observe(ctx.blockIndex);
+    if (this.suppressing(observed, ctx.lastPrice)) {
+      // Same shape works for both nudge and quote: aggregator filters
+      // abstains, and minInputs is what we're trying to break. (Nudge
+      // mode default minInputs=0 → no freeze possible there; the attack
+      // is meaningful for median/mean only.)
+      return { kind: "abstain", validatorIndex: this.index };
+    }
+    if (inputKind === "nudge") {
+      return { kind: "nudge", validatorIndex: this.index, bump: observed >= ctx.lastPrice ? Bump.Up : Bump.Down };
+    }
+    return { kind: "quote", validatorIndex: this.index, price: observed };
+  }
+
+  produceInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
+    if (inputs.length === 0) return [];
+    const observed = this.observe(ctx.blockIndex);
+    if (this.suppressing(observed, ctx.lastPrice)) {
+      // Reinforce the freeze on the rare blocks where a withholder authors
+      // and we're suppressing this round.
+      return [];
+    }
+    if (inputs[0].kind === "quote" || inputs[0].kind === "abstain") {
+      return passThroughQuotes(inputs);
+    }
+    // Nudge mode (cooperating block): honest pass-through.
+    const diff = observed - ctx.lastPrice;
+    const direction = diff >= 0 ? Bump.Up : Bump.Down;
+    const needed = optimalBumpCount(Math.abs(diff), ctx.epsilon, inputs.length);
+    return pickInDirectionBumps(inputs, direction, needed);
+  }
+}
+
 // ── DriftValidator ──────────────────────────────────────────────────────────
 // Persistent upward bias, regardless of real price.
 //   Nudge: always Up; as author activates all Up bumps.

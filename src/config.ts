@@ -24,7 +24,14 @@ export const DEFAULT_VALIDATOR_PARAMS: Required<ValidatorParams> = {
   pushyQuoteBias: 0.1,        // 5% outlier in motion direction (quote mode)
   maliciousQuoteBias: 0.1,    // 5% outlier OPPOSITE motion (quote mode)
   driftQuoteStep: 0.1,       // 0.1% upward bias per block (quote mode)
+  withholderDirection: "up",  // suppress upward oracle moves by default
 };
+
+// How often to snapshot the confidence vector into BlockMetrics. With a 6s
+// block time, 600 blocks ≈ 1h. The snapshots feed the UI confidence chart;
+// finer sampling = bigger .simdata. Storage: ~600 samples/h × 24h × 10d × N
+// floats ≈ 70MB at N=300, well within reason.
+export const CONFIDENCE_SAMPLE_INTERVAL = 600;
 
 export const DEFAULT_VALIDATOR_COUNT = 300;
 

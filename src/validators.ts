@@ -206,7 +206,7 @@ export function parseValidatorsCli(
     }
 
     if (!isValidatorType(name) || name === "honest") {
-      console.error(`Unknown validator type "${name}" in --mix. Available: malicious, pushy, noop, delayed, drift.`);
+      console.error(`Unknown validator type "${name}" in --mix. Available: malicious, pushy, noop, delayed, drift, withholder.`);
       process.exit(1);
     }
 
@@ -221,5 +221,6 @@ export function parseValidatorsCli(
 }
 
 function isValidatorType(s: string): s is ValidatorType {
-  return s === "honest" || s === "malicious" || s === "pushy" || s === "noop" || s === "delayed" || s === "drift";
+  return s === "honest" || s === "malicious" || s === "pushy" || s === "noop"
+    || s === "delayed" || s === "drift" || s === "withholder";
 }

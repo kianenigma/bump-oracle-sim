@@ -51,10 +51,22 @@ export type EpsilonMode = "abs" | "ratio";
 //   mean   default = floor(2/3 × N) + 1    Polkadot's 2/3-honest assumption,
 //                                          so the median/mean is protected)
 // Defaults are resolved by the engine once it knows N.
+// `confidence`: opt-in confidence-tracking + exclusion policy. See
+// src/sim/aggregator.ts for the callback. "off" (default) is the legacy
+// behaviour: no per-validator state, no exclusion. "default" wires in
+// `defaultConfidenceUpdate`, which slowly rewards quotes near the final
+// price and penalises absence + far-from-median quotes; once a validator
+// hits 0 confidence they are excluded from future aggregation.
+//
+// `permanentExclusion`: when a validator's confidence first reaches 0,
+// is the exclusion sticky (cannot recover) or transient (recovers when
+// the callback raises confidence again). Default true.
+export type ConfidencePolicy = "off" | "default";
+
 export type AggregatorConfig =
   | { kind: "nudge"; epsilon: EpsilonSpec; minInputs?: number }
-  | { kind: "median"; k?: number; minInputs?: number }    // k = fraction trimmed from each tail before median; default 0
-  | { kind: "mean"; k?: number; minInputs?: number };     // k = fraction trimmed from each tail before mean;   default 0
+  | { kind: "median"; k?: number; minInputs?: number; confidence?: ConfidencePolicy; permanentExclusion?: boolean }
+  | { kind: "mean";   k?: number; minInputs?: number; confidence?: ConfidencePolicy; permanentExclusion?: boolean; weighted?: boolean };
 
 export function aggregatorMode(cfg: AggregatorConfig): AggregatorMode {
   return cfg.kind;
@@ -126,7 +138,7 @@ export interface ResolvedPriceSource {
 // old top-level (validatorCount, validatorMix, jitterStdDev,
 // validatorPriceSource, maliciousParams) bundle. A simulation's full
 // validator set is the concatenation of all groups, in order.
-export type ValidatorType = "honest" | "malicious" | "pushy" | "noop" | "delayed" | "drift";
+export type ValidatorType = "honest" | "malicious" | "pushy" | "noop" | "delayed" | "drift" | "withholder";
 
 /** Type-specific behavior knobs. Required keys depend on `type`:
  *    delayed   → delayBlocks
@@ -145,6 +157,12 @@ export interface ValidatorParams {
   maliciousQuoteBias?: number;
   /** drift: quote-mode per-block multiplicative bias. */
   driftQuoteStep?: number;
+  /** withholder: which direction of oracle motion the cabal suppresses.
+   *  "up"   = abstain when honest observation > lastPrice (oracle never rises)
+   *  "down" = abstain when honest observation < lastPrice (oracle never falls)
+   *  Coordination is implicit: every withholder evaluates the same condition
+   *  against (its observation, lastPrice) — no shared state needed. */
+  withholderDirection?: "up" | "down";
 }
 
 export interface ValidatorGroup {
@@ -182,8 +200,17 @@ export interface BlockMetrics {
   inherentNonHonest: number;
   /** Convenience: 100 × inherentNonHonest / inherentTotal. 0 if empty. */
   inherentNonHonestPct: number;
+  /** True iff the aggregator computed a fresh price this block. False when
+   *  the minInputs gate fired (or the inherent was empty) and the runtime
+   *  held `lastPrice`. */
+  priceUpdated: boolean;
   deviation: number; // absolute difference real - oracle
   deviationPct: number; // percentage deviation
+  /** Sampled confidence vector, populated only on every Nth block (see
+   *  CONFIDENCE_SAMPLE_INTERVAL). One entry per validator, in [0, 1].
+   *  null on non-sampled blocks AND when the aggregator has confidence
+   *  tracking disabled. */
+  confidenceSnapshot?: Float32Array | null;
 }
 
 // ── SimulationConfig ────────────────────────────────────────────────────────
@@ -257,6 +284,11 @@ export interface BlockChunk {
   realPrices: number[];
   oraclePrices: number[];
   deviationPcts: number[];
+  /** Optional: sparse confidence samples for this chunk. `tick` indexes are
+   *  block offsets within the chunk (0..blockCount-1). Each entry of
+   *  `samples` is a length-N array (one per validator). Absent when the
+   *  scenario didn't track confidence. */
+  confidenceSamples?: { ticks: number[]; samples: number[][] };
 }
 
 export interface ScenarioMeta {
@@ -269,6 +301,10 @@ export interface ScenarioMeta {
   chunkTimeRanges?: Array<{ from: number; to: number }>;
   /** Directory name within the .simdata dir (absent in legacy dirs → falls back to scenario_<idx>). */
   dir?: string;
+  /** When confidence tracking was on, this is the per-validator-index type
+   *  string (e.g. ["honest", "honest", ..., "withholder", ...]). Used by the
+   *  UI's confidence tab to label/colour validators. Absent when off. */
+  validatorTypes?: ValidatorType[];
 }
 
 export interface SimDataIndex {
@@ -325,4 +361,26 @@ export interface ApiDataResponse {
   /** Per-venue price lines, present only when the .simdata was produced from
    *  trade data. Keyed by VenueId. Each is downsampled for the visible window. */
   venues?: Record<string, LinePoint[]>;
+}
+
+// ── Confidence API ──
+export interface ConfidenceSeries {
+  /** Validator index, or -1 to indicate a per-type aggregate. */
+  validatorIndex: number;
+  type: ValidatorType;
+  /** Optional label for aggregates (e.g. "honest aggregate"). */
+  label?: string;
+  points: LinePoint[];
+}
+
+export interface ApiConfidenceResponse {
+  scenarioIndex: number;
+  from: number;
+  to: number;
+  /** Type aggregates (always present, one per type with at least one validator). */
+  typeAggregates: ConfidenceSeries[];
+  /** Per-validator series (only when explicitly requested). */
+  perValidator?: ConfidenceSeries[];
+  /** Validator index → type mapping for the whole scenario. */
+  validatorTypes: ValidatorType[];
 }

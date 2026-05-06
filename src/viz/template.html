@@ -64,7 +64,20 @@
     kbd { background: var(--tag-bg); padding: 1px 4px; border-radius: 3px; font-size: 10px; font-family: inherit; }
 
     #chart-tab { display: flex; flex-direction: column; min-height: 0; }
-    #chart-tab.hidden, #stats-tab.hidden { display: none !important; }
+    #chart-tab.hidden, #stats-tab.hidden, #confidence-tab.hidden { display: none !important; }
+    #confidence-tab { display: flex; flex-direction: column; min-height: 0; padding: 0; }
+    #confidence-controls {
+      display: flex; align-items: center; gap: 12px; padding: 8px 12px;
+      border-bottom: 1px solid var(--border); background: var(--bg-surface);
+      font-size: 12px;
+    }
+    #confidence-controls select { background: var(--bg-panel, var(--bg)); color: var(--text); border: 1px solid var(--border); padding: 2px 6px; border-radius: 3px; font-size: 12px; }
+    #confidence-controls .conf-hint { color: var(--text-dim); font-size: 11px; margin-left: auto; }
+    #confidence-chart { flex: 1; min-height: 0; position: relative; }
+    #confidence-empty {
+      flex: 1; display: flex; align-items: center; justify-content: center;
+      color: var(--text-muted); font-size: 13px;
+    }
     #price-chart { flex: 3; position: relative; min-height: 0; }
     #deviation-chart { flex: 1; border-top: 1px solid var(--border); position: relative; min-height: 0; }
     .chart-label { position: absolute; top: 8px; left: 12px; font-size: 11px; color: var(--text-muted); z-index: 2; pointer-events: none; font-weight: 500; letter-spacing: 0.3px; }
@@ -208,6 +221,7 @@
       <div id="loading-bar"><div class="spinner-sm"></div><span>Loading...</span></div>
       <button class="tab-btn active" data-tab="chart">Chart</button>
       <button class="tab-btn" data-tab="stats">Stats</button>
+      <button class="tab-btn" data-tab="confidence" id="confidence-tab-btn" style="display:none;">Confidence</button>
       <button class="tab-btn" data-tab="research" id="research-tab-btn" style="display:none;">Research</button>
       <button id="theme-toggle" title="Toggle light/dark theme">Light</button>
     </div>
@@ -273,6 +287,26 @@
         <thead><tr id="stats-header"></tr></thead>
         <tbody id="stats-body"></tbody>
       </table>
+    </div>
+
+    <div id="confidence-tab" class="hidden" style="flex:1;min-width:0;">
+      <div id="confidence-controls">
+        <label>Scenario:
+          <select id="conf-scenario"></select>
+        </label>
+        <label>Mode:
+          <select id="conf-mode">
+            <option value="aggregate" selected>Per-type aggregate</option>
+            <option value="individual">Individual validators</option>
+          </select>
+        </label>
+        <label id="conf-validator-wrap" style="display:none;">Validators:
+          <select id="conf-validators" multiple size="1" style="min-width:200px; max-height:80px;"></select>
+        </label>
+        <span class="conf-hint" id="conf-status">Confidence tracking: not enabled for any scenario.</span>
+      </div>
+      <div id="confidence-chart"></div>
+      <div id="confidence-empty" class="hidden">No confidence samples in the current view.</div>
     </div>
 
     <div id="research-tab" class="hidden" style="flex:1;min-width:0;">
@@ -383,6 +417,7 @@
 
         document.getElementById('chart-tab').classList.toggle('hidden', currentTab !== 'chart');
         document.getElementById('stats-tab').classList.toggle('hidden', currentTab !== 'stats');
+        document.getElementById('confidence-tab').classList.toggle('hidden', currentTab !== 'confidence');
         document.getElementById('research-tab').classList.toggle('hidden', currentTab !== 'research');
         document.getElementById('toolbar-tf').style.display = currentTab === 'chart' ? '' : 'none';
 
@@ -392,6 +427,10 @@
         }
         if (currentTab === 'research' && cachedResearchData && cachedResearchData.interpolated) {
           drawFitChart(cachedResearchData.ranking, cachedResearchData.interpolated);
+        }
+        if (currentTab === 'confidence') {
+          ensureConfidenceChart();
+          loadConfidence();
         }
       });
     });
@@ -1901,6 +1940,216 @@
 
     setupDragZoom(priceChartEl, priceChart);
     setupDragZoom(devChartEl, devChart);
+
+    // ── Confidence tab ──────────────────────────────────────────────────────
+    // Lifecycle: chart instance is created lazily on first switch to the tab,
+    // then reused. Series are wiped + rebuilt on every load (reflects scenario
+    // / mode / validator-selection changes). Time range is whatever the price
+    // chart is currently showing — keeps the two views aligned.
+    let confidenceChart = null;
+    let confidenceSeries = [];
+
+    function ensureConfidenceChart() {
+      if (confidenceChart) return;
+      const el = document.getElementById('confidence-chart');
+      const t = getThemeChartOptions();
+      confidenceChart = LightweightCharts.createChart(el, {
+        layout: { background: { color: t.bg }, textColor: t.text },
+        grid: { vertLines: { color: t.grid }, horzLines: { color: t.grid } },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        rightPriceScale: { borderColor: t.border, scaleMargins: { top: 0.05, bottom: 0.05 } },
+        timeScale: { borderColor: t.border, timeVisible: true, secondsVisible: false },
+      });
+      // Keep confidence chart's x-axis in sync with price chart so the two
+      // views are visually aligned when switching tabs.
+      window.addEventListener('resize', () => {
+        confidenceChart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+      });
+    }
+
+    function clearConfidenceSeries() {
+      if (!confidenceChart) return;
+      for (const s of confidenceSeries) confidenceChart.removeSeries(s);
+      confidenceSeries = [];
+    }
+
+    function colorForType(type) {
+      const palette = {
+        honest:     '#5cc8a4',
+        malicious:  '#e07a7a',
+        pushy:      '#e6a05e',
+        noop:       '#9c8fbe',
+        delayed:    '#7aa3e0',
+        drift:      '#d28be0',
+        withholder: '#e05e8b',
+      };
+      return palette[type] || '#999999';
+    }
+
+    // Per-scenario validator type cache (we ask once and remember).
+    const confValidatorTypesCache = new Map();
+
+    async function fetchConfidenceData(scenarioIndex, from, to, validatorIndices) {
+      const params = new URLSearchParams({
+        scenario: String(scenarioIndex),
+        from: String(Math.floor(from)),
+        to: String(Math.ceil(to)),
+      });
+      if (validatorIndices && validatorIndices.length > 0) {
+        params.set('validators', validatorIndices.join(','));
+      }
+      const res = await fetch('/api/confidence?' + params.toString());
+      if (!res.ok) throw new Error('Confidence fetch failed: ' + res.status);
+      return await res.json();
+    }
+
+    function setupConfidenceControls() {
+      // Populate scenario picker — only scenarios that opted in to confidence
+      // tracking actually have data. We detect them by their aggregator config.
+      const scenarioSel = document.getElementById('conf-scenario');
+      const status = document.getElementById('conf-status');
+      const tabBtn = document.getElementById('confidence-tab-btn');
+      scenarioSel.innerHTML = '';
+      const eligible = (serverMeta?.scenarios || []).filter(sc =>
+        sc.config?.aggregator?.confidence === 'default'
+      );
+      if (eligible.length === 0) {
+        tabBtn.style.display = 'none';
+        return;
+      }
+      tabBtn.style.display = '';
+      for (const sc of eligible) {
+        const opt = document.createElement('option');
+        opt.value = String(sc.index);
+        opt.textContent = sc.config.label || `Scenario ${sc.index}`;
+        scenarioSel.appendChild(opt);
+      }
+      status.textContent = `${eligible.length} scenario${eligible.length === 1 ? '' : 's'} with confidence tracking`;
+
+      scenarioSel.addEventListener('change', () => {
+        loadConfidence();
+        rebuildValidatorPicker();
+      });
+      document.getElementById('conf-mode').addEventListener('change', () => {
+        const mode = document.getElementById('conf-mode').value;
+        document.getElementById('conf-validator-wrap').style.display = mode === 'individual' ? '' : 'none';
+        loadConfidence();
+      });
+      document.getElementById('conf-validators').addEventListener('change', () => {
+        if (document.getElementById('conf-mode').value === 'individual') loadConfidence();
+      });
+    }
+
+    async function rebuildValidatorPicker() {
+      const scenarioIndex = parseInt(document.getElementById('conf-scenario').value);
+      if (isNaN(scenarioIndex)) return;
+      let types = confValidatorTypesCache.get(scenarioIndex);
+      if (!types) {
+        // Quick fetch with no time range to pull the validatorTypes vector.
+        const data = await fetchConfidenceData(scenarioIndex, 0, 0, []);
+        types = data.validatorTypes || [];
+        confValidatorTypesCache.set(scenarioIndex, types);
+      }
+      const sel = document.getElementById('conf-validators');
+      sel.innerHTML = '';
+      types.forEach((t, i) => {
+        const opt = document.createElement('option');
+        opt.value = String(i);
+        opt.textContent = `#${i} (${t})`;
+        sel.appendChild(opt);
+      });
+      sel.size = Math.min(8, types.length);
+    }
+
+    async function loadConfidence() {
+      ensureConfidenceChart();
+      const scenarioSel = document.getElementById('conf-scenario');
+      if (!scenarioSel.value) return;
+      const scenarioIndex = parseInt(scenarioSel.value);
+      const mode = document.getElementById('conf-mode').value;
+      let validatorIndices = [];
+      if (mode === 'individual') {
+        validatorIndices = Array.from(document.getElementById('conf-validators').selectedOptions)
+          .map(o => parseInt(o.value));
+        if (validatorIndices.length === 0) {
+          // Nothing selected → leave the chart as-is, hint the user.
+          document.getElementById('conf-status').textContent = 'Select one or more validators.';
+          return;
+        }
+      }
+
+      // Use the same time window the price chart is showing, so the two tabs
+      // line up. Fall back to scenario range if price chart hasn't rendered.
+      const range = priceChart.timeScale().getVisibleRange();
+      const sc = serverMeta.scenarios.find(s => s.index === scenarioIndex);
+      const from = range?.from ?? sc?.timeRange?.from ?? 0;
+      const to = range?.to ?? sc?.timeRange?.to ?? Math.floor(Date.now() / 1000);
+
+      let data;
+      try {
+        data = await fetchConfidenceData(scenarioIndex, from, to, validatorIndices);
+      } catch (err) {
+        document.getElementById('conf-status').textContent = 'Error: ' + err.message;
+        return;
+      }
+
+      clearConfidenceSeries();
+      const empty = document.getElementById('confidence-empty');
+      const seriesToDraw = mode === 'individual'
+        ? (data.perValidator || [])
+        : (data.typeAggregates || []);
+
+      if (seriesToDraw.length === 0 || seriesToDraw.every(s => s.points.length === 0)) {
+        empty.classList.remove('hidden');
+        document.getElementById('conf-status').textContent =
+          'No confidence samples in the current time window.';
+        return;
+      }
+      empty.classList.add('hidden');
+
+      for (const s of seriesToDraw) {
+        if (!s.points || s.points.length === 0) continue;
+        const series = confidenceChart.addLineSeries({
+          color: colorForType(s.type),
+          lineWidth: 2,
+          title: s.label || `#${s.validatorIndex} (${s.type})`,
+          priceLineVisible: false,
+          lastValueVisible: true,
+        });
+        // Confidence lives in [0, 1]; lock the price scale to that.
+        series.applyOptions({ priceFormat: { type: 'price', precision: 3, minMove: 0.001 } });
+        series.setData(s.points.map(p => ({ time: p.time, value: p.value })));
+        confidenceSeries.push(series);
+      }
+      confidenceChart.priceScale('right').applyOptions({ autoScale: false, mode: 0 });
+      // Align x-range with price chart.
+      if (range) confidenceChart.timeScale().setVisibleRange({ from: range.from, to: range.to });
+
+      const totalPoints = seriesToDraw.reduce((n, s) => n + (s.points?.length || 0), 0);
+      document.getElementById('conf-status').textContent =
+        `${seriesToDraw.length} series · ${totalPoints} sample points`;
+    }
+
+    // Wire up controls once after meta arrives.
+    const _origInit = initServer;
+    // initServer already ran above; setupConfidenceControls hooks into
+    // serverMeta which is set inside initServer. Defer until next tick.
+    setTimeout(() => {
+      if (typeof serverMeta !== 'undefined' && serverMeta) {
+        setupConfidenceControls();
+        rebuildValidatorPicker().catch(() => {});
+      } else {
+        // serverMeta not ready yet — try again shortly.
+        const retry = setInterval(() => {
+          if (typeof serverMeta !== 'undefined' && serverMeta) {
+            clearInterval(retry);
+            setupConfidenceControls();
+            rebuildValidatorPicker().catch(() => {});
+          }
+        }, 200);
+        setTimeout(() => clearInterval(retry), 10_000);
+      }
+    }, 0);
 
     // ── Init ──
     initServer();
