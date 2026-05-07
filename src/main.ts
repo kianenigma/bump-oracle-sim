@@ -6,6 +6,7 @@ import {
   ALL_VENUES,
   DEFAULT_CONFIG,
   DEFAULT_PRICE_SOURCE,
+  DEFAULT_SYNTHETIC_VENUE_JITTER,
   DEFAULT_VALIDATOR_COUNT,
 } from "./config.js";
 import { epsilonValue } from "./types.js";
@@ -66,6 +67,7 @@ const { values: args } = parseArgs({
     venues: { type: "string" },
     "cross-venue": { type: "string" },
     "price-source": { type: "string" },
+    "synthetic-venue-jitter": { type: "string", default: String(DEFAULT_SYNTHETIC_VENUE_JITTER) },
     help: { type: "boolean", default: false },
   },
 });
@@ -103,13 +105,17 @@ Options:
   --aggregator <mode>          Aggregation rule: "nudge", "median" (default), or "mean"
   --aggregator-k <fraction>    For median/mean: trim this fraction from each tail before aggregating (default: 0).
                                  k=0 → plain median / plain mean. k>0 → trim then median / mean.
-  --data-source <kind>         "trades" (default, per-trade multi-venue) or "candles" (Binance US 1m)
+  --data-source <kind>         "trades" (default, per-trade multi-venue), "candles" (Binance US 1m),
+                                or "synthetic" (deterministic scripted price path; --start-date /
+                                --end-date are rejected in this mode).
   --venues <list>              Comma-separated venue ids, or "all" (default).
                                 Available venues: ${ALL_VENUES.join(", ")}
   --cross-venue <rule>         How to combine per-venue prices into the ground-truth real price:
                                 "mean" (default), "median", "vwap". Only with --data-source=trades.
   --price-source <mode>        "random-venue" (default; random venue per query) or "cross-venue".
                                 random-venue requires --data-source=trades.
+  --synthetic-venue-jitter <f> Per-venue Gaussian jitter as fraction of price for --data-source=synthetic
+                                (default: ${DEFAULT_SYNTHETIC_VENUE_JITTER}). Divergence events use 10× this.
   --help                       Show this help
 `);
   process.exit(0);
@@ -136,32 +142,52 @@ function parseCrossVenueArg(raw: string | undefined): CrossVenueSpec {
   process.exit(1);
 }
 
-function parseRealPriceArg(kind: string, venuesRaw: string | undefined, crossVenueRaw: string | undefined): RealPriceSpec {
+function parseVenuesList(venuesRaw: string | undefined, label: string): VenueId[] {
+  let list: string[];
+  if (!venuesRaw || venuesRaw === "all") {
+    list = ALL_VENUES.slice();
+  } else {
+    list = venuesRaw.split(",").map((s) => s.trim()).filter(Boolean);
+    for (const v of list) {
+      if (!ALL_VENUES.includes(v as VenueId)) {
+        console.error(`Invalid venue "${v}". Available: ${ALL_VENUES.join(", ")}, or "all"`);
+        process.exit(1);
+      }
+    }
+  }
+  if (list.length === 0) {
+    console.error(`--data-source=${label} requires at least one venue`);
+    process.exit(1);
+  }
+  return list as VenueId[];
+}
+
+function parseRealPriceArg(
+  kind: string,
+  venuesRaw: string | undefined,
+  crossVenueRaw: string | undefined,
+  syntheticJitterRaw: string,
+): RealPriceSpec {
   if (kind === "candles") {
     if (venuesRaw) console.error(`Warning: --venues ignored when --data-source=candles`);
     if (crossVenueRaw) console.error(`Warning: --cross-venue ignored when --data-source=candles`);
     return { kind: "candles" };
   }
   if (kind === "trades") {
-    let list: string[];
-    if (!venuesRaw || venuesRaw === "all") {
-      list = ALL_VENUES.slice();
-    } else {
-      list = venuesRaw.split(",").map((s) => s.trim()).filter(Boolean);
-      for (const v of list) {
-        if (!ALL_VENUES.includes(v as VenueId)) {
-          console.error(`Invalid venue "${v}". Available: ${ALL_VENUES.join(", ")}, or "all"`);
-          process.exit(1);
-        }
-      }
+    return { kind: "trades", venues: parseVenuesList(venuesRaw, "trades"), crossVenue: parseCrossVenueArg(crossVenueRaw) };
+  }
+  if (kind === "synthetic") {
+    if (crossVenueRaw && crossVenueRaw !== "mean") {
+      console.error(`Warning: --cross-venue=${crossVenueRaw} ignored when --data-source=synthetic (mean is enforced).`);
     }
-    if (list.length === 0) {
-      console.error(`--data-source=trades requires at least one venue`);
+    const jitter = parseFloat(syntheticJitterRaw);
+    if (isNaN(jitter) || jitter < 0) {
+      console.error(`Invalid --synthetic-venue-jitter: "${syntheticJitterRaw}". Expected a non-negative number.`);
       process.exit(1);
     }
-    return { kind: "trades", venues: list as VenueId[], crossVenue: parseCrossVenueArg(crossVenueRaw) };
+    return { kind: "synthetic", venues: parseVenuesList(venuesRaw, "synthetic"), venueJitterStdDev: jitter };
   }
-  console.error(`Invalid --data-source: "${kind}". Expected: candles, trades.`);
+  console.error(`Invalid --data-source: "${kind}". Expected: candles, trades, synthetic.`);
   process.exit(1);
 }
 
@@ -184,6 +210,36 @@ function parseEpsilonArg(raw: string): EpsilonSpec {
   const val = parseFloat(raw);
   if (isNaN(val)) { console.error(`Invalid epsilon: "${raw}"`); process.exit(1); }
   return val;
+}
+
+function variantLabel(d: import("./data/synthetic.js").SyntheticEventDescriptor): string {
+  switch (d.variant) {
+    case "insync-r20": return "in-sync, recover 20%";
+    case "insync-r50": return "in-sync, recover 50%";
+    case "insync-r90": return "in-sync, recover 90%";
+    case "diverge":    return "diverge (10× venue jitter, full recover)";
+  }
+}
+
+function printSyntheticEventTable(source: import("./data/synthetic.js").SyntheticSource): void {
+  const events = source.events;
+  const baseline = events[0]?.startPrice;
+  const totalBlocks = source.pricePoints.length;
+
+  console.log(`\nSynthetic event sequence — ${events.length} events, baseline=${baseline.toFixed(4)}, ${totalBlocks.toLocaleString()} blocks (6s each):`);
+  console.log("");
+  console.log("   #    blocks         direction   variant                                     path (start → extreme → recovered)");
+  console.log("  ──── ────────────── ───────────  ─────────────────────────────────────────  ─────────────────────────────────────");
+  for (const ev of events) {
+    const idx = String(ev.index + 1).padStart(3, " ");
+    const blockRange = `${ev.moveStartBlock.toString().padStart(4)}–${ev.postEndBlock.toString().padStart(4)}`.padEnd(13);
+    const dir = ev.descriptor.direction === "drop" ? "drop" : "rise";
+    const dirCol = `${dir} ${(ev.descriptor.magnitude * 100).toFixed(0).padStart(2)}%`.padEnd(11);
+    const variant = variantLabel(ev.descriptor).padEnd(43);
+    const path = `${ev.startPrice.toFixed(4)} → ${ev.extremePrice.toFixed(4)} → ${ev.recoveredPrice.toFixed(4)}`;
+    console.log(`  ${idx}   ${blockRange}  ${dirCol}  ${variant}  ${path}`);
+  }
+  console.log("");
 }
 
 function ensureOutputDir(dir: string, force: boolean): void {
@@ -294,18 +350,50 @@ if (args.data) {
 
 // ── Shared: fetch and simulate ─────────────────────────────────────────────
 
-const startDate = args["start-date"]!;
-const endDate = args["end-date"]!;
+const cliArgs = Bun.argv.slice(2);
+const cliPassed = (flag: string) => cliArgs.includes(flag);
 
-const realPrice = parseRealPriceArg(args["data-source"]!, args.venues, args["cross-venue"]);
+const realPrice = parseRealPriceArg(
+  args["data-source"]!,
+  args.venues,
+  args["cross-venue"],
+  args["synthetic-venue-jitter"]!,
+);
+
+if (realPrice.kind === "synthetic") {
+  for (const flag of ["--start-date", "--end-date"]) {
+    if (cliPassed(flag)) {
+      console.error(`Error: ${flag} is not supported with --data-source=synthetic (synthetic series uses its own deterministic timeline).`);
+      process.exit(1);
+    }
+  }
+}
+
+let startDate = args["start-date"]!;
+let endDate = args["end-date"]!;
+const seedForSource = parseInt(args.seed!);
 
 if (realPrice.kind === "candles") {
   console.log(`\nFetching DOT/USDT data (candles): ${startDate} to ${endDate}`);
-} else {
+} else if (realPrice.kind === "trades") {
   console.log(`\nLoading DOT/USDT data (trades, venues: ${realPrice.venues.join(", ")}, cross-venue=${realPrice.crossVenue?.kind ?? "mean"}): ${startDate} to ${endDate}`);
+} else {
+  console.log(`\nGenerating synthetic price path (venues: ${realPrice.venues.join(", ")}, venue-jitter=${realPrice.venueJitterStdDev}, seed=${seedForSource})`);
 }
 
-const priceSource = await loadPriceSource(realPrice, startDate, endDate);
+const priceSource = await loadPriceSource(realPrice, startDate, endDate, seedForSource);
+
+if (realPrice.kind === "synthetic") {
+  // Synthetic source generates its own timestamps; align startDate/endDate
+  // strings so output paths and chart labels match the synthesised range.
+  const first = priceSource.pricePoints[0]?.timestamp;
+  const last = priceSource.pricePoints[priceSource.pricePoints.length - 1]?.timestamp;
+  if (first !== undefined && last !== undefined) {
+    startDate = new Date(first * 1000).toISOString().slice(0, 10);
+    endDate = new Date(last * 1000).toISOString().slice(0, 10);
+  }
+  printSyntheticEventTable(priceSource as import("./data/synthetic.js").SyntheticSource);
+}
 
 if (args["fetch-only"]) {
   console.log(`\nFetch complete. ${priceSource.pricePoints.length.toLocaleString()} price points loaded.`);

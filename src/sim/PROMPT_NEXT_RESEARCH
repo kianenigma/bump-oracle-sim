@@ -1,13 +1,13 @@
 ## Future Research
 
-1. We need a short price path that demonstrates:
+1. We need a short price path that contains all of the following:
 
-* For each drop and increase in price of 10%, 30%, 70%
+* For each "drop" and "increase" in price of 10%, 30%, 70%
 	* one variation where venues are in sync and just have jitter
 		* one variation where price recovers to 20% of the original
 		* one variation where price recovers to 50% of the original
 		* one variation where price recovers to 90% of the original
-	* one variation where venues diverge with 10x jitter
+	* one variation where venues diverge with 10x the normal jitter
 * some period of mild volatility in between with venues in sync within normal jitter
 * real price is still MEAN of all venues (un weighted)
 

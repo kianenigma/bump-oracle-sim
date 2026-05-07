@@ -932,7 +932,9 @@
 
     function dataSourceVenues(meta) {
       const rp = meta.scenarios[0]?.config?.realPrice;
-      return rp && rp.kind === 'trades' ? (rp.venues || []) : [];
+      if (!rp) return [];
+      if (rp.kind === 'trades' || rp.kind === 'synthetic') return rp.venues || [];
+      return [];
     }
 
     function defaultPriceSourceMode(meta) {
@@ -1001,8 +1003,11 @@
         tooltip: 'Cross-venue real price (mean by default; configurable via --cross-venue) in trades mode,\nor candle-interpolated price in candles mode.\nUsed as the deviation reference for every oracle.',
       });
 
-      // 2. Per-venue lines. Hidden by default in every mode — turn on
-      //    individually from the legend when you want to inspect a venue.
+      // 2. Per-venue lines. Visible by default in synthetic mode (inspecting
+      //    venue divergence is the whole point); hidden in trades mode where
+      //    they tend to overlap heavily and clutter the chart — turn on from
+      //    the legend when you want to inspect a venue.
+      const venueDefaultVisible = (meta.scenarios[0]?.config?.realPrice?.kind === 'synthetic');
       if (venueIds.length > 0) {
         for (let i = 0; i < venueIds.length; i++) {
           const v = venueIds[i];
@@ -1012,7 +1017,7 @@
             color: VENUE_COLORS[i % VENUE_COLORS.length],
             kind: 'venue',
             venueId: v,
-            defaultVisible: false,
+            defaultVisible: venueDefaultVisible,
             tooltip: `Per-venue 6s VWAP for ${v}. Validators in random-venue mode see one of these per query.`,
           });
         }
@@ -1070,7 +1075,9 @@
       const cvStr = ds && ds.kind === 'trades' ? ((ds.crossVenue && ds.crossVenue.kind) || 'mean') : null;
       const dsStr = !ds || ds.kind === 'candles'
         ? 'candles (Binance US 1m \u2192 6s interp)'
-        : `trades (${(ds.venues || []).join(', ')}; cross-venue=${cvStr})`;
+        : ds.kind === 'synthetic'
+          ? `synthetic (${(ds.venues || []).join(', ')}; venue-jitter=${ds.venueJitterStdDev})`
+          : `trades (${(ds.venues || []).join(', ')}; cross-venue=${cvStr})`;
       const vpsStr = v.validatorPriceSource.kind;
       const lines = [
         v.label,

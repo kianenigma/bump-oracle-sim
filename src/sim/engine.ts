@@ -306,7 +306,9 @@ function printConfig(config: SimulationConfig, pricePoints?: PricePoint[]): void
   const rp: RealPriceSpec = config.realPrice ?? { kind: "candles" };
   const rpStr = rp.kind === "candles"
     ? "candles (Binance US 1m → interp 6s)"
-    : `trades (${rp.venues.join(", ")}, cross-venue=${rp.crossVenue?.kind ?? "mean"})`;
+    : rp.kind === "trades"
+      ? `trades (${rp.venues.join(", ")}, cross-venue=${rp.crossVenue?.kind ?? "mean"})`
+      : `synthetic (${rp.venues.join(", ")}, venue-jitter=${rp.venueJitterStdDev})`;
 
   // Distinct priceSource kinds across groups (usually just one).
   const psKinds = new Set(config.validators.map(g => g.priceSource.kind));

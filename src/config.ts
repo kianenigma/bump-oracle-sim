@@ -70,3 +70,14 @@ export const BINANCE_BASE_URL = "https://api.binance.us/api/v3/klines";
 export const BINANCE_BATCH_LIMIT = 1000;
 export const CANDLE_INTERVAL = "1m";
 export const CANDLE_INTERVAL_MS = 60_000;
+
+// ── Synthetic data source ──────────────────────────────────────────────────
+// Per-venue Gaussian noise stddev as a fraction of the designed mean price.
+// During a "diverge" event's move + hold-at-extreme phases this is multiplied
+// by SYNTHETIC_DIVERGE_MULTIPLIER to produce visibly fanned venue lines.
+export const DEFAULT_SYNTHETIC_VENUE_JITTER = 0.001;
+export const SYNTHETIC_DIVERGE_MULTIPLIER = 10;
+// First-block timestamp for synthetic series (deterministic, no real dates).
+export const SYNTHETIC_BASE_TIMESTAMP = Math.floor(
+  Date.parse("2025-01-01T00:00:00Z") / 1000,
+);

@@ -3,6 +3,7 @@ import { fetchCandles } from "./fetcher.js";
 import { interpolateToBlocks } from "./interpolator.js";
 import { CANDLE_INTERVAL } from "../config.js";
 import { combineVenues, daysInRange } from "./trades/aggregate.js";
+import { generateSyntheticSource, type SyntheticSource } from "./synthetic.js";
 import { BinanceSpotSource } from "./trades/venues/binance.js";
 import { BybitSpotSource } from "./trades/venues/bybit.js";
 import { GateSpotSource } from "./trades/venues/gate.js";
@@ -24,13 +25,23 @@ export async function loadPriceSource(
   spec: RealPriceSpec,
   startDate: string,
   endDate: string,
+  seed?: number,
 ): Promise<ResolvedPriceSource> {
   if (spec.kind === "candles") {
     const cacheData = await fetchCandles(startDate, endDate, CANDLE_INTERVAL);
     return { pricePoints: interpolateToBlocks(cacheData.data) };
   }
+  if (spec.kind === "synthetic") {
+    return generateSyntheticSource({
+      venues: spec.venues,
+      venueJitterStdDev: spec.venueJitterStdDev,
+      seed: seed ?? 42,
+    });
+  }
   return loadTradeSourcePoints(spec.venues, startDate, endDate, spec.crossVenue ?? { kind: "median" });
 }
+
+export type { SyntheticSource };
 
 /** Return a venue source instance by id. */
 function makeVenueSource(id: VenueId): VenueSpotSource {

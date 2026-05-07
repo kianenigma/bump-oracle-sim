@@ -111,7 +111,8 @@ export type CrossVenueSpec =
 //               per venue, then combined via `crossVenue` (default: mean).
 export type RealPriceSpec =
   | { kind: "candles" }
-  | { kind: "trades"; venues: VenueId[]; crossVenue?: CrossVenueSpec };
+  | { kind: "trades"; venues: VenueId[]; crossVenue?: CrossVenueSpec }
+  | { kind: "synthetic"; venues: VenueId[]; venueJitterStdDev: number };
 
 // Per-validator price observation strategy. Each group carries its own copy,
 // so different groups can observe the price differently in the same sim.
