@@ -40,9 +40,12 @@ function classify(config: SimulationConfig): RowKey {
 
 const keyOf = (k: RowKey) => `${k.attacker}@${(k.fraction * 100).toFixed(0)}%`;
 
-type AggregatorTag = "median" | "nudge";
+type AggregatorTag = "median" | "nudge" | "adaptive";
 function aggregatorTag(config: SimulationConfig): AggregatorTag {
-  return config.aggregator?.kind === "nudge" ? "nudge" : "median";
+  const k = config.aggregator?.kind;
+  if (k === "nudge") return "nudge";
+  if (k === "nudge-adaptive") return "adaptive";
+  return "median";
 }
 
 const pad = (s: string, n: number): string => s.length >= n ? s : s + " ".repeat(n - s.length);
@@ -56,6 +59,9 @@ interface Bucket {
    *  direction-aware: lowest for "low" metrics, highest for "high". */
   bestNudgeValue: number | undefined;
   bestNudgeLabel: string | undefined;
+  /** Best-of-nudge-adaptive value (undefined if adaptive-side wasn't run). */
+  bestAdaptiveValue: number | undefined;
+  bestAdaptiveLabel: string | undefined;
 }
 
 /** Pick the better value of `a` vs `b` according to direction; returns the
@@ -80,17 +86,26 @@ function gather(results: SimulationResult[], metric: Metric): Map<string, Bucket
         medianValue: undefined,
         bestNudgeValue: undefined,
         bestNudgeLabel: undefined,
+        bestAdaptiveValue: undefined,
+        bestAdaptiveLabel: undefined,
       };
       buckets.set(id, bucket);
     }
     if (tag === "median") {
       bucket.medianValue = v;
-    } else {
+    } else if (tag === "nudge") {
       const m = r.config.label.match(/ε=([^\s·]+)/);
       const epsLabel = m ? m[1] : "?";
       if (bucket.bestNudgeValue === undefined || isBetter(v, bucket.bestNudgeValue, metric.direction)) {
         bucket.bestNudgeValue = v;
         bucket.bestNudgeLabel = epsLabel;
+      }
+    } else /* adaptive */ {
+      const m = r.config.label.match(/ε=([^\s·]+)/);
+      const epsLabel = m ? m[1] : "?";
+      if (bucket.bestAdaptiveValue === undefined || isBetter(v, bucket.bestAdaptiveValue, metric.direction)) {
+        bucket.bestAdaptiveValue = v;
+        bucket.bestAdaptiveLabel = epsLabel;
       }
     }
   }
@@ -112,23 +127,52 @@ function fmt(metric: Metric, v: number | undefined): string {
 
 // ── Per-metric table rendering ──────────────────────────────────────────────
 
-function printSymmetricTable(metric: Metric, rows: Bucket[]): { medianBetter: number; nudgeBetter: number; ties: number } {
-  console.log(`\n  ┌─ Symmetric tier (apples-to-apples; lower = better is the convention for ${metric.direction === "low" ? "this metric" : "deviation lenses, higher = better here"})`);
-  console.log(`  │  ${pad("attacker", 22)} ${pad("median", 14)}  ${pad("nudge(best ε)", 24)}  Δ (med−nudge)   winner`);
-  let medianBetter = 0, nudgeBetter = 0, ties = 0;
+function printSymmetricTable(metric: Metric, rows: Bucket[]): { medianBetter: number; nudgeBetter: number; adaptiveBetter: number; ties: number } {
+  const hasAdaptive = rows.some(r => r.bestAdaptiveValue !== undefined);
+  console.log(`\n  ┌─ Symmetric tier (apples-to-apples; ${metric.direction === "low" ? "lower" : "higher"} is better)`);
+  if (hasAdaptive) {
+    console.log(`  │  ${pad("attacker", 22)} ${pad("median", 14)}  ${pad("nudge(best ε)", 24)}  ${pad("adaptive(best ε)", 24)}  winner`);
+  } else {
+    console.log(`  │  ${pad("attacker", 22)} ${pad("median", 14)}  ${pad("nudge(best ε)", 24)}  Δ (med−nudge)   winner`);
+  }
+  let medianBetter = 0, nudgeBetter = 0, adaptiveBetter = 0, ties = 0;
   for (const r of rows) {
     if (r.medianValue === undefined || r.bestNudgeValue === undefined) continue;
-    const diff = r.medianValue - r.bestNudgeValue;
-    let winner: string;
-    if (Math.abs(diff) < 1e-9) { winner = "tie"; ties++; }
-    else if (isBetter(r.medianValue, r.bestNudgeValue, metric.direction)) { winner = "median"; medianBetter++; }
-    else { winner = "nudge"; nudgeBetter++; }
-    const diffStr = (diff >= 0 ? "+" : "") + metric.format(Math.abs(diff)).replace(metric.unit, "") + metric.unit;
+    // Determine winner across {median, nudge, adaptive} (the latter only when present).
+    const candidates: Array<{ name: string; value: number }> = [
+      { name: "median", value: r.medianValue },
+      { name: "nudge",  value: r.bestNudgeValue },
+    ];
+    if (r.bestAdaptiveValue !== undefined) {
+      candidates.push({ name: "adaptive", value: r.bestAdaptiveValue });
+    }
+    candidates.sort((a, b) => isBetter(a.value, b.value, metric.direction) ? -1 : isBetter(b.value, a.value, metric.direction) ? 1 : 0);
+    const top = candidates[0];
+    const second = candidates[1];
+    const winner = (Math.abs(top.value - second.value) < 1e-9) ? "tie" : top.name;
+    if (winner === "tie") ties++;
+    else if (winner === "median")   medianBetter++;
+    else if (winner === "nudge")    nudgeBetter++;
+    else if (winner === "adaptive") adaptiveBetter++;
+
     const nudgeCol = `${fmt(metric, r.bestNudgeValue)} (ε=${r.bestNudgeLabel ?? "?"})`;
-    console.log(`  │  ${pad(keyOf(r.key), 22)} ${pad(fmt(metric, r.medianValue), 14)}  ${pad(nudgeCol, 24)}  ${pad(diffStr, 14)}  ${winner}`);
+    if (hasAdaptive) {
+      const adaptCol = r.bestAdaptiveValue !== undefined
+        ? `${fmt(metric, r.bestAdaptiveValue)} (ε=${r.bestAdaptiveLabel ?? "?"})`
+        : "n/a";
+      console.log(`  │  ${pad(keyOf(r.key), 22)} ${pad(fmt(metric, r.medianValue), 14)}  ${pad(nudgeCol, 24)}  ${pad(adaptCol, 24)}  ${winner}`);
+    } else {
+      const diff = r.medianValue - r.bestNudgeValue;
+      const diffStr = (diff >= 0 ? "+" : "") + metric.format(Math.abs(diff)).replace(metric.unit, "") + metric.unit;
+      console.log(`  │  ${pad(keyOf(r.key), 22)} ${pad(fmt(metric, r.medianValue), 14)}  ${pad(nudgeCol, 24)}  ${pad(diffStr, 14)}  ${winner}`);
+    }
   }
-  console.log(`  └─ subtotal: median better ${medianBetter}, nudge better ${nudgeBetter}, ties ${ties}`);
-  return { medianBetter, nudgeBetter, ties };
+  if (hasAdaptive) {
+    console.log(`  └─ subtotal: median better ${medianBetter}, nudge better ${nudgeBetter}, adaptive better ${adaptiveBetter}, ties ${ties}`);
+  } else {
+    console.log(`  └─ subtotal: median better ${medianBetter}, nudge better ${nudgeBetter}, ties ${ties}`);
+  }
+  return { medianBetter, nudgeBetter, adaptiveBetter, ties };
 }
 
 function printAsymmetricMedianTable(metric: Metric, rows: Bucket[]): void {
@@ -155,15 +199,17 @@ function printAsymmetricNudgeTable(metric: Metric, rows: Bucket[]): void {
 }
 
 interface WorstCase {
-  median: { value: number; attacker: string } | undefined;
-  nudge:  { value: number; attacker: string } | undefined;
+  median:   { value: number; attacker: string } | undefined;
+  nudge:    { value: number; attacker: string } | undefined;
+  adaptive: { value: number; attacker: string } | undefined;
 }
 
 /** For each aggregator, find the value at its worst-case applicable attacker
  *  (excluding the honest baseline). "Worst" is direction-aware. */
 function computeWorstCase(metric: Metric, rows: Bucket[]): WorstCase {
-  let median: WorstCase["median"] = undefined;
-  let nudge:  WorstCase["nudge"]  = undefined;
+  let median:   WorstCase["median"]   = undefined;
+  let nudge:    WorstCase["nudge"]    = undefined;
+  let adaptive: WorstCase["adaptive"] = undefined;
   const isWorse = (a: number, b: number) => isBetter(b, a, metric.direction);
   for (const r of rows) {
     if (r.key.attacker === "honest") continue;
@@ -177,35 +223,43 @@ function computeWorstCase(metric: Metric, rows: Bucket[]): WorstCase {
         nudge = { value: r.bestNudgeValue, attacker: keyOf(r.key) };
       }
     }
+    if (r.bestAdaptiveValue !== undefined) {
+      if (adaptive === undefined || isWorse(r.bestAdaptiveValue, adaptive.value)) {
+        adaptive = { value: r.bestAdaptiveValue, attacker: keyOf(r.key) };
+      }
+    }
   }
-  return { median, nudge };
+  return { median, nudge, adaptive };
 }
 
-function printWorstCase(metric: Metric, w: WorstCase): "median" | "nudge" | "tie" | "n/a" {
+type RobustWinner = "median" | "nudge" | "adaptive" | "tie" | "n/a";
+
+function printWorstCase(metric: Metric, w: WorstCase): RobustWinner {
   console.log(`\n  ┌─ Worst case (${metric.direction === "low" ? "max" : "min"}) under ${metric.name}`);
-  if (w.median) {
-    console.log(`  │  median: ${pad(metric.format(w.median.value), 14)} (worst attacker: ${w.median.attacker})`);
-  } else {
-    console.log(`  │  median:     n/a   (no median-side runs)`);
-  }
-  if (w.nudge) {
-    console.log(`  │  nudge : ${pad(metric.format(w.nudge.value), 14)} (worst attacker: ${w.nudge.attacker})`);
-  } else {
-    console.log(`  │  nudge :     n/a   (no nudge-side runs)`);
-  }
-  if (w.median && w.nudge) {
-    const diff = w.median.value - w.nudge.value;
-    let robustWinner: "median" | "nudge" | "tie";
-    if (Math.abs(diff) < 1e-9) robustWinner = "tie";
-    else if (isBetter(w.median.value, w.nudge.value, metric.direction)) robustWinner = "median";
-    else robustWinner = "nudge";
-    const diffStr = (diff >= 0 ? "+" : "") + metric.format(Math.abs(diff)).replace(metric.unit, "") + metric.unit;
-    console.log(`  │  Δ (median − nudge) = ${diffStr}  →  more-robust: ${robustWinner}`);
+  const print = (label: string, c: { value: number; attacker: string } | undefined): void => {
+    if (c) console.log(`  │  ${pad(label, 9)}: ${pad(metric.format(c.value), 14)} (worst attacker: ${c.attacker})`);
+    else   console.log(`  │  ${pad(label, 9)}:     n/a   (no runs)`);
+  };
+  print("median",   w.median);
+  print("nudge",    w.nudge);
+  print("adaptive", w.adaptive);
+
+  const candidates: Array<{ name: "median" | "nudge" | "adaptive"; value: number }> = [];
+  if (w.median)   candidates.push({ name: "median",   value: w.median.value });
+  if (w.nudge)    candidates.push({ name: "nudge",    value: w.nudge.value });
+  if (w.adaptive) candidates.push({ name: "adaptive", value: w.adaptive.value });
+
+  if (candidates.length < 2) {
     console.log(`  └─`);
-    return robustWinner;
+    return "n/a";
   }
+  candidates.sort((a, b) => isBetter(a.value, b.value, metric.direction) ? -1 : isBetter(b.value, a.value, metric.direction) ? 1 : 0);
+  const top = candidates[0];
+  const second = candidates[1];
+  const winner: RobustWinner = (Math.abs(top.value - second.value) < 1e-9) ? "tie" : top.name;
+  console.log(`  │  more-robust: ${winner} (best worst-case: ${metric.format(top.value)})`);
   console.log(`  └─`);
-  return "n/a";
+  return winner;
 }
 
 // ── Top-level driver ────────────────────────────────────────────────────────
@@ -225,8 +279,8 @@ export function analyzeMedianVsNudge(results: SimulationResult[]): void {
   console.log(`║   ${results.length.toString().padStart(3)} simulations · ${METRICS.length} metrics                                          ║`);
   console.log(`╚════════════════════════════════════════════════════════════════════════════╝`);
 
-  const symOverall = { medianBetter: 0, nudgeBetter: 0, ties: 0 };
-  const lensWorst: Array<{ metric: Metric; worst: WorstCase; robustWinner: "median" | "nudge" | "tie" | "n/a" }> = [];
+  const symOverall = { medianBetter: 0, nudgeBetter: 0, adaptiveBetter: 0, ties: 0 };
+  const lensWorst: Array<{ metric: Metric; worst: WorstCase; robustWinner: RobustWinner }> = [];
 
   for (const metric of METRICS) {
     const dirNote = metric.direction === "low" ? "lower is better" : "higher is better";
@@ -236,9 +290,10 @@ export function analyzeMedianVsNudge(results: SimulationResult[]): void {
     const rows = sortRows([...buckets.values()]);
 
     const sym = printSymmetricTable(metric, rows);
-    symOverall.medianBetter += sym.medianBetter;
-    symOverall.nudgeBetter  += sym.nudgeBetter;
-    symOverall.ties         += sym.ties;
+    symOverall.medianBetter   += sym.medianBetter;
+    symOverall.nudgeBetter    += sym.nudgeBetter;
+    symOverall.adaptiveBetter += sym.adaptiveBetter;
+    symOverall.ties           += sym.ties;
 
     printAsymmetricMedianTable(metric, rows);
     printAsymmetricNudgeTable(metric, rows);
@@ -251,35 +306,37 @@ export function analyzeMedianVsNudge(results: SimulationResult[]): void {
   // Cross-metric summary.
   console.log(`\n══ Overall ════════════════════════════════════════════════════════════════════`);
   console.log(`\n   Symmetric tier (apples-to-apples comparisons across all metrics):`);
-  console.log(`     median better : ${symOverall.medianBetter}`);
-  console.log(`     nudge  better : ${symOverall.nudgeBetter}`);
-  console.log(`     ties          : ${symOverall.ties}`);
+  console.log(`     median   better : ${symOverall.medianBetter}`);
+  console.log(`     nudge    better : ${symOverall.nudgeBetter}`);
+  console.log(`     adaptive better : ${symOverall.adaptiveBetter}`);
+  console.log(`     ties            : ${symOverall.ties}`);
 
   console.log(`\n   Worst case per metric (honest baseline excluded):`);
   for (const { metric, worst } of lensWorst) {
-    const m = worst.median ? `${metric.format(worst.median.value)} (${worst.median.attacker})` : "n/a";
-    const n = worst.nudge  ? `${metric.format(worst.nudge.value)} (${worst.nudge.attacker})`   : "n/a";
-    console.log(`     ${pad(metric.name, 32)} median: ${pad(m, 38)} │ nudge: ${n}`);
+    const m = worst.median   ? `${metric.format(worst.median.value)} (${worst.median.attacker})`     : "n/a";
+    const n = worst.nudge    ? `${metric.format(worst.nudge.value)} (${worst.nudge.attacker})`       : "n/a";
+    const a = worst.adaptive ? `${metric.format(worst.adaptive.value)} (${worst.adaptive.attacker})` : "n/a";
+    console.log(`     ${pad(metric.name, 32)} median: ${pad(m, 38)} │ nudge: ${pad(n, 32)} │ adaptive: ${a}`);
   }
 
   // Aggregate verdict — count metrics where each aggregator has the better worst case.
-  let medianBetterCount = 0, nudgeBetterCount = 0, tieCount = 0, totalCompared = 0;
+  const counts = { median: 0, nudge: 0, adaptive: 0, tie: 0 };
+  let totalCompared = 0;
   for (const { robustWinner } of lensWorst) {
     if (robustWinner === "n/a") continue;
     totalCompared++;
-    if (robustWinner === "median") medianBetterCount++;
-    else if (robustWinner === "nudge") nudgeBetterCount++;
-    else tieCount++;
+    counts[robustWinner]++;
   }
-  console.log(`\n   Robustness verdict (which aggregator's worst case is better, per metric):`);
-  console.log(`     median better : ${medianBetterCount} / ${totalCompared}`);
-  console.log(`     nudge  better : ${nudgeBetterCount} / ${totalCompared}`);
-  console.log(`     tie           : ${tieCount} / ${totalCompared}`);
-  if (nudgeBetterCount > medianBetterCount) {
-    console.log(`\n   CONCLUSION: nudge has the better worst case in more metrics — nudge is the more robust default.`);
-  } else if (medianBetterCount > nudgeBetterCount) {
-    console.log(`\n   CONCLUSION: median has the better worst case in more metrics — median is the more robust default.`);
+  console.log(`\n   Robustness verdict (which aggregator's worst case is the best, per metric):`);
+  console.log(`     median   better : ${counts.median}   / ${totalCompared}`);
+  console.log(`     nudge    better : ${counts.nudge}    / ${totalCompared}`);
+  console.log(`     adaptive better : ${counts.adaptive} / ${totalCompared}`);
+  console.log(`     tie             : ${counts.tie}      / ${totalCompared}`);
+  const winners = (["median", "nudge", "adaptive"] as const).map(k => ({ k, c: counts[k] }))
+    .sort((a, b) => b.c - a.c);
+  if (winners[0].c === winners[1].c) {
+    console.log(`\n   CONCLUSION: worst-case results are mixed — no single aggregator is clearly more robust across all metrics.`);
   } else {
-    console.log(`\n   CONCLUSION: worst-case results are mixed — neither aggregator is clearly more robust across all metrics.`);
+    console.log(`\n   CONCLUSION: ${winners[0].k} has the best worst case in more metrics — ${winners[0].k} is the most robust default.`);
   }
 }

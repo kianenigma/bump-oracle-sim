@@ -32,7 +32,7 @@ export interface PricePoint {
 //              what remains. k defaults to 0 (plain median). Trimming before
 //              the median rarely changes the price (median is already
 //              outlier-robust) but reflects in the activated-vs-total counts.
-export type AggregatorMode = "nudge" | "median";
+export type AggregatorMode = "nudge" | "nudge-adaptive" | "median";
 
 // Epsilon specification: how much the oracle price moves per activated bump.
 // - number: absolute step size (e.g. 0.00033)
@@ -60,8 +60,32 @@ export type EpsilonMode = "abs" | "ratio";
 // the callback raises confidence again). Default true.
 export type ConfidencePolicy = "off" | "default" | "wideband" | "wideband-strict" | "wideband-attributed";
 
+// `nudge-adaptive` extends the basic nudge rule with three knobs intended as
+// a closer match to the proposed governance surface for the on-chain pallet:
+//
+//   - `kappa`    : agreement gate. If `|n|/V < kappa` the block is treated as
+//                  a noop (no price update). Default 0 (disabled).
+//   - `vMaxUp`   : per-block upward velocity cap, expressed as a fraction of
+//                  the current price. Default Infinity (disabled).
+//   - `vMaxDown` : per-block downward velocity cap, fraction of current price.
+//                  Default Infinity. Asymmetric so up- and down-side risk can
+//                  be tuned independently.
+//   - `pMin`     : absolute floor on the post-update price. Default 0.
+//
+// The core update is `delta = ε · P · n · (|n|/V)` — i.e. plain nudge with the
+// per-block step quadratically damped by the agreement fraction. Full
+// consensus → full step; 1/3 consensus → 1/9 of plain nudge's step.
 export type AggregatorConfig =
   | { kind: "nudge"; epsilon: EpsilonSpec; minInputs?: number }
+  | {
+      kind: "nudge-adaptive";
+      epsilon: EpsilonSpec;
+      minInputs?: number;
+      kappa?: number;
+      vMaxUp?: number;
+      vMaxDown?: number;
+      pMin?: number;
+    }
   | { kind: "median"; k?: number; minInputs?: number; confidence?: ConfidencePolicy; permanentExclusion?: boolean };
 
 export function aggregatorMode(cfg: AggregatorConfig): AggregatorMode {

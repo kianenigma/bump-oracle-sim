@@ -61,6 +61,7 @@ export class Chain {
       blockIndex,
       epsilon: effectiveEps,
       inputKind: this.aggregator.inputKind,
+      validatorCount: this.validators.length,
     };
 
     // 1. Gather one input per validator (offchain gossip).

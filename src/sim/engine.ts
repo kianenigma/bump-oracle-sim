@@ -162,7 +162,7 @@ export function runSimulation(
   if (!quiet) console.log(`  Aggregator min inputs: ${resolvedMinInputs}/${validatorCount}`);
   let epsilon = 0;
   let epsilonMode: EpsilonMode = "abs";
-  if (aggregatorCfg.kind === "nudge") {
+  if (aggregatorCfg.kind === "nudge" || aggregatorCfg.kind === "nudge-adaptive") {
     const resolved = resolveEpsilon(aggregatorCfg.epsilon, pricePoints, validatorCount, !quiet);
     epsilon = resolved.epsilon;
     epsilonMode = resolved.mode;
@@ -290,13 +290,19 @@ export function runSimulation(
   // Persist the resolved aggregator (concrete numeric epsilon, concrete
   // minInputs) so .simdata and the UI never have to re-resolve "auto" or
   // the validator-count-dependent default.
-  const resolvedAggregator: AggregatorConfig = aggregatorCfg.kind === "nudge"
-    ? {
-        kind: "nudge",
-        epsilon: epsilonMode === "ratio" ? { ratio: epsilon } : epsilon,
-        minInputs: resolvedMinInputs,
-      }
-    : { ...aggregatorCfg, minInputs: resolvedMinInputs };
+  const resolvedEpsilon: EpsilonSpec = epsilonMode === "ratio" ? { ratio: epsilon } : epsilon;
+  let resolvedAggregator: AggregatorConfig;
+  if (aggregatorCfg.kind === "nudge") {
+    resolvedAggregator = { kind: "nudge", epsilon: resolvedEpsilon, minInputs: resolvedMinInputs };
+  } else if (aggregatorCfg.kind === "nudge-adaptive") {
+    resolvedAggregator = {
+      ...aggregatorCfg,
+      epsilon: resolvedEpsilon,
+      minInputs: resolvedMinInputs,
+    };
+  } else {
+    resolvedAggregator = { ...aggregatorCfg, minInputs: resolvedMinInputs };
+  }
 
   return { config: { ...config, aggregator: resolvedAggregator }, summary };
 }
@@ -306,6 +312,12 @@ function printConfig(config: SimulationConfig, pricePoints?: PricePoint[]): void
   const agg = config.aggregator ?? DEFAULT_AGGREGATOR;
   const aggParts: string[] = [];
   if (agg.kind === "median" && agg.k && agg.k > 0) aggParts.push(`k=${agg.k}`);
+  if (agg.kind === "nudge-adaptive") {
+    if (agg.kappa !== undefined)    aggParts.push(`κ=${agg.kappa}`);
+    if (agg.vMaxUp !== undefined)   aggParts.push(`vUp=${agg.vMaxUp}`);
+    if (agg.vMaxDown !== undefined) aggParts.push(`vDn=${agg.vMaxDown}`);
+    if (agg.pMin !== undefined)     aggParts.push(`pMin=${agg.pMin}`);
+  }
   if (agg.minInputs !== undefined) aggParts.push(`minInputs=${agg.minInputs}`);
   const aggStr = aggParts.length > 0 ? `${agg.kind}(${aggParts.join(", ")})` : agg.kind;
 
@@ -320,9 +332,9 @@ function printConfig(config: SimulationConfig, pricePoints?: PricePoint[]): void
   const honestPct = ((honest / total) * 100).toFixed(1);
   const mixStr = `${honestPct}% honest` + (parts.length ? ", " + parts.join(", ") : "");
 
-  // Epsilon string only printed for nudge.
+  // Epsilon string only printed for nudge-family aggregators.
   let epsStr = "—";
-  if (agg.kind === "nudge") {
+  if (agg.kind === "nudge" || agg.kind === "nudge-adaptive") {
     if (agg.epsilon === "auto") epsStr = "auto";
     else if (typeof agg.epsilon === "object" && "ratio" in agg.epsilon) epsStr = `ratio=${(agg.epsilon.ratio * 100).toFixed(4)}%/bump`;
     else epsStr = agg.epsilon.toString();
@@ -361,7 +373,8 @@ function printConfig(config: SimulationConfig, pricePoints?: PricePoint[]): void
   console.log(`  │  aggregator   : ${aggStr}`);
   console.log(`  │  range        : ${config.startDate} → ${config.endDate}`);
   console.log(`  │  validators   : ${total} (${mixStr})`);
-  console.log(`  │  epsilon      : ${epsStr}${agg.kind !== "nudge" ? "  (n/a)" : ""}`);
+  const epsApplies = agg.kind === "nudge" || agg.kind === "nudge-adaptive";
+  console.log(`  │  epsilon      : ${epsStr}${epsApplies ? "" : "  (n/a)"}`);
   if (rp.kind === "trades" && pricePoints && pricePoints.length > 1) {
     const md = maxBlockDelta(pricePoints);
     const autoEps = md / total;

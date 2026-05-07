@@ -59,13 +59,17 @@ export const VALIDATOR_METADATA: Record<ValidatorType, ValidatorTypeMetadata> = 
   "hopping-trim":            { attackCategory: "median", targetsConfidence: false },
 };
 
-/** Returns true iff a validator of `type` can run under aggregator `mode`. */
+/** Returns true iff a validator of `type` can run under aggregator `mode`.
+ *  `nudge-adaptive` shares the nudge submission surface, so any attacker
+ *  classified `attackCategory: "nudge"` is compatible with it too. */
 export function isCompatibleWithAggregator(
   type: ValidatorType,
   mode: AggregatorMode,
 ): boolean {
   const cat = VALIDATOR_METADATA[type].attackCategory;
-  return cat === "both" || cat === mode;
+  if (cat === "both") return true;
+  if (cat === "nudge") return mode === "nudge" || mode === "nudge-adaptive";
+  return cat === mode;
 }
 
 /** Validator types that are NOT designed to defeat confidence tracking — the

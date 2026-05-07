@@ -35,8 +35,8 @@ export interface AggregateOutcome {
 }
 
 export interface Aggregator {
-  readonly mode: "nudge" | "median";
-  readonly inputKind: "nudge" | "quote";
+  readonly mode: "nudge" | "nudge-adaptive" | "median";
+  readonly inputKind: "nudge" | "nudge-adaptive" | "quote";
   apply(ctx: AggregatorContext): AggregateOutcome;
   /** Read-only snapshot of the current per-validator confidence vector.
    *  Length === validatorCount. All-1.0 for aggregators with no tracking. */
@@ -308,6 +308,104 @@ export class NudgeAggregator implements Aggregator {
   }
 }
 
+// ── NudgeAdaptiveAggregator ────────────────────────────────────────────────
+// Extends the basic nudge rule per the governance proposal. With:
+//   P       = ctx.lastPrice
+//   V       = validatorCount     (active validator-set size; this aggregator
+//                                 doesn't track confidence, so V is constant)
+//   n       = Σ bumps in the inherent  (Up = +1, Down = −1)
+//   κ       = agreement gate. |n|/V < κ → noop.
+//   v_up,
+//   v_down  = asymmetric per-block velocity caps (fraction of P).
+//   P_min   = absolute price floor.
+//
+// Per-block update:
+//   raw   = ε · P · n · (|n|/V)
+//   cap   = (raw ≥ 0 ? v_up : v_down) · P
+//   delta = sign(raw) · min(|raw|, cap)
+//   P'    = max(P_min, P + delta)
+//
+// `ctx.epsilon` is the already-resolved per-bump step. Chain.nextBlock has
+// already done the ratio→absolute conversion (`effectiveEps = lastPrice ·
+// ratio`) when the user configured ε as `{ ratio }`. That value is exactly
+// the `ε · P` term in the proposal, so the implementation multiplies by `n`
+// and the agreement weight only — multiplying by `P` again would square it.
+// Under absolute-ε mode, `ctx.epsilon` is the raw step and the formula
+// reduces to `n · |n|/V · ε_abs`, the basic nudge update scaled by
+// agreement.
+export class NudgeAdaptiveAggregator implements Aggregator {
+  readonly mode = "nudge-adaptive" as const;
+  readonly inputKind = "nudge-adaptive" as const;
+  readonly tracksConfidence = false;
+  private readonly _confidence: Float32Array;
+
+  constructor(
+    private minInputs: number,
+    private validatorCount: number,
+    private kappa: number,
+    private vMaxUp: number,
+    private vMaxDown: number,
+    private pMin: number,
+  ) {
+    if (minInputs < 0) throw new Error(`nudge-adaptive minInputs must be ≥ 0, got ${minInputs}`);
+    if (kappa < 0 || kappa > 1) throw new Error(`nudge-adaptive kappa must be in [0, 1], got ${kappa}`);
+    if (vMaxUp < 0) throw new Error(`nudge-adaptive vMaxUp must be ≥ 0, got ${vMaxUp}`);
+    if (vMaxDown < 0) throw new Error(`nudge-adaptive vMaxDown must be ≥ 0, got ${vMaxDown}`);
+    if (pMin < 0) throw new Error(`nudge-adaptive pMin must be ≥ 0, got ${pMin}`);
+    this._confidence = new Float32Array(validatorCount);
+    this._confidence.fill(1);
+  }
+
+  confidenceSnapshot(): Float32Array {
+    return new Float32Array(this._confidence);
+  }
+
+  apply(ctx: AggregatorContext): AggregateOutcome {
+    let totalBumps = 0;
+    for (const s of ctx.inputs) if (s.kind === "nudge") totalBumps++;
+
+    let net = 0;
+    let activated = 0;
+    for (const s of ctx.inherent) {
+      if (s.kind !== "nudge") continue;
+      net += s.bump;
+      activated++;
+    }
+
+    if (activated < this.minInputs) {
+      return { newPrice: ctx.lastPrice, totalBumps, activatedBumps: 0, netDirection: 0, priceUpdated: false };
+    }
+
+    const V = this.validatorCount;
+    const agreement = V > 0 ? Math.abs(net) / V : 0;
+    if (agreement < this.kappa) {
+      // Agreement gate: insufficient consensus, hold price.
+      return { newPrice: ctx.lastPrice, totalBumps, activatedBumps: activated, netDirection: net, priceUpdated: false };
+    }
+
+    const P = ctx.lastPrice;
+    // ε·P is already baked into ctx.epsilon (see Chain.nextBlock).
+    const raw = ctx.epsilon * net * agreement;
+    const sign = raw >= 0 ? 1 : -1;
+    // Avoid `Infinity * 0 = NaN` when the cap is disabled (default) and the
+    // price has been clamped to the floor: only apply the cap when finite.
+    const vMax = raw >= 0 ? this.vMaxUp : this.vMaxDown;
+    const magnitude = Number.isFinite(vMax)
+      ? Math.min(Math.abs(raw), vMax * P)
+      : Math.abs(raw);
+    const delta = sign * magnitude;
+    const newPrice = Math.max(this.pMin, P + delta);
+
+    return {
+      newPrice,
+      totalBumps,
+      activatedBumps: activated,
+      netDirection: net,
+      priceUpdated: true,
+    };
+  }
+}
+
 // Sort, trim `floor(n × k)` from each tail, return [trimmedSorted, trimCount].
 // If trimming would empty the set, falls back to no-trim (caller decides what
 // to do with the unmodified sorted array).
@@ -474,7 +572,7 @@ export class MedianAggregator extends ConfidenceTrackingAggregator implements Ag
  *  data points come from honest validators, protecting the median. For
  *  nudge, the natural default is 0. */
 export function defaultMinInputs(kind: AggregatorConfig["kind"], validatorCount: number): number {
-  if (kind === "nudge") return 0;
+  if (kind === "nudge" || kind === "nudge-adaptive") return 0;
   return Math.floor((2 / 3) * validatorCount) + 1;
 }
 
@@ -483,6 +581,15 @@ export function makeAggregator(cfg: AggregatorConfig, validatorCount: number): A
   switch (cfg.kind) {
     case "nudge":
       return new NudgeAggregator(minInputs, validatorCount);
+    case "nudge-adaptive":
+      return new NudgeAdaptiveAggregator(
+        minInputs,
+        validatorCount,
+        cfg.kappa ?? 0,
+        cfg.vMaxUp ?? Infinity,
+        cfg.vMaxDown ?? Infinity,
+        cfg.pMin ?? 0,
+      );
     case "median": {
       const { update, on } = resolveConfidence(cfg.confidence);
       const permanent = cfg.permanentExclusion ?? true;

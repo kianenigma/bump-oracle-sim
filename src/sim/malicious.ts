@@ -60,16 +60,17 @@ abstract class BaseValidator implements ValidatorAgent {
   // ── ValidatorAgent dispatch ──────────────────────────────────────────────
 
   produceInput(ctx: ProduceCtx): Submission {
-    return ctx.inputKind === "nudge"
-      ? this.produceNudgeInput(ctx)
-      : this.produceQuoteInput(ctx);
+    // Both "nudge" and "nudge-adaptive" want bump submissions; same hook.
+    return ctx.inputKind === "quote"
+      ? this.produceQuoteInput(ctx)
+      : this.produceNudgeInput(ctx);
   }
 
   produceInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
     if (inputs.length === 0) return [];
-    return ctx.inputKind === "nudge"
-      ? this.produceNudgeInherent(inputs, ctx)
-      : this.produceQuoteInherent(inputs, ctx);
+    return ctx.inputKind === "quote"
+      ? this.produceQuoteInherent(inputs, ctx)
+      : this.produceNudgeInherent(inputs, ctx);
   }
 }
 
@@ -251,7 +252,7 @@ export class DelayedValidator extends BaseValidator {
     const targetPrice = this.observeStale(ctx.blockIndex);
     const diff = targetPrice - ctx.lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
-    const needed = optimalBumpCount(Math.abs(diff), ctx.epsilon, inputs.length);
+    const needed = optimalBumpCount(Math.abs(diff), ctx, inputs.length);
     return pickInDirectionBumps(inputs, direction, needed);
   }
 }
@@ -321,7 +322,7 @@ export class WithholderValidator extends BaseValidator {
     if (this.suppressing(observed, ctx.lastPrice)) return [];
     const diff = observed - ctx.lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
-    const needed = optimalBumpCount(Math.abs(diff), ctx.epsilon, inputs.length);
+    const needed = optimalBumpCount(Math.abs(diff), ctx, inputs.length);
     return pickInDirectionBumps(inputs, direction, needed);
   }
 }
@@ -616,7 +617,7 @@ export class BoundaryClusterValidator extends BaseValidator {
     const targetPrice = this.observe(ctx.blockIndex);
     const diff = targetPrice - ctx.lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
-    const needed = optimalBumpCount(Math.abs(diff), ctx.epsilon, inputs.length);
+    const needed = optimalBumpCount(Math.abs(diff), ctx, inputs.length);
     return pickInDirectionBumps(inputs, direction, needed);
   }
 }
@@ -665,7 +666,7 @@ export class AuthorCensorValidator extends BaseValidator {
     const targetPrice = this.observe(ctx.blockIndex);
     const diff = targetPrice - ctx.lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
-    const needed = optimalBumpCount(Math.abs(diff), ctx.epsilon, inputs.length);
+    const needed = optimalBumpCount(Math.abs(diff), ctx, inputs.length);
     return pickInDirectionBumps(inputs, direction, needed);
   }
 }
@@ -710,7 +711,7 @@ export class StateAwareSandwichValidator extends BaseValidator {
     const targetPrice = this.observe(ctx.blockIndex);
     const diff = targetPrice - ctx.lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
-    const needed = optimalBumpCount(Math.abs(diff), ctx.epsilon, inputs.length);
+    const needed = optimalBumpCount(Math.abs(diff), ctx, inputs.length);
     return pickInDirectionBumps(inputs, direction, needed);
   }
 }
@@ -771,7 +772,7 @@ export class MedianWalkingCabalValidator extends BaseValidator {
     const targetPrice = this.observe(ctx.blockIndex);
     const diff = targetPrice - ctx.lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
-    const needed = optimalBumpCount(Math.abs(diff), ctx.epsilon, inputs.length);
+    const needed = optimalBumpCount(Math.abs(diff), ctx, inputs.length);
     return pickInDirectionBumps(inputs, direction, needed);
   }
 }
@@ -833,7 +834,7 @@ export class TrimEdgeValidator extends BaseValidator {
     const targetPrice = this.observe(ctx.blockIndex);
     const diff = targetPrice - ctx.lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
-    const needed = optimalBumpCount(Math.abs(diff), ctx.epsilon, inputs.length);
+    const needed = optimalBumpCount(Math.abs(diff), ctx, inputs.length);
     return pickInDirectionBumps(inputs, direction, needed);
   }
 }
@@ -878,7 +879,7 @@ export class InnerClusterShifterValidator extends BaseValidator {
     const targetPrice = this.observe(ctx.blockIndex);
     const diff = targetPrice - ctx.lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
-    const needed = optimalBumpCount(Math.abs(diff), ctx.epsilon, inputs.length);
+    const needed = optimalBumpCount(Math.abs(diff), ctx, inputs.length);
     return pickInDirectionBumps(inputs, direction, needed);
   }
 }
@@ -958,7 +959,7 @@ export class AsymmetricTrimChaserValidator extends BaseValidator {
     const targetPrice = this.observe(ctx.blockIndex);
     const diff = targetPrice - ctx.lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
-    const needed = optimalBumpCount(Math.abs(diff), ctx.epsilon, inputs.length);
+    const needed = optimalBumpCount(Math.abs(diff), ctx, inputs.length);
     return pickInDirectionBumps(inputs, direction, needed);
   }
 }
@@ -1033,7 +1034,7 @@ export class AuthorOnlyTrimValidator extends BaseValidator {
     const targetPrice = this.observe(ctx.blockIndex);
     const diff = targetPrice - ctx.lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
-    const needed = optimalBumpCount(Math.abs(diff), ctx.epsilon, inputs.length);
+    const needed = optimalBumpCount(Math.abs(diff), ctx, inputs.length);
     return pickInDirectionBumps(inputs, direction, needed);
   }
 }
@@ -1097,7 +1098,7 @@ export class DriftTrackTrimValidator extends BaseValidator {
     const targetPrice = this.observe(ctx.blockIndex);
     const diff = targetPrice - ctx.lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
-    const needed = optimalBumpCount(Math.abs(diff), ctx.epsilon, inputs.length);
+    const needed = optimalBumpCount(Math.abs(diff), ctx, inputs.length);
     return pickInDirectionBumps(inputs, direction, needed);
   }
 }
@@ -1194,7 +1195,7 @@ export class HoppingTrimValidator extends BaseValidator {
     const targetPrice = this.observe(ctx.blockIndex);
     const diff = targetPrice - ctx.lastPrice;
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
-    const needed = optimalBumpCount(Math.abs(diff), ctx.epsilon, inputs.length);
+    const needed = optimalBumpCount(Math.abs(diff), ctx, inputs.length);
     return pickInDirectionBumps(inputs, direction, needed);
   }
 }

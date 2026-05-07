@@ -181,11 +181,19 @@ function nudgeAgg(ctx: ScenarioCtx, epsilon?: EpsilonSpec): AggregatorConfig {
  *     by design. The validate-median analyzer uses the same compatibility
  *     filter to slot each result into the symmetric or asymmetric tier.
  *   - fractions : 10% and 33% (byzantine border)
- *   - plus 4 honest baselines, one per aggregator config.
+ *   - plus honest baselines, one per aggregator config.
+ *
+ * `includeAdaptive` adds a parallel `nudge-adaptive` row at every ε so the
+ * agreement-weighted variant can be compared head-to-head against raw nudge
+ * and median. The adaptive rows use the proposed defaults (κ=0, asymmetric
+ * v_max caps disabled, no price floor) — see ADAPTIVE_DEFAULTS.
  *
  * Confidence-targeting cabal types are excluded entirely — see VALIDATOR_METADATA.
  */
-function buildCoreAttackerConfigs(ctx: ScenarioCtx): SimulationConfig[] {
+function buildCoreAttackerConfigs(
+  ctx: ScenarioCtx,
+  opts: { includeAdaptive?: boolean } = {},
+): SimulationConfig[] {
   const fractions = [0.10, 0.33];
   const autoEps = 1 / ctx.validatorCount / 10;
   const epsilons: Array<{ label: string; value: number }> = [
@@ -194,14 +202,28 @@ function buildCoreAttackerConfigs(ctx: ScenarioCtx): SimulationConfig[] {
     { label: "auto/4", value: autoEps / 4 },
   ];
   const medianAgg: AggregatorConfig = { kind: "median" };
+  const adaptiveAgg = (eps: number): AggregatorConfig => ({
+    kind: "nudge-adaptive",
+    epsilon: eps,
+    kappa: ADAPTIVE_DEFAULTS.kappa,
+    vMaxUp: ADAPTIVE_DEFAULTS.vMaxUp,
+    vMaxDown: ADAPTIVE_DEFAULTS.vMaxDown,
+    pMin: ADAPTIVE_DEFAULTS.pMin,
+  });
   const aggLabel = (a: AggregatorConfig, epsLabel?: string) =>
-    a.kind === "nudge" ? `nudge ε=${epsLabel}` : a.kind;
+      a.kind === "nudge"           ? `nudge ε=${epsLabel}`
+    : a.kind === "nudge-adaptive"  ? `adaptive ε=${epsLabel}`
+                                   : a.kind;
 
   const configs: SimulationConfig[] = [];
-  // Honest baseline per aggregator config — needed for both tiers.
+  // Honest baselines.
   for (const e of epsilons) {
     configs.push(makeConfig(ctx, [], `${aggLabel({ kind: "nudge", epsilon: e.value }, e.label)} · honest`,
       { kind: "nudge", epsilon: e.value }));
+    if (opts.includeAdaptive) {
+      configs.push(makeConfig(ctx, [], `${aggLabel(adaptiveAgg(e.value), e.label)} · honest`,
+        adaptiveAgg(e.value)));
+    }
   }
   configs.push(makeConfig(ctx, [], `${aggLabel(medianAgg)} · honest`, medianAgg));
 
@@ -210,13 +232,16 @@ function buildCoreAttackerConfigs(ctx: ScenarioCtx): SimulationConfig[] {
       const fracPct = (frac * 100).toFixed(0);
       const specs: GroupSpec[] = [{ type, fraction: frac }];
       // Only run aggregator/attacker pairs that are compatible per metadata.
-      // Attackers tagged "median"/"nudge" don't run under the wrong family;
-      // attackers tagged "both" run under both.
       if (isCompatibleWithAggregator(type, "nudge")) {
         for (const e of epsilons) {
           configs.push(makeConfig(ctx, specs,
             `${aggLabel({ kind: "nudge", epsilon: e.value }, e.label)} · ${type}@${fracPct}%`,
             { kind: "nudge", epsilon: e.value }));
+          if (opts.includeAdaptive && isCompatibleWithAggregator(type, "nudge-adaptive")) {
+            configs.push(makeConfig(ctx, specs,
+              `${aggLabel(adaptiveAgg(e.value), e.label)} · ${type}@${fracPct}%`,
+              adaptiveAgg(e.value)));
+          }
         }
       }
       if (isCompatibleWithAggregator(type, "median")) {
@@ -227,6 +252,21 @@ function buildCoreAttackerConfigs(ctx: ScenarioCtx): SimulationConfig[] {
   }
   return configs;
 }
+
+/**
+ * Defaults for the `nudge-adaptive` aggregator used by `validate-median` and
+ * `core-attackers`. The agreement-weighting term `|n|/V` already does most of
+ * the work — it cuts attacker leverage on partial-agreement blocks while
+ * leaving full-consensus tracking unchanged. For a clean head-to-head against
+ * raw nudge we keep the extra knobs disabled by default (κ=0, v_max=∞, pMin=0)
+ * so the only difference attributable to adaptive is the agreement weight.
+ */
+const ADAPTIVE_DEFAULTS = {
+  kappa: 0,
+  vMaxUp: Infinity,
+  vMaxDown: Infinity,
+  pMin: 0,
+} as const;
 
 // ── Tournament harness ──────────────────────────────────────────────────────
 // See TOURNAMENT.md for the methodology. Each round runs the same attacker
@@ -534,7 +574,7 @@ export const scenarios: Record<string, ScenarioFn> = {
    */
   async "core-attackers"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: core-attackers]`);
-    const configs = buildCoreAttackerConfigs(ctx);
+    const configs = buildCoreAttackerConfigs(ctx, { includeAdaptive: true });
     console.log(`  ${configs.length} simulations`);
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
@@ -555,7 +595,7 @@ export const scenarios: Record<string, ScenarioFn> = {
    */
   async "validate-median"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: validate-median]`);
-    const configs = buildCoreAttackerConfigs(ctx);
+    const configs = buildCoreAttackerConfigs(ctx, { includeAdaptive: true });
     console.log(`  ${configs.length} simulations`);
     const results = await runBatch(configs, priceSource, outputDir, threadCount);
     analyzeMedianVsNudge(results);
