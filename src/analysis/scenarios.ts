@@ -20,6 +20,7 @@ import { ChunkWriter, CsvWriter, combineSinks, writeIndex, scenarioDirName } fro
 import { loadCriteria } from "./research-criteria.js";
 import { generateReport } from "./research-report.js";
 import { buildValidators, formatValidators, NON_CONFIDENCE_ATTACKERS, type GroupSpec } from "../validators.js";
+import { analyzeMedianVsNudge } from "./median-vs-nudge.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Glossary — what each agent does. Full implementations: src/sim/validator.ts,
@@ -156,6 +157,51 @@ function makeConfig(
 /** Convenience: nudge aggregator with the given epsilon (or ctx.defaultEpsilon). */
 function nudgeAgg(ctx: ScenarioCtx, epsilon?: EpsilonSpec): AggregatorConfig {
   return { kind: "nudge", epsilon: epsilon ?? ctx.defaultEpsilon };
+}
+
+/**
+ * The shared 44-simulation grid driving both `core-attackers` and
+ * `validate-median`:
+ *   - aggregators: median + 3 nudge ε values (auto, auto/2, auto/4)
+ *   - attackers : NON_CONFIDENCE_ATTACKERS (malicious, pushy, noop, delayed, drift)
+ *   - fractions : 10% and 33% (byzantine border)
+ *   - plus 4 honest baselines, one per aggregator config.
+ *
+ * Confidence-targeting cabal types are excluded — see VALIDATOR_METADATA.
+ */
+function buildCoreAttackerConfigs(ctx: ScenarioCtx): SimulationConfig[] {
+  const fractions = [0.10, 0.33];
+  const autoEps = 1 / ctx.validatorCount / 10;
+  const epsilons: Array<{ label: string; value: number }> = [
+    { label: "auto",   value: autoEps },
+    { label: "auto/2", value: autoEps / 2 },
+    { label: "auto/4", value: autoEps / 4 },
+  ];
+  const medianAgg: AggregatorConfig = { kind: "median" };
+  const aggLabel = (a: AggregatorConfig, epsLabel?: string) =>
+    a.kind === "nudge" ? `nudge ε=${epsLabel}` : a.kind;
+
+  const configs: SimulationConfig[] = [];
+  for (const e of epsilons) {
+    configs.push(makeConfig(ctx, [], `${aggLabel({ kind: "nudge", epsilon: e.value }, e.label)} · honest`,
+      { kind: "nudge", epsilon: e.value }));
+  }
+  configs.push(makeConfig(ctx, [], `${aggLabel(medianAgg)} · honest`, medianAgg));
+
+  for (const type of NON_CONFIDENCE_ATTACKERS) {
+    for (const frac of fractions) {
+      const fracPct = (frac * 100).toFixed(0);
+      const specs: GroupSpec[] = [{ type, fraction: frac }];
+      for (const e of epsilons) {
+        configs.push(makeConfig(ctx, specs,
+          `${aggLabel({ kind: "nudge", epsilon: e.value }, e.label)} · ${type}@${fracPct}%`,
+          { kind: "nudge", epsilon: e.value }));
+      }
+      configs.push(makeConfig(ctx, specs,
+        `${aggLabel(medianAgg)} · ${type}@${fracPct}%`, medianAgg));
+    }
+  }
+  return configs;
 }
 
 // ── Tournament harness ──────────────────────────────────────────────────────
@@ -458,62 +504,38 @@ export const scenarios: Record<string, ScenarioFn> = {
   /**
    * Core-attackers research sweep — the post-confidence-tracking baseline.
    *
-   * Compares the **nudge** aggregator (across three ε values: auto, auto/2,
-   * auto/4) and the **median** aggregator (no confidence tracking) against
-   * the non-confidence-targeting attackers from NON_CONFIDENCE_ATTACKERS:
-   * malicious, pushy, noop, delayed, drift.
-   *
-   * Adversary fractions: 33% (main focus, "byzantine border") and 10% (smaller
-   * data-point). For each (aggregator, attacker, fraction) we run one sim,
-   * plus an honest baseline for every aggregator config.
-   *
-   *   Sims = 4 baselines + |attackers|·|fractions|·(3 nudge ε + 1 median)
-   *        = 4 + 5·2·4 = 44
-   *
-   * Confidence-targeting cabal types (withholder, bias-injector, etc.) are
-   * deliberately excluded — see VALIDATOR_METADATA in src/validators.ts.
+   * See `buildCoreAttackerConfigs` for the grid: median + 3 nudge ε's against
+   * the non-confidence-targeting attackers at 10% and 33%, plus baselines.
+   * 44 simulations total.
    */
   async "core-attackers"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: core-attackers]`);
-    const fractions = [0.10, 0.33];
-    const autoEps = 1 / ctx.validatorCount / 10;
-    const epsilons: Array<{ label: string; value: number }> = [
-      { label: "auto",    value: autoEps },
-      { label: "auto/2",  value: autoEps / 2 },
-      { label: "auto/4",  value: autoEps / 4 },
-    ];
-    const medianAgg: AggregatorConfig = { kind: "median" };
-    const aggLabel = (a: AggregatorConfig, epsLabel?: string) =>
-      a.kind === "nudge" ? `nudge ε=${epsLabel}` : a.kind;
-
-    const configs: SimulationConfig[] = [];
-
-    // Honest baselines — one per aggregator config so each malicious row has
-    // a same-aggregator reference to compare against.
-    for (const e of epsilons) {
-      configs.push(makeConfig(ctx, [], `${aggLabel({ kind: "nudge", epsilon: e.value }, e.label)} · honest`,
-        { kind: "nudge", epsilon: e.value }));
-    }
-    configs.push(makeConfig(ctx, [], `${aggLabel(medianAgg)} · honest`, medianAgg));
-
-    // Attacker × fraction × aggregator grid.
-    for (const type of NON_CONFIDENCE_ATTACKERS) {
-      for (const frac of fractions) {
-        const fracPct = (frac * 100).toFixed(0);
-        const specs: GroupSpec[] = [{ type, fraction: frac }];
-        for (const e of epsilons) {
-          configs.push(makeConfig(ctx, specs,
-            `${aggLabel({ kind: "nudge", epsilon: e.value }, e.label)} · ${type}@${fracPct}%`,
-            { kind: "nudge", epsilon: e.value }));
-        }
-        configs.push(makeConfig(ctx, specs,
-          `${aggLabel(medianAgg)} · ${type}@${fracPct}%`, medianAgg));
-      }
-    }
-
-    console.log(`  ${configs.length} simulations: ${epsilons.length} nudge ε's + 1 median × `
-      + `(1 honest + ${NON_CONFIDENCE_ATTACKERS.length} attackers × ${fractions.length} fractions)`);
+    const configs = buildCoreAttackerConfigs(ctx);
+    console.log(`  ${configs.length} simulations`);
     return runBatch(configs, priceSource, outputDir, threadCount);
+  },
+
+  /**
+   * `validate-median` — runs the core-attackers grid, then evaluates every
+   * (attacker, fraction) row under multiple distinct scoring functions
+   * (mean-deviation, max-deviation, p99-tail, convergence-rate, integral,
+   * recovery-speed, composite). For each row it compares the median
+   * aggregator's score against the best of the three nudge ε's.
+   *
+   * The point: confirm the conclusion that median dominates nudge isn't an
+   * artefact of one arbitrary scoring function. If median wins under every
+   * lens, we can claim dominance with more confidence than the existing
+   * single-composite research-criteria score allowed.
+   *
+   * Designed to run against `--data-source synthetic` for reproducibility.
+   */
+  async "validate-median"(ctx, priceSource, outputDir, threadCount) {
+    console.log(`\n[Scenario: validate-median]`);
+    const configs = buildCoreAttackerConfigs(ctx);
+    console.log(`  ${configs.length} simulations`);
+    const results = await runBatch(configs, priceSource, outputDir, threadCount);
+    analyzeMedianVsNudge(results);
+    return results;
   },
 
   /** Baseline: 100% honest. */
