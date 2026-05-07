@@ -37,6 +37,19 @@ export const DEFAULT_VALIDATOR_PARAMS: Required<ValidatorParams> = {
   inbandShifterDirection: "up",
   inbandShifterQuoteBias: 0.04,              // 4% — strictly inside the 5% wideband
   inbandShifterCeilingBumps: 200,
+  boundaryClusterDirection: "down",          // cluster below lastPrice by default
+  boundaryClusterBias: 0.002,                // 0.2% — small enough to land inside honest spread
+  authorCensorDirection: "down",             // push median below lastPrice by default
+  authorCensorBias: 0.001,                   // 0.1% — pivot just below lastPrice; drop everything above
+  sandwichBias: 0.005,                       // 0.5% — sandwich-quote magnitude away from real
+  medianWalkBias: 0.5,                       // 50% — cabal cluster at lastPrice/2 (extreme low)
+  trimEdgeBias: 0.10,                        // 10% — large cluster offset, far outside honest jitter
+  trimEdgeDirection: "down",                 // cabal clusters below lastPrice; author drops top floor(N/3)
+  innerClusterBias: 0.0008,                  // 0.08% — ~0.8σ on synthetic jitter; cabal lands inside honest distribution
+  trimChaserBias: 0.10,                      // 10% — same magnitude as trimEdgeBias; sign flips per block (state-aware)
+  driftTrackBias: 0.10,                      // 10% — cabal anchors cluster at first-block lastPrice * (1 - 0.10)
+  hoppingTrimBias: 0.10,                     // 10% — same magnitude as trimEdgeBias; sign latched per hold window
+  hoppingHoldBlocks: 100,                    // ≈10 minutes — cabal holds chosen push direction this long before re-evaluating
 };
 
 // How often to snapshot the confidence vector into BlockMetrics. With a 6s

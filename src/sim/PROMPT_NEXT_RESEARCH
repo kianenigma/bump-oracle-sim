@@ -30,4 +30,15 @@ The new scenario will:
 
 ---
 
-Then I presume our conclusion would be that the mean model is always better. Validate this against the synthetic data and conclude that it is the case.
+So far our conclusion is that the median oracle aggregator is strictly better than the bump/nudge model. Our goal is to attack the system, and break that assumption.
+
+We have previously worked on some attacks that required us to implement a confidence tracking system, and made attackers that try and avoid getting caught in this system. This is not our goal now. Our goal is to keep the median model simple, without any confidence tracking.
+
+We are only focusing on new attackers against the median model.
+
+For at least 10 rounds, similar to what we did in @TOURNAMENT.md file, spawn a sub-agent that will try and attack the system. The subagent will likely write a new attacker malicious validator. Then simulate this malicious validator by adding it to our `validate-median` scenario, and see how it behaves. The terminal logs of this scenario should be self-explanatory
+
+For each new attacker, report:
+
+* How worse it made median model perform
+* Did it make it worse than nudge in any metric?

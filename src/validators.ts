@@ -41,6 +41,22 @@ export const VALIDATOR_METADATA: Record<ValidatorType, ValidatorTypeMetadata> = 
   "stealth-withholder": { attackCategory: "nudge", targetsConfidence: true  },
   "convergent-cabal":   { attackCategory: "nudge", targetsConfidence: true  },
   "inband-shifter":     { attackCategory: "median", targetsConfidence: true  },
+  // Median-only research attackers (rounds 1-10). Their nudge-mode hooks are
+  // HonestValidator clones — i.e. running them under nudge produces a clean
+  // honest baseline, not a meaningful attack. Tagged "median" so the engine
+  // refuses misconfigured runs and the validate-median analyzer can present
+  // them in the asymmetric tier rather than pretending the nudge column
+  // measures their effect.
+  "boundary-cluster":        { attackCategory: "median", targetsConfidence: false },
+  "author-censor":           { attackCategory: "median", targetsConfidence: false },
+  "state-aware-sandwich":    { attackCategory: "median", targetsConfidence: false },
+  "median-walking-cabal":    { attackCategory: "median", targetsConfidence: false },
+  "trim-edge":               { attackCategory: "median", targetsConfidence: false },
+  "inner-cluster-shifter":   { attackCategory: "median", targetsConfidence: false },
+  "asymmetric-trim-chaser":  { attackCategory: "median", targetsConfidence: false },
+  "author-only-trim":        { attackCategory: "median", targetsConfidence: false },
+  "drift-track-trim":        { attackCategory: "median", targetsConfidence: false },
+  "hopping-trim":            { attackCategory: "median", targetsConfidence: false },
 };
 
 /** Returns true iff a validator of `type` can run under aggregator `mode`. */
@@ -260,7 +276,7 @@ export function parseValidatorsCli(
     }
 
     if (!isValidatorType(name) || name === "honest") {
-      console.error(`Unknown validator type "${name}" in --mix. Available: malicious, pushy, noop, delayed, drift, withholder, bias-injector, overshoot-ratchet, stealth-withholder, convergent-cabal, inband-shifter.`);
+      console.error(`Unknown validator type "${name}" in --mix. Available: malicious, pushy, noop, delayed, drift, withholder, bias-injector, overshoot-ratchet, stealth-withholder, convergent-cabal, inband-shifter, boundary-cluster, author-censor, state-aware-sandwich, median-walking-cabal, trim-edge, inner-cluster-shifter, asymmetric-trim-chaser, author-only-trim, drift-track-trim, hopping-trim.`);
       process.exit(1);
     }
 
@@ -278,5 +294,9 @@ function isValidatorType(s: string): s is ValidatorType {
   return s === "honest" || s === "malicious" || s === "pushy" || s === "noop"
     || s === "delayed" || s === "drift" || s === "withholder" || s === "bias-injector"
     || s === "overshoot-ratchet" || s === "stealth-withholder" || s === "convergent-cabal"
-    || s === "inband-shifter";
+    || s === "inband-shifter" || s === "boundary-cluster" || s === "author-censor"
+    || s === "state-aware-sandwich" || s === "median-walking-cabal" || s === "trim-edge"
+    || s === "inner-cluster-shifter" || s === "asymmetric-trim-chaser"
+    || s === "author-only-trim" || s === "drift-track-trim"
+    || s === "hopping-trim";
 }

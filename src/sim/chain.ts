@@ -92,15 +92,31 @@ export class Chain {
     // blocks with different inherent sizes.
     let inherentTotal = 0;
     let inherentNonHonest = 0;
+    // Build per-block inherentVotes only for median-mode (quote-input) runs;
+    // nudge inherents are bumps, not value quotes, so the list would be
+    // meaningless. The aggregator's inputKind tells us which mode we're in.
+    const trackInherentVotes = this.aggregator.inputKind === "quote";
+    const inherentVotes: BlockMetrics["inherentVotes"] = trackInherentVotes ? [] : undefined;
     for (const s of inherent) {
       if (s.kind === "abstain") continue;
       inherentTotal++;
-      if (!this.validators[s.validatorIndex].isHonest) inherentNonHonest++;
+      const v = this.validators[s.validatorIndex];
+      if (!v.isHonest) inherentNonHonest++;
+      if (inherentVotes && s.kind === "quote") {
+        inherentVotes.push({ type: v.type, price: s.price });
+      }
     }
     const inherentNonHonestPct = inherentTotal === 0 ? 0 : (inherentNonHonest / inherentTotal) * 100;
 
     const deviation = Math.abs(realPrice - this.lastPrice);
     const deviationPct = realPrice !== 0 ? (deviation / realPrice) * 100 : 0;
+
+    let medianValidatorIndex: number | undefined;
+    let medianValidatorType: BlockMetrics["medianValidatorType"];
+    if (out.medianValidatorIndex !== undefined) {
+      medianValidatorIndex = out.medianValidatorIndex;
+      medianValidatorType = this.validators[out.medianValidatorIndex]?.type;
+    }
 
     const metrics: BlockMetrics = {
       block: blockIndex,
@@ -117,6 +133,9 @@ export class Chain {
       inherentNonHonest,
       inherentNonHonestPct,
       priceUpdated: out.priceUpdated,
+      medianValidatorIndex,
+      medianValidatorType,
+      inherentVotes,
       deviation,
       deviationPct,
     };

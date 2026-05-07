@@ -17,6 +17,9 @@ export class ChunkWriter {
   private realPrices: number[] = [];
   private oraclePrices: number[] = [];
   private deviationPcts: number[] = [];
+  private priceUpdated: number[] = [];
+  private inherentTotals: number[] = [];
+  private medianValidatorIndices: number[] = [];
   // Sparse: only populated on blocks where m.confidenceSnapshot was attached.
   private confTicks: number[] = [];
   private confSamples: number[][] = [];
@@ -42,6 +45,9 @@ export class ChunkWriter {
     this.realPrices.push(m.realPrice);
     this.oraclePrices.push(m.oraclePrice);
     this.deviationPcts.push(m.deviationPct);
+    this.priceUpdated.push(m.priceUpdated ? 1 : 0);
+    this.inherentTotals.push(m.inherentTotal);
+    this.medianValidatorIndices.push(m.medianValidatorIndex ?? -1);
     if (m.confidenceSnapshot) {
       this.confTicks.push(tickInChunk);
       // Convert Float32Array to plain number[] for JSON.
@@ -75,6 +81,9 @@ export class ChunkWriter {
       realPrices: this.realPrices,
       oraclePrices: this.oraclePrices,
       deviationPcts: this.deviationPcts,
+      priceUpdated: this.priceUpdated,
+      inherentTotals: this.inherentTotals,
+      medianValidatorIndices: this.medianValidatorIndices,
     };
     if (this.confTicks.length > 0) {
       chunk.confidenceSamples = { ticks: this.confTicks, samples: this.confSamples };
@@ -94,6 +103,9 @@ export class ChunkWriter {
     this.realPrices = [];
     this.oraclePrices = [];
     this.deviationPcts = [];
+    this.priceUpdated = [];
+    this.inherentTotals = [];
+    this.medianValidatorIndices = [];
     this.confTicks = [];
     this.confSamples = [];
   }
@@ -112,6 +124,9 @@ function writeChunkStreaming(path: string, chunk: BlockChunk): void {
     ["oraclePrices", chunk.oraclePrices],
     ["deviationPcts", chunk.deviationPcts],
   ];
+  if (chunk.priceUpdated) arrays.push(["priceUpdated", chunk.priceUpdated]);
+  if (chunk.inherentTotals) arrays.push(["inherentTotals", chunk.inherentTotals]);
+  if (chunk.medianValidatorIndices) arrays.push(["medianValidatorIndices", chunk.medianValidatorIndices]);
 
   for (let a = 0; a < arrays.length; a++) {
     const [name, arr] = arrays[a];
@@ -225,7 +240,8 @@ export class CsvWriter {
     Bun.write(path, ""); // truncate
     this.writer = Bun.file(path).writer();
     this.writer.write(
-      "block,timestamp,authorIndex,authorType,inherentTotal,inherentNonHonest,inherentNonHonestPct,priceUpdated,oraclePrice,realPrice,priceDiff\n",
+      "block,timestamp,authorIndex,authorType,inherentTotal,inherentNonHonest,inherentNonHonestPct,priceUpdated," +
+      "oraclePrice,realPrice,priceDiff,medianValidatorType,inherentVotes\n",
     );
   }
 
@@ -233,11 +249,26 @@ export class CsvWriter {
     return (m: BlockMetrics) => {
       // Signed diff: oracle - real. Positive = oracle is above real.
       const diff = m.oraclePrice - m.realPrice;
+      // medianValidatorType is only set when the aggregator is median-mode AND
+      // priceUpdated; nudge mode and freeze blocks emit "-".
+      const medType = m.medianValidatorType ?? "-";
+      // inherentVotes is only populated for median-mode runs (chain.ts skips
+      // it for nudge to keep memory bounded). Format `[(type, price), ...]`.
+      // Empty bracket "[]" for nudge mode and for blocks with no quotes.
+      let votes = "[]";
+      if (m.inherentVotes && m.inherentVotes.length > 0) {
+        const parts = m.inherentVotes.map(v => `(${v.type}, ${v.price})`);
+        votes = `[${parts.join("; ")}]`;
+      }
+      // Wrap inherentVotes in double-quotes (escaping any internal quotes) so
+      // the comma-rich payload doesn't shred the CSV row.
+      const votesQuoted = `"${votes.replace(/"/g, '""')}"`;
       this.writer.write(
         `${m.block},${m.timestamp},${m.authorIndex},${m.authorType},` +
         `${m.inherentTotal},${m.inherentNonHonest},${m.inherentNonHonestPct.toFixed(4)},` +
         `${m.priceUpdated ? 1 : 0},` +
-        `${m.oraclePrice},${m.realPrice},${diff}\n`,
+        `${m.oraclePrice},${m.realPrice},${diff},` +
+        `${medType},${votesQuoted}\n`,
       );
     };
   }

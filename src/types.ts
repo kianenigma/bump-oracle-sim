@@ -135,7 +135,7 @@ export interface ResolvedPriceSource {
 // old top-level (validatorCount, validatorMix, jitterStdDev,
 // validatorPriceSource, maliciousParams) bundle. A simulation's full
 // validator set is the concatenation of all groups, in order.
-export type ValidatorType = "honest" | "malicious" | "pushy" | "noop" | "delayed" | "drift" | "withholder" | "bias-injector" | "overshoot-ratchet" | "stealth-withholder" | "convergent-cabal" | "inband-shifter";
+export type ValidatorType = "honest" | "malicious" | "pushy" | "noop" | "delayed" | "drift" | "withholder" | "bias-injector" | "overshoot-ratchet" | "stealth-withholder" | "convergent-cabal" | "inband-shifter" | "boundary-cluster" | "author-censor" | "state-aware-sandwich" | "median-walking-cabal" | "trim-edge" | "inner-cluster-shifter" | "asymmetric-trim-chaser" | "author-only-trim" | "drift-track-trim" | "hopping-trim";
 
 /** Type-specific behavior knobs. Required keys depend on `type`:
  *    delayed   → delayBlocks
@@ -235,6 +235,83 @@ export interface ValidatorParams {
    *  as `overshootRatchetCeilingBumps` but kept independent so each
    *  scenario can tune the two attackers without coupling them. Default 200. */
   inbandShifterCeilingBumps?: number;
+  /** boundary-cluster: which side of `lastPrice` the cabal clusters on.
+   *  "down" = quote `lastPrice * (1 - bias)` (drag median below lastPrice);
+   *  "up"   = quote `lastPrice * (1 + bias)` (drag median above lastPrice). */
+  boundaryClusterDirection?: "up" | "down";
+  /** boundary-cluster: cluster offset as a fraction of `lastPrice`. Must be
+   *  small enough that the cluster lands inside the honest quote spread —
+   *  between the honest lower quartile and the honest median (or upper
+   *  quartile and median, when direction="up"). Default 0.002 (0.2%). */
+  boundaryClusterBias?: number;
+  /** author-censor: which side of the honest distribution the cabal author
+   *  preserves. "down" = drop every quote above pivot (median falls below
+   *  lastPrice); "up" = drop every quote below pivot (median rises above). */
+  authorCensorDirection?: "up" | "down";
+  /** author-censor: pivot offset as a fraction of `lastPrice`. The author
+   *  drops every gossiped quote on the wrong side of
+   *  `lastPrice * (1 + sign * bias)`. Smaller bias = more aggressive censor
+   *  (kept quotes are tightly clustered against the cabal's side). Default
+   *  0.001 (0.1%). */
+  authorCensorBias?: number;
+  /** median-walking-cabal: cabal cluster offset as a fraction of `lastPrice`,
+   *  applied DOWNWARD (cabal quotes at `lastPrice * (1 - medianWalkBias)`).
+   *  Default 0.5 (half lastPrice — extreme low cluster). Must be large enough
+   *  that the cabal cluster is unambiguously separable from honest quotes
+   *  (the cabal-author hook keeps quotes with price < lastPrice * 0.6). */
+  medianWalkBias?: number;
+  /** trim-edge: cabal cluster offset as a fraction of `lastPrice`. All
+   *  cabal members submit `lastPrice * (1 ± trimEdgeBias)`. Default 0.10
+   *  (10%) — large enough that the cabal cluster is unambiguously
+   *  separable from the honest distribution (~0.1% jitter). */
+  trimEdgeBias?: number;
+  /** trim-edge: which side of `lastPrice` the cabal clusters on, and which
+   *  end of the sorted quote list the cabal author trims. "down" = cabal
+   *  quotes at `lastPrice * (1 - bias)`, author drops the top floor(N/3);
+   *  "up" = cabal quotes at `lastPrice * (1 + bias)`, author drops the
+   *  bottom floor(N/3). Default "down". */
+  trimEdgeDirection?: "up" | "down";
+  /** inner-cluster-shifter: cabal cluster offset as a fraction of own
+   *  observation, applied DOWNWARD (cabal quotes at `obs * (1 - bias)`).
+   *  Must lie INSIDE the honest jitter distribution — i.e. on the order of
+   *  0.5σ–2σ of `priceSource.jitterStdDev`. With synthetic σ ≈ 0.001 (0.1%),
+   *  the default 0.0008 (0.08%) places the cabal cluster around the honest
+   *  ~25th percentile, dense enough to occupy the median rank at ~33% cabal
+   *  saturation while remaining indistinguishable from a slightly unlucky
+   *  honest observation in any per-validator audit. Default 0.0008. */
+  innerClusterBias?: number;
+  /** state-aware-sandwich: quote-mode bias as a fraction of `lastPrice`,
+   *  applied AWAY from real in whichever direction the oracle is currently
+   *  drifting (trailing → push further down, leading → push further up).
+   *  Tuned to sit in the middle of the sorted quote distribution at ~1/3
+   *  cabal share — large enough to bite, small enough to avoid saturation.
+   *  Default 0.005 (0.5%). */
+  sandwichBias?: number;
+  /** asymmetric-trim-chaser: cabal cluster offset as a fraction of
+   *  `lastPrice`, applied in the direction that pushes the oracle FURTHER
+   *  from real this block (sign chosen per-block from the observation vs
+   *  lastPrice comparison). Same magnitude semantics as `trimEdgeBias`;
+   *  default 0.10 (10%) — large enough that the cabal cluster is unambiguously
+   *  separable from the honest jitter (~0.1%), so the author-side asymmetric
+   *  trim drops only honest quotes on the opposite side. */
+  trimChaserBias?: number;
+  /** drift-track-trim: cabal cluster offset as a fraction of `targetPrice`,
+   *  applied DOWNWARD. The cabal latches `targetPrice` to ctx.lastPrice on
+   *  its first block and never updates it; quotes are submitted at
+   *  `targetPrice * (1 - driftTrackBias)` regardless of current oracle state.
+   *  As the oracle recovers between cabal-author blocks, the cabal cluster
+   *  remains anchored at the original level, so each cabal-author block
+   *  re-asserts the median below real with a sustained gap. Default 0.10
+   *  (10%) — same magnitude as `trimEdgeBias` for direct comparison. */
+  driftTrackBias?: number;
+  /** hopping-trim: cabal cluster offset as a fraction of `lastPrice`, applied
+   *  in `lockedDir` (set to push the oracle FURTHER from real at lock time).
+   *  Same magnitude semantics as `trimChaserBias`. Default 0.10 (10%). */
+  hoppingTrimBias?: number;
+  /** hopping-trim: number of blocks the cabal commits to a chosen push
+   *  direction before re-evaluating. Avoids the per-block oscillation that
+   *  weakened asymmetric-trim-chaser. Default 100 (≈10 minutes at 6s blocks). */
+  hoppingHoldBlocks?: number;
 }
 
 export interface ValidatorGroup {
@@ -276,6 +353,18 @@ export interface BlockMetrics {
    *  the minInputs gate fired (or the inherent was empty) and the runtime
    *  held `lastPrice`. */
   priceUpdated: boolean;
+  /** Validator index whose quote was selected as the median for this block.
+   *  Defined only when the aggregator is median-mode AND `priceUpdated` is
+   *  true; undefined for nudge mode or freeze blocks. */
+  medianValidatorIndex?: number;
+  /** Type of the validator at `medianValidatorIndex`. Only set under the same
+   *  conditions. Used by the CSV and the chart tooltip. */
+  medianValidatorType?: ValidatorType;
+  /** Per-block list of every quote in the inherent (only populated for
+   *  median-mode blocks; nudge mode leaves this undefined to avoid the
+   *  per-block memory cost). Used exclusively by the CSV writer; not
+   *  persisted to the chunked .simdata format. */
+  inherentVotes?: Array<{ type: ValidatorType; price: number }>;
   deviation: number; // absolute difference real - oracle
   deviationPct: number; // percentage deviation
   /** Sampled confidence vector, populated only on every Nth block (see
@@ -356,6 +445,17 @@ export interface BlockChunk {
   realPrices: number[];
   oraclePrices: number[];
   deviationPcts: number[];
+  /** Per-block flag: 1 if the aggregator computed a fresh price, 0 if the
+   *  minInputs gate fired and the price was held. Optional for backward
+   *  compatibility with simdata directories produced before this field was
+   *  added — readers should default to 1 (assume update) when absent. */
+  priceUpdated?: number[];
+  /** Number of non-abstain submissions in the inherent each block. Optional
+   *  for backward compat. */
+  inherentTotals?: number[];
+  /** Validator index whose quote was the median, per block. -1 means "not
+   *  applicable" (nudge mode or freeze block). Optional for backward compat. */
+  medianValidatorIndices?: number[];
   /** Optional: sparse confidence samples for this chunk. `tick` indexes are
    *  block offsets within the chunk (0..blockCount-1). Each entry of
    *  `samples` is a length-N array (one per validator). Absent when the

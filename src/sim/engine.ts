@@ -27,6 +27,16 @@ import {
   StealthWithholderValidator,
   ConvergentCabalValidator,
   InBandShifterValidator,
+  BoundaryClusterValidator,
+  AuthorCensorValidator,
+  StateAwareSandwichValidator,
+  MedianWalkingCabalValidator,
+  TrimEdgeValidator,
+  InnerClusterShifterValidator,
+  AsymmetricTrimChaserValidator,
+  AuthorOnlyTrimValidator,
+  DriftTrackTrimValidator,
+  HoppingTrimValidator,
 } from "./malicious.js";
 import { Chain } from "./chain.js";
 import { makeAggregator, defaultMinInputs } from "./aggregator.js";
@@ -58,6 +68,16 @@ const VALIDATOR_REGISTRY: Record<ValidatorGroup["type"], ValidatorCtor> = {
   "stealth-withholder": StealthWithholderValidator,
   "convergent-cabal": ConvergentCabalValidator,
   "inband-shifter": InBandShifterValidator,
+  "boundary-cluster": BoundaryClusterValidator,
+  "author-censor": AuthorCensorValidator,
+  "state-aware-sandwich": StateAwareSandwichValidator,
+  "median-walking-cabal": MedianWalkingCabalValidator,
+  "trim-edge": TrimEdgeValidator,
+  "inner-cluster-shifter": InnerClusterShifterValidator,
+  "asymmetric-trim-chaser": AsymmetricTrimChaserValidator,
+  "author-only-trim": AuthorOnlyTrimValidator,
+  "drift-track-trim": DriftTrackTrimValidator,
+  "hopping-trim": HoppingTrimValidator,
 };
 
 export type BlockSink = (block: BlockMetrics) => void;

@@ -1821,9 +1821,28 @@
           const dot = scenarioColorMap.get(a.scenario) || '#888';
           const glyph = TYPE_GLYPH[a.type] ?? '·';
           const labelEsc = (a.label || `#${a.scenario}`).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+          // Build the price-update / inherent / median-validator suffix from
+          // the new /api/block fields. Falls back gracefully when the simdata
+          // is older and these fields are absent.
+          let detail = '';
+          if (a.priceUpdated === false) {
+            detail = ' <span style="color:#e88">⨯ frozen</span>';
+            if (a.inherentTotal !== null && a.inherentTotal !== undefined) {
+              detail += ` <span style="opacity:0.7">(inherent=${a.inherentTotal})</span>`;
+            }
+          } else if (a.priceUpdated === true) {
+            detail = ' <span style="color:#7d7">✓ updated</span>';
+            if (a.inherentTotal !== null && a.inherentTotal !== undefined) {
+              detail += ` <span style="opacity:0.7">(${a.inherentTotal} inherents)</span>`;
+            }
+            if (a.medianValidatorType) {
+              const mglyph = TYPE_GLYPH[a.medianValidatorType] ?? '·';
+              detail += ` <span style="opacity:0.85">→ median: <b>${mglyph} ${a.medianValidatorType}</b></span>`;
+            }
+          }
           lines.push(
             `<div><span style="color:${dot}">●</span> ${labelEsc}: ` +
-            `<b>${glyph} ${a.type}</b> <span style="opacity:0.7">(validator #${a.index})</span></div>`,
+            `<b>${glyph} ${a.type}</b> <span style="opacity:0.7">(validator #${a.index})</span>${detail}</div>`,
           );
         }
         if (data.authors.length > MAX_ROWS) {

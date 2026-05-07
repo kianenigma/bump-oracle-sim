@@ -27,6 +27,11 @@ export interface AggregateOutcome {
    *  path where the runtime actually computed a fresh price — even if
    *  the freshly computed value happens to equal `lastPrice`. */
   priceUpdated: boolean;
+  /** Validator index whose quote was selected as the median (only for the
+   *  median aggregator on `priceUpdated=true` blocks). For an even-count
+   *  inherent the median is the average of two adjacent quotes; we report
+   *  the *upper* of the two. Undefined for nudge or freeze blocks. */
+  medianValidatorIndex?: number;
 }
 
 export interface Aggregator {
@@ -314,6 +319,20 @@ function sortAndTrim(quotes: number[], k: number): { sorted: number[]; trim: num
     : { sorted: quotes, trim };
 }
 
+/** Sort by price (ascending) keeping each entry's original validator index
+ *  paired. Returns parallel arrays so the median-rank entry's validatorIndex
+ *  can be read out alongside its price. */
+function sortQuotesWithIndex(entries: Array<{ price: number; index: number }>): { prices: number[]; indices: number[] } {
+  entries.sort((a, b) => a.price - b.price);
+  const prices = new Array<number>(entries.length);
+  const indices = new Array<number>(entries.length);
+  for (let i = 0; i < entries.length; i++) {
+    prices[i] = entries[i].price;
+    indices[i] = entries[i].index;
+  }
+  return { prices, indices };
+}
+
 // ── ConfidenceTrackingMixin (shared state for median + mean) ───────────────
 // Holds the per-validator `confidence` Float32Array and the sticky `excluded`
 // Uint8Array, plus the configured callback and exclusion policy. Subclasses
@@ -419,26 +438,31 @@ export class MedianAggregator extends ConfidenceTrackingAggregator implements Ag
   apply(ctx: AggregatorContext): AggregateOutcome {
     const totalQuotes = countQuotes(ctx.inputs);
     const filtered = this.filterByConfidence(ctx.inherent);
-    const quotes = collectQuotes(filtered);
+    const quoteEntries = collectQuoteEntries(filtered);
     const effectiveMinInputs = this.tracksConfidence
       ? Math.min(this.minInputs, Math.floor((2 / 3) * this.activeCount()) + 1)
       : this.minInputs;
-    if (quotes.length < effectiveMinInputs || quotes.length === 0) {
+    if (quoteEntries.length < effectiveMinInputs || quoteEntries.length === 0) {
       // Freeze branch: still run the confidence callback so absences
       // accrue penalty even though no median was produced. This closes
       // the round-3 stealth-withholder seam.
       this.updateConfidence(ctx.inputs, filtered, ctx.lastPrice, false);
       return { newPrice: ctx.lastPrice, totalBumps: totalQuotes, activatedBumps: 0, netDirection: 0, priceUpdated: false };
     }
-    const { sorted, trim } = sortAndTrim(quotes, this.k);
-    const newPrice = medianOfRange(sorted, trim, sorted.length - trim);
+    const { prices: sorted, indices: sortedIndices } = sortQuotesWithIndex(quoteEntries);
+    const trim = Math.floor(sorted.length * this.k);
+    const trimmedTrim = (sorted.length - 2 * trim <= 0) ? 0 : trim;
+    const lo = trimmedTrim;
+    const hi = sorted.length - trimmedTrim;
+    const { value: newPrice, index: medianValidatorIndex } = medianOfRangeWithIndex(sorted, sortedIndices, lo, hi);
     this.updateConfidence(ctx.inputs, filtered, newPrice, true);
     return {
       newPrice,
       totalBumps: totalQuotes,
-      activatedBumps: quotes.length - 2 * trim,
+      activatedBumps: hi - lo,
       netDirection: Math.sign(newPrice - ctx.lastPrice),
       priceUpdated: true,
+      medianValidatorIndex,
     };
   }
 }
@@ -475,6 +499,14 @@ function collectQuotes(submissions: Submission[]): number[] {
   return out;
 }
 
+/** Like collectQuotes but keeps each quote paired with its validatorIndex
+ *  so we can report which validator's quote became the median. */
+function collectQuoteEntries(submissions: Submission[]): Array<{ price: number; index: number }> {
+  const out: Array<{ price: number; index: number }> = [];
+  for (const s of submissions) if (s.kind === "quote") out.push({ price: s.price, index: s.validatorIndex });
+  return out;
+}
+
 function countQuotes(submissions: Submission[]): number {
   let n = 0;
   for (const s of submissions) if (s.kind === "quote") n++;
@@ -487,4 +519,17 @@ function medianOfRange(sorted: number[], lo: number, hi: number): number {
   if (n === 0) return 0;
   const mid = lo + Math.floor(n / 2);
   return n % 2 === 1 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/** Median of `sorted[lo, hi)` returned alongside the validator index whose
+ *  quote sits at the median rank. For even-count ranges (where the median is
+ *  the average of two adjacent quotes) we report the upper of the two —
+ *  arbitrary but consistent. Caller guarantees lo < hi. */
+function medianOfRangeWithIndex(
+  sorted: number[], sortedIndices: number[], lo: number, hi: number,
+): { value: number; index: number } {
+  const n = hi - lo;
+  const mid = lo + Math.floor(n / 2);
+  if (n % 2 === 1) return { value: sorted[mid], index: sortedIndices[mid] };
+  return { value: (sorted[mid - 1] + sorted[mid]) / 2, index: sortedIndices[mid] };
 }

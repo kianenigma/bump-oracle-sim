@@ -12,6 +12,7 @@ import type {
   ValidatorGroup,
   ValidatorType,
 } from "../types.js";
+import { BLOCKS_PER_CHUNK } from "../types.js";
 import { aggregateOHLC, aggregateLine, aggregateDeviation } from "./aggregation.js";
 import { loadIndex, loadChunk, loadVenues, type VenuesFile } from "./writer.js";
 import { mulberry32 } from "../rng.js";
@@ -421,15 +422,45 @@ export async function startServer(
         const block = blockAtTimestamp(refMeta, time);
         const blockTimestamp = refMeta.timeRange.from + block * BLOCK_TIME_SECONDS;
 
-        const authors = scenarioIndices.map((idx) => {
+        const authors = await Promise.all(scenarioIndices.map(async (idx) => {
           const meta = index.scenarios[idx];
           const arr = getAuthorIndices(meta, idx);
           // Clamp in case scenarios disagree on blockCount (shouldn't happen).
           const safeBlock = Math.min(block, arr.length - 1);
           const authorIdx = arr[safeBlock] ?? 0;
           const type = validatorTypeAt(meta.config.validators, authorIdx);
-          return { scenario: idx, label: meta.config.label, index: authorIdx, type };
-        });
+
+          // Resolve the per-block debug fields from the chunk file (when
+          // present). Pre-existing simdata directories without these arrays
+          // fall back to the safe defaults: priceUpdated=true, inherentTotal=null,
+          // medianValidatorType=null. The hover tooltip degrades gracefully.
+          let priceUpdated: boolean | null = null;
+          let inherentTotal: number | null = null;
+          let medianValidatorType: string | null = null;
+          try {
+            const chunkIdx = Math.floor(safeBlock / BLOCKS_PER_CHUNK);
+            const dir = scenarioDir(meta, idx);
+            const chunk = await loadChunkCached(outputDir, dir, chunkIdx);
+            const tickInChunk = safeBlock - chunk.blockOffset;
+            if (chunk.priceUpdated && tickInChunk >= 0 && tickInChunk < chunk.priceUpdated.length) {
+              priceUpdated = chunk.priceUpdated[tickInChunk] === 1;
+            }
+            if (chunk.inherentTotals && tickInChunk >= 0 && tickInChunk < chunk.inherentTotals.length) {
+              inherentTotal = chunk.inherentTotals[tickInChunk];
+            }
+            if (chunk.medianValidatorIndices && tickInChunk >= 0 && tickInChunk < chunk.medianValidatorIndices.length) {
+              const mvi = chunk.medianValidatorIndices[tickInChunk];
+              if (mvi >= 0) medianValidatorType = validatorTypeAt(meta.config.validators, mvi);
+            }
+          } catch {
+            // Older simdata directories without the per-block arrays — fall through.
+          }
+
+          return {
+            scenario: idx, label: meta.config.label, index: authorIdx, type,
+            priceUpdated, inherentTotal, medianValidatorType,
+          };
+        }));
 
         return new Response(JSON.stringify({ block, timestamp: blockTimestamp, authors }), {
           headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },

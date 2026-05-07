@@ -19,7 +19,7 @@ import { maxBlockDelta } from "../data/interpolator.js";
 import { ChunkWriter, CsvWriter, combineSinks, writeIndex, scenarioDirName } from "../viz/writer.js";
 import { loadCriteria } from "./research-criteria.js";
 import { generateReport } from "./research-report.js";
-import { buildValidators, formatValidators, NON_CONFIDENCE_ATTACKERS, type GroupSpec } from "../validators.js";
+import { buildValidators, formatValidators, isCompatibleWithAggregator, NON_CONFIDENCE_ATTACKERS, type GroupSpec } from "../validators.js";
 import { analyzeMedianVsNudge } from "./median-vs-nudge.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -97,6 +97,19 @@ const COMPARISON_PARAMS: Required<ValidatorParams> = {
   inbandShifterDirection: "up",
   inbandShifterQuoteBias: 0.04,
   inbandShifterCeilingBumps: 200,
+  boundaryClusterDirection: "down",
+  boundaryClusterBias: 0.002,
+  authorCensorDirection: "down",
+  authorCensorBias: 0.001,
+  sandwichBias: 0.005,
+  medianWalkBias: 0.5,
+  trimEdgeBias: 0.10,
+  trimEdgeDirection: "down",
+  innerClusterBias: 0.0008,
+  trimChaserBias: 0.10,
+  driftTrackBias: 0.10,
+  hoppingTrimBias: 0.10,
+  hoppingHoldBlocks: 100,
 };
 
 // ── Scenario context ────────────────────────────────────────────────────────
@@ -160,14 +173,17 @@ function nudgeAgg(ctx: ScenarioCtx, epsilon?: EpsilonSpec): AggregatorConfig {
 }
 
 /**
- * The shared 44-simulation grid driving both `core-attackers` and
- * `validate-median`:
+ * Configuration grid driving `core-attackers` and `validate-median`:
  *   - aggregators: median + 3 nudge ε values (auto, auto/2, auto/4)
- *   - attackers : NON_CONFIDENCE_ATTACKERS (malicious, pushy, noop, delayed, drift)
+ *   - attackers : NON_CONFIDENCE_ATTACKERS, filtered by `isCompatibleWithAggregator`
+ *     so we don't waste compute on (e.g.) `nudge × trim-edge` runs that just
+ *     reproduce `nudge × honest` because the attacker's nudge leg is honest
+ *     by design. The validate-median analyzer uses the same compatibility
+ *     filter to slot each result into the symmetric or asymmetric tier.
  *   - fractions : 10% and 33% (byzantine border)
  *   - plus 4 honest baselines, one per aggregator config.
  *
- * Confidence-targeting cabal types are excluded — see VALIDATOR_METADATA.
+ * Confidence-targeting cabal types are excluded entirely — see VALIDATOR_METADATA.
  */
 function buildCoreAttackerConfigs(ctx: ScenarioCtx): SimulationConfig[] {
   const fractions = [0.10, 0.33];
@@ -182,6 +198,7 @@ function buildCoreAttackerConfigs(ctx: ScenarioCtx): SimulationConfig[] {
     a.kind === "nudge" ? `nudge ε=${epsLabel}` : a.kind;
 
   const configs: SimulationConfig[] = [];
+  // Honest baseline per aggregator config — needed for both tiers.
   for (const e of epsilons) {
     configs.push(makeConfig(ctx, [], `${aggLabel({ kind: "nudge", epsilon: e.value }, e.label)} · honest`,
       { kind: "nudge", epsilon: e.value }));
@@ -192,13 +209,20 @@ function buildCoreAttackerConfigs(ctx: ScenarioCtx): SimulationConfig[] {
     for (const frac of fractions) {
       const fracPct = (frac * 100).toFixed(0);
       const specs: GroupSpec[] = [{ type, fraction: frac }];
-      for (const e of epsilons) {
-        configs.push(makeConfig(ctx, specs,
-          `${aggLabel({ kind: "nudge", epsilon: e.value }, e.label)} · ${type}@${fracPct}%`,
-          { kind: "nudge", epsilon: e.value }));
+      // Only run aggregator/attacker pairs that are compatible per metadata.
+      // Attackers tagged "median"/"nudge" don't run under the wrong family;
+      // attackers tagged "both" run under both.
+      if (isCompatibleWithAggregator(type, "nudge")) {
+        for (const e of epsilons) {
+          configs.push(makeConfig(ctx, specs,
+            `${aggLabel({ kind: "nudge", epsilon: e.value }, e.label)} · ${type}@${fracPct}%`,
+            { kind: "nudge", epsilon: e.value }));
+        }
       }
-      configs.push(makeConfig(ctx, specs,
-        `${aggLabel(medianAgg)} · ${type}@${fracPct}%`, medianAgg));
+      if (isCompatibleWithAggregator(type, "median")) {
+        configs.push(makeConfig(ctx, specs,
+          `${aggLabel(medianAgg)} · ${type}@${fracPct}%`, medianAgg));
+      }
     }
   }
   return configs;
