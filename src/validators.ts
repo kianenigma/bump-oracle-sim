@@ -1,9 +1,63 @@
 import type {
+  AggregatorMode,
   ValidatorGroup,
   ValidatorPriceSource,
   ValidatorType,
   ValidatorParams,
 } from "./types.js";
+
+// ── Validator metadata ──────────────────────────────────────────────────────
+// Per-type classification consumed by the engine and by scenarios.
+//
+//   attackCategory:
+//     "nudge"   — only meaningful under the nudge aggregator (the bump-pool
+//                 attack surface). Used with median → engine throws.
+//     "median"  — only meaningful under the median aggregator (quote-based
+//                 attack surface). Used with nudge → engine throws.
+//     "both"    — strategy is well-defined in either aggregator.
+//
+//   targetsConfidence:
+//     true  — the attack is specifically designed to defeat the wideband-
+//             confidence defenses (ABSENT_PENALTY / BAD_QUOTE_PENALTY etc.).
+//             Kept in the codebase but excluded from new research scenarios.
+
+export interface ValidatorTypeMetadata {
+  attackCategory: "nudge" | "median" | "both";
+  targetsConfidence: boolean;
+}
+
+export const VALIDATOR_METADATA: Record<ValidatorType, ValidatorTypeMetadata> = {
+  honest:               { attackCategory: "both",  targetsConfidence: false },
+  // Basic attackers: well-defined in both aggregator families.
+  malicious:            { attackCategory: "both",  targetsConfidence: false },
+  pushy:                { attackCategory: "both",  targetsConfidence: false },
+  noop:                 { attackCategory: "both",  targetsConfidence: false },
+  delayed:              { attackCategory: "both",  targetsConfidence: false },
+  drift:                { attackCategory: "both",  targetsConfidence: false },
+  // Confidence-targeting cabals — kept in code, excluded from new scenarios.
+  withholder:           { attackCategory: "nudge", targetsConfidence: true  },
+  "bias-injector":      { attackCategory: "nudge", targetsConfidence: true  },
+  "overshoot-ratchet":  { attackCategory: "nudge", targetsConfidence: true  },
+  "stealth-withholder": { attackCategory: "nudge", targetsConfidence: true  },
+  "convergent-cabal":   { attackCategory: "nudge", targetsConfidence: true  },
+  "inband-shifter":     { attackCategory: "median", targetsConfidence: true  },
+};
+
+/** Returns true iff a validator of `type` can run under aggregator `mode`. */
+export function isCompatibleWithAggregator(
+  type: ValidatorType,
+  mode: AggregatorMode,
+): boolean {
+  const cat = VALIDATOR_METADATA[type].attackCategory;
+  return cat === "both" || cat === mode;
+}
+
+/** Validator types that are NOT designed to defeat confidence tracking — the
+ *  set used by the new core-attackers research scenario. */
+export const NON_CONFIDENCE_ATTACKERS: Exclude<ValidatorType, "honest">[] =
+  (Object.entries(VALIDATOR_METADATA) as [ValidatorType, ValidatorTypeMetadata][])
+    .filter(([t, m]) => t !== "honest" && !m.targetsConfidence)
+    .map(([t]) => t as Exclude<ValidatorType, "honest">);
 
 // ── Builders ────────────────────────────────────────────────────────────────
 

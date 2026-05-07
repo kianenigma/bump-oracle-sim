@@ -30,7 +30,7 @@ export interface AggregateOutcome {
 }
 
 export interface Aggregator {
-  readonly mode: "nudge" | "median" | "mean";
+  readonly mode: "nudge" | "median";
   readonly inputKind: "nudge" | "quote";
   apply(ctx: AggregatorContext): AggregateOutcome;
   /** Read-only snapshot of the current per-validator confidence vector.
@@ -443,96 +443,12 @@ export class MedianAggregator extends ConfidenceTrackingAggregator implements Ag
   }
 }
 
-// ── MeanAggregator ──────────────────────────────────────────────────────────
-// Optionally trims top/bottom k% by value, then arithmetic mean of survivors.
-// k=0 is a plain mean across all quotes. If trimming would empty the set,
-// falls back to median(all) so the price still updates.
-//
-// `weighted=true` uses each survivor's confidence as its weight in the mean.
-// (Only meaningful when confidence tracking is on.)
-//
-// Metric semantics: same as median — totalBumps is pre-author gossip,
-// activatedBumps is the post-trim contributing count.
-export class MeanAggregator extends ConfidenceTrackingAggregator implements Aggregator {
-  readonly mode = "mean" as const;
-  readonly inputKind = "quote" as const;
-
-  constructor(
-    private k: number = 0,
-    private minInputs: number = 0,
-    validatorCount: number = 0,
-    permanentExclusion: boolean = true,
-    confidenceUpdate: ConfidenceUpdate = noopConfidenceUpdate,
-    tracksConfidence: boolean = false,
-    private weighted: boolean = false,
-  ) {
-    super(validatorCount, permanentExclusion, confidenceUpdate, tracksConfidence);
-    if (k < 0 || k >= 0.5) throw new Error(`mean k must be in [0, 0.5), got ${k}`);
-    if (minInputs < 0) throw new Error(`mean minInputs must be ≥ 0, got ${minInputs}`);
-  }
-
-  apply(ctx: AggregatorContext): AggregateOutcome {
-    const totalQuotes = countQuotes(ctx.inputs);
-    const filtered = this.filterByConfidence(ctx.inherent);
-
-    // Need both prices and indices for the weighted variant.
-    const quoteEntries: Array<{ price: number; idx: number }> = [];
-    for (const s of filtered) {
-      if (s.kind === "quote") quoteEntries.push({ price: s.price, idx: s.validatorIndex });
-    }
-
-    const effectiveMinInputs = this.tracksConfidence
-      ? Math.min(this.minInputs, Math.floor((2 / 3) * this.activeCount()) + 1)
-      : this.minInputs;
-    if (quoteEntries.length < effectiveMinInputs || quoteEntries.length === 0) {
-      this.updateConfidence(ctx.inputs, filtered, ctx.lastPrice, false);
-      return { newPrice: ctx.lastPrice, totalBumps: totalQuotes, activatedBumps: 0, netDirection: 0, priceUpdated: false };
-    }
-
-    // Trim by value. We need to keep idx aligned to price for the weighted
-    // variant, so sort the entries themselves.
-    quoteEntries.sort((a, b) => a.price - b.price);
-    const n = quoteEntries.length;
-    const trim = quoteEntries.length - 2 * Math.floor(n * this.k) <= 0
-      ? 0
-      : Math.floor(n * this.k);
-    const lo = trim;
-    const hi = n - trim;
-
-    let newPrice: number;
-    if (this.weighted && this.tracksConfidence) {
-      let wsum = 0;
-      let weight = 0;
-      for (let i = lo; i < hi; i++) {
-        const w = this.confidence[quoteEntries[i].idx];
-        wsum += quoteEntries[i].price * w;
-        weight += w;
-      }
-      // weight could be 0 if all survivors hit confidence=0 in the same call.
-      newPrice = weight > 0 ? wsum / weight : ctx.lastPrice;
-    } else {
-      let sum = 0;
-      for (let i = lo; i < hi; i++) sum += quoteEntries[i].price;
-      newPrice = sum / (hi - lo);
-    }
-
-    this.updateConfidence(ctx.inputs, filtered, newPrice, true);
-    return {
-      newPrice,
-      totalBumps: totalQuotes,
-      activatedBumps: hi - lo,
-      netDirection: Math.sign(newPrice - ctx.lastPrice),
-      priceUpdated: true,
-    };
-  }
-}
-
 // ── Factory ─────────────────────────────────────────────────────────────────
 
 /** Polkadot assumes ≥ 2/3 honest validators. Requiring `floor(2/3·N) + 1`
  *  inputs to update guarantees that more than half of the contributing
- *  data points come from honest validators, protecting median (and bounding
- *  the influence on mean). For nudge, the natural default is 0. */
+ *  data points come from honest validators, protecting the median. For
+ *  nudge, the natural default is 0. */
 export function defaultMinInputs(kind: AggregatorConfig["kind"], validatorCount: number): number {
   if (kind === "nudge") return 0;
   return Math.floor((2 / 3) * validatorCount) + 1;
@@ -547,12 +463,6 @@ export function makeAggregator(cfg: AggregatorConfig, validatorCount: number): A
       const { update, on } = resolveConfidence(cfg.confidence);
       const permanent = cfg.permanentExclusion ?? true;
       return new MedianAggregator(cfg.k ?? 0, minInputs, validatorCount, permanent, update, on);
-    }
-    case "mean": {
-      const { update, on } = resolveConfidence(cfg.confidence);
-      const permanent = cfg.permanentExclusion ?? true;
-      const weighted = cfg.weighted ?? false;
-      return new MeanAggregator(cfg.k ?? 0, minInputs, validatorCount, permanent, update, on, weighted);
     }
   }
 }

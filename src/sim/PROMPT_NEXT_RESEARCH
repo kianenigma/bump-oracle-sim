@@ -20,16 +20,13 @@ A lot of them are doing the same thing in the nudge model, because they are real
 
 Each malicious validator has a associated property that is checked in the engine. It is either applicable to a nudge run, or a median run. If worngly configured, the run will fail.
 
-We also need to keep, but exclude all malicious validators that are targeted towards defeating the confidence tracking, from our new scenario. They are not relevant anymore.
-
----
+We also need to keep in the code, but exclude from scenarios all malicious validators that are targeted towards defeating the confidence tracking. They are not relevant anymore.
 
 The new scenario will:
 
 * Run mean (with no confidence tracking) and nudge model against only those malicious actors that are relevant
 	* While we mostly focus on 33% malicious (+ honest), also run 10% as an extra data-point
 	* we will run with auto epsilon, epsilon/2 and epsilon/4 as we do now.
-
 
 ---
 

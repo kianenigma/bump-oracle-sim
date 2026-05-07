@@ -32,7 +32,7 @@ import { Chain } from "./chain.js";
 import { makeAggregator, defaultMinInputs } from "./aggregator.js";
 import { maxBlockDelta } from "../data/interpolator.js";
 import { BLOCK_TIME_SECONDS, CONFIDENCE_SAMPLE_INTERVAL, DEFAULT_VALIDATOR_PARAMS } from "../config.js";
-import { totalValidators } from "../validators.js";
+import { totalValidators, isCompatibleWithAggregator, VALIDATOR_METADATA } from "../validators.js";
 
 // Constructor signature shared by every validator type. The unified ctor
 // keeps engine code small — each group just instantiates `count` of one
@@ -120,6 +120,23 @@ export function runSimulation(
 
   // Resolve aggregator + (if nudge) epsilon.
   const aggregatorCfg: AggregatorConfig = config.aggregator ?? DEFAULT_AGGREGATOR;
+
+  // Validate that every non-honest group's attack category is compatible
+  // with the configured aggregator. A nudge-only attacker (e.g. bump-pool
+  // poisoning) under a quote aggregator (or vice versa) is misconfigured —
+  // fail loudly rather than silently producing meaningless results.
+  for (const g of config.validators) {
+    if (g.count === 0 || g.type === "honest") continue;
+    if (!isCompatibleWithAggregator(g.type, aggregatorCfg.kind)) {
+      const cat = VALIDATOR_METADATA[g.type].attackCategory;
+      throw new Error(
+        `Validator type "${g.type}" is targeted at the ${cat} aggregator family, ` +
+        `but the configured aggregator is "${aggregatorCfg.kind}". ` +
+        `Either change the aggregator or drop this group.`,
+      );
+    }
+  }
+
   const resolvedMinInputs = aggregatorCfg.minInputs ?? defaultMinInputs(aggregatorCfg.kind, validatorCount);
   const aggregator = makeAggregator(aggregatorCfg, validatorCount);
   if (!quiet) console.log(`  Aggregator min inputs: ${resolvedMinInputs}/${validatorCount}`);
@@ -268,7 +285,7 @@ export function runSimulation(
 function printConfig(config: SimulationConfig, pricePoints?: PricePoint[]): void {
   const agg = config.aggregator ?? DEFAULT_AGGREGATOR;
   const aggParts: string[] = [];
-  if ((agg.kind === "median" || agg.kind === "mean") && agg.k && agg.k > 0) aggParts.push(`k=${agg.k}`);
+  if (agg.kind === "median" && agg.k && agg.k > 0) aggParts.push(`k=${agg.k}`);
   if (agg.minInputs !== undefined) aggParts.push(`minInputs=${agg.minInputs}`);
   const aggStr = aggParts.length > 0 ? `${agg.kind}(${aggParts.join(", ")})` : agg.kind;
 

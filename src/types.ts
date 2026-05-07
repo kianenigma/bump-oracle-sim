@@ -32,10 +32,7 @@ export interface PricePoint {
 //              what remains. k defaults to 0 (plain median). Trimming before
 //              the median rarely changes the price (median is already
 //              outlier-robust) but reflects in the activated-vs-total counts.
-//   "mean"   : same trim step, then arithmetic mean of the survivors. k
-//              defaults to 0 (plain mean across all quotes). Smoother than
-//              median; weaker outlier rejection at small k.
-export type AggregatorMode = "nudge" | "median" | "mean";
+export type AggregatorMode = "nudge" | "median";
 
 // Epsilon specification: how much the oracle price moves per activated bump.
 // - number: absolute step size (e.g. 0.00033)
@@ -65,8 +62,7 @@ export type ConfidencePolicy = "off" | "default" | "wideband" | "wideband-strict
 
 export type AggregatorConfig =
   | { kind: "nudge"; epsilon: EpsilonSpec; minInputs?: number }
-  | { kind: "median"; k?: number; minInputs?: number; confidence?: ConfidencePolicy; permanentExclusion?: boolean }
-  | { kind: "mean";   k?: number; minInputs?: number; confidence?: ConfidencePolicy; permanentExclusion?: boolean; weighted?: boolean };
+  | { kind: "median"; k?: number; minInputs?: number; confidence?: ConfidencePolicy; permanentExclusion?: boolean };
 
 export function aggregatorMode(cfg: AggregatorConfig): AggregatorMode {
   return cfg.kind;

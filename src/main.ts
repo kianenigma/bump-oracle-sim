@@ -102,9 +102,9 @@ Options:
   --no-open                    Don't auto-open browser
   --threads <number>           Worker threads for batch scenarios (default: CPU count)
   --force                      Overwrite existing output directory
-  --aggregator <mode>          Aggregation rule: "nudge", "median" (default), or "mean"
-  --aggregator-k <fraction>    For median/mean: trim this fraction from each tail before aggregating (default: 0).
-                                 k=0 → plain median / plain mean. k>0 → trim then median / mean.
+  --aggregator <mode>          Aggregation rule: "nudge" or "median" (default)
+  --aggregator-k <fraction>    For median: trim this fraction from each tail before taking the median (default: 0).
+                                 k=0 → plain median. k>0 → trimmed median.
   --data-source <kind>         "trades" (default, per-trade multi-venue), "candles" (Binance US 1m),
                                 or "synthetic" (deterministic scripted price path; --start-date /
                                 --end-date are rejected in this mode).
@@ -195,8 +195,7 @@ function parseAggregatorArg(raw: string | undefined, k: number, epsilon: Epsilon
   if (raw === undefined) return undefined;
   if (raw === "nudge") return { kind: "nudge", epsilon };
   if (raw === "median") return k > 0 ? { kind: "median", k } : { kind: "median" };
-  if (raw === "mean") return k > 0 ? { kind: "mean", k } : { kind: "mean" };
-  console.error(`Invalid --aggregator: "${raw}". Expected: nudge, median, mean.`);
+  console.error(`Invalid --aggregator: "${raw}". Expected: nudge, median.`);
   process.exit(1);
 }
 

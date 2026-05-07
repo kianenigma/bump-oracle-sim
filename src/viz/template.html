@@ -159,15 +159,20 @@
     #stats-filter input:focus { border-color: var(--text-muted); }
     .filter-hint { font-size: 11px; color: var(--text-dim); }
 
-    #stats-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    #stats-table th { position: sticky; top: 0; background: var(--bg-surface); border-bottom: 2px solid var(--border); padding: 8px 10px; text-align: left; font-weight: 600; cursor: pointer; user-select: none; white-space: nowrap; }
+    #stats-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 12px; }
+    #stats-table th { position: sticky; top: 0; z-index: 2; background: var(--bg-surface); border-bottom: 2px solid var(--border); padding: 8px 10px; text-align: left; font-weight: 600; cursor: pointer; user-select: none; white-space: nowrap; }
     #stats-table th:hover { background: var(--hover-bg); }
     #stats-table th .sort-arrow { font-size: 10px; margin-left: 4px; color: var(--text-dim); }
     #stats-table th .sort-arrow.active { color: var(--text); }
-    #stats-table td { padding: 6px 10px; border-bottom: 1px solid var(--border-light); white-space: nowrap; }
-    #stats-table tbody tr:nth-child(even) { background: var(--table-stripe); }
-    #stats-table tbody tr:hover { background: var(--table-hover); }
+    #stats-table td { padding: 6px 10px; border-bottom: 1px solid var(--border-light); white-space: nowrap; background: var(--bg-surface); }
+    #stats-table tbody tr:nth-child(even) td { background: var(--table-stripe); }
+    #stats-table tbody tr:hover td { background: var(--table-hover); }
     #stats-table td.num { text-align: left; font-variant-numeric: tabular-nums; }
+    /* Freeze the first column (Label) so it stays visible during horizontal scroll. */
+    #stats-table th:first-child,
+    #stats-table td:first-child { position: sticky; left: 0; box-shadow: 1px 0 0 var(--border-light); }
+    #stats-table td:first-child { z-index: 1; }
+    #stats-table th:first-child { z-index: 3; }
 
     /* Research tab */
     #research-tab { padding: 20px 24px; overflow-y: auto; min-height: 0; }

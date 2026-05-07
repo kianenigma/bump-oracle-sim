@@ -19,7 +19,7 @@ import { maxBlockDelta } from "../data/interpolator.js";
 import { ChunkWriter, CsvWriter, combineSinks, writeIndex, scenarioDirName } from "../viz/writer.js";
 import { loadCriteria } from "./research-criteria.js";
 import { generateReport } from "./research-report.js";
-import { buildValidators, formatValidators, type GroupSpec } from "../validators.js";
+import { buildValidators, formatValidators, NON_CONFIDENCE_ATTACKERS, type GroupSpec } from "../validators.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Glossary — what each agent does. Full implementations: src/sim/validator.ts,
@@ -207,7 +207,7 @@ const TOURNAMENT_SYSTEM_B_CURRENT: AggregatorConfig = {
 
 function aggregatorLabel(cfg: AggregatorConfig): string {
   const parts: string[] = [];
-  if ((cfg.kind === "median" || cfg.kind === "mean") && cfg.k && cfg.k > 0) parts.push(`k=${cfg.k}`);
+  if (cfg.kind === "median" && cfg.k && cfg.k > 0) parts.push(`k=${cfg.k}`);
   if (cfg.minInputs !== undefined) parts.push(`min=${cfg.minInputs}`);
   return parts.length > 0 ? `${cfg.kind}(${parts.join(",")})` : cfg.kind;
 }
@@ -455,6 +455,67 @@ const RESEARCH_MIXES: Record<string, number>[] = [
 // ── Scenarios ───────────────────────────────────────────────────────────────
 
 export const scenarios: Record<string, ScenarioFn> = {
+  /**
+   * Core-attackers research sweep — the post-confidence-tracking baseline.
+   *
+   * Compares the **nudge** aggregator (across three ε values: auto, auto/2,
+   * auto/4) and the **median** aggregator (no confidence tracking) against
+   * the non-confidence-targeting attackers from NON_CONFIDENCE_ATTACKERS:
+   * malicious, pushy, noop, delayed, drift.
+   *
+   * Adversary fractions: 33% (main focus, "byzantine border") and 10% (smaller
+   * data-point). For each (aggregator, attacker, fraction) we run one sim,
+   * plus an honest baseline for every aggregator config.
+   *
+   *   Sims = 4 baselines + |attackers|·|fractions|·(3 nudge ε + 1 median)
+   *        = 4 + 5·2·4 = 44
+   *
+   * Confidence-targeting cabal types (withholder, bias-injector, etc.) are
+   * deliberately excluded — see VALIDATOR_METADATA in src/validators.ts.
+   */
+  async "core-attackers"(ctx, priceSource, outputDir, threadCount) {
+    console.log(`\n[Scenario: core-attackers]`);
+    const fractions = [0.10, 0.33];
+    const autoEps = 1 / ctx.validatorCount / 10;
+    const epsilons: Array<{ label: string; value: number }> = [
+      { label: "auto",    value: autoEps },
+      { label: "auto/2",  value: autoEps / 2 },
+      { label: "auto/4",  value: autoEps / 4 },
+    ];
+    const medianAgg: AggregatorConfig = { kind: "median" };
+    const aggLabel = (a: AggregatorConfig, epsLabel?: string) =>
+      a.kind === "nudge" ? `nudge ε=${epsLabel}` : a.kind;
+
+    const configs: SimulationConfig[] = [];
+
+    // Honest baselines — one per aggregator config so each malicious row has
+    // a same-aggregator reference to compare against.
+    for (const e of epsilons) {
+      configs.push(makeConfig(ctx, [], `${aggLabel({ kind: "nudge", epsilon: e.value }, e.label)} · honest`,
+        { kind: "nudge", epsilon: e.value }));
+    }
+    configs.push(makeConfig(ctx, [], `${aggLabel(medianAgg)} · honest`, medianAgg));
+
+    // Attacker × fraction × aggregator grid.
+    for (const type of NON_CONFIDENCE_ATTACKERS) {
+      for (const frac of fractions) {
+        const fracPct = (frac * 100).toFixed(0);
+        const specs: GroupSpec[] = [{ type, fraction: frac }];
+        for (const e of epsilons) {
+          configs.push(makeConfig(ctx, specs,
+            `${aggLabel({ kind: "nudge", epsilon: e.value }, e.label)} · ${type}@${fracPct}%`,
+            { kind: "nudge", epsilon: e.value }));
+        }
+        configs.push(makeConfig(ctx, specs,
+          `${aggLabel(medianAgg)} · ${type}@${fracPct}%`, medianAgg));
+      }
+    }
+
+    console.log(`  ${configs.length} simulations: ${epsilons.length} nudge ε's + 1 median × `
+      + `(1 honest + ${NON_CONFIDENCE_ATTACKERS.length} attackers × ${fractions.length} fractions)`);
+    return runBatch(configs, priceSource, outputDir, threadCount);
+  },
+
   /** Baseline: 100% honest. */
   async honest(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: honest]`);
@@ -670,7 +731,7 @@ export const scenarios: Record<string, ScenarioFn> = {
     const aggregators: AggregatorConfig[] = [
       nudgeAgg(ctx),
       { kind: "median" },
-      { kind: "mean", k: 0.1 },
+      { kind: "median", k: 0.1 },
     ];
     const fractions = [0, 0.10, 0.33, 0.49];
 
