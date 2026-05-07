@@ -89,12 +89,22 @@ The lesson: **the protocol's stated threshold matters; testing one past it produ
 **Ship median + `floor(2N/3) + 1` minInputs as the default aggregator.** No confidence tracking, no k-trim, no per-validator state. The aggregator's BFT-derived threshold does the work, and the design is intrinsically robust at Polkadot's stated assumption.
 
 Why median over nudge:
-- Lower mean deviation across every attacker (0.07-0.19% vs 0.15-0.92%).
+- Lower mean deviation across every attacker (0.07-0.19% vs 0.15-0.92% at default ε).
 - Lower worst-case noise under amplification attacks.
 - Equally simple in implementation: median + minInputs is ~30 lines of code vs nudge's ~25.
 - Doesn't need an ε parameter (auto-resolved or otherwise).
 
-If you choose nudge for orthogonal reasons (1-bit gossip bandwidth, simpler block author math, etc.), it's also fine — just expect 5× higher noise floor under attack.
+If you choose nudge for orthogonal reasons (1-bit gossip bandwidth, simpler block author math, etc.), use **ε = `auto / 4`** rather than the auto default. The ε-sweep ([`tournament-runs/rerun-strict-threshold-eps-sweep.simdata/`](tournament-runs/rerun-strict-threshold-eps-sweep.simdata/)) shows damage from amplification attackers (`bias-injector`, `overshoot`, `pushy`, `drift`, `inband-shifter`, etc.) scales almost exactly linearly with ε:
+
+| Attacker          | ε:1     | ε:½     | ε:¼     | median  |
+|-------------------|---------|---------|---------|---------|
+| overshoot↑        | 0.94%   | 0.52%   | 0.31%   | 0.11%   |
+| drift             | 1.26%   | 0.71%   | 0.44%   | 0.19%   |
+| pushy             | 0.75%   | 0.44%   | 0.28%   | 0.09%   |
+| inband-shifter↑   | 0.94%   | 0.52%   | 0.31%   | 0.19%   |
+| honest baseline   | 0.156%  | 0.159%  | 0.165%  | 0.079%  |
+
+Quartering ε reduces amplification damage 3× on the worst class. The cost is a 6% relative increase in honest noise and slower oracle response during sharp real-price moves (max single-block deviation 33% → 57% during the largest event in the data window — still far below the 100% break threshold). Net trade is strongly favourable.
 
 **Do not** add confidence tracking, k-trim, or any per-validator-state defense. They solve attacks that don't exist at the strict threshold and introduce attacks that do.
 
@@ -105,10 +115,10 @@ Every result in this report is reproducible by running:
 ```
 bun run src/main.ts --scenario tournament-rerun-strict-threshold \
   --start-date 2025-10-10 --end-date 2025-10-20 \
-  --output tournament-runs/rerun-strict-threshold.simdata --force --threads 6
+  --output tournament-runs/rerun-strict-threshold-eps-sweep.simdata --force --threads 6
 ```
 
-Per-block oracle prices, real prices, deviations, and validator-type vectors for all 39 scenarios are preserved in [`tournament-runs/rerun-strict-threshold.simdata/`](tournament-runs/rerun-strict-threshold.simdata/) (~1.2 GB).
+72 sims (4 systems × 18 attacker variants — 1 honest + 6 directional × ↑/↓ + 5 directionless: `malicious`, `pushy`, `noop`, `delayed`, `drift`). Per-block oracle prices, real prices, deviations, and validator-type vectors are preserved in [`tournament-runs/rerun-strict-threshold-eps-sweep.simdata/`](tournament-runs/rerun-strict-threshold-eps-sweep.simdata/).
 
 The full round-by-round development of attackers and defenses is in [`TOURNAMENT.md`](TOURNAMENT.md). Useful for understanding *what kinds of attacks become available if the protocol's threshold assumption is violated, and why the natural defenses against them fail*.
 

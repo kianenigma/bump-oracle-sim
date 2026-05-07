@@ -772,109 +772,6 @@ export const scenarios: Record<string, ScenarioFn> = {
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  /**
-   * Tournament Round 0. The withholder attack against both contender
-   * aggregators in the BASELINE configuration (no defenses on either side).
-   *
-   * The expected discriminator: median is broken (criterion 1 + 3, ratchets
-   * monotonically against the attack direction); nudge is bounded (no
-   * minInputs threshold to exploit, abstain just means "no bump", which is
-   * normal for nudge).
-   *
-   * See TOURNAMENT.md and `tournament-runs/round-0-withholder/`.
-   */
-  async "tournament-round-0"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: tournament-round-0 — withholder vs A & B baselines]`);
-    const f = 1 / 3;
-    const specsUp:   GroupSpec[] = [{ type: "withholder", fraction: f, params: { withholderDirection: "up" } }];
-    const specsDown: GroupSpec[] = [{ type: "withholder", fraction: f, params: { withholderDirection: "down" } }];
-    const A = TOURNAMENT_SYSTEM_A_BASELINE(ctx);
-    const B = TOURNAMENT_SYSTEM_B_BASELINE;
-    const configs: SimulationConfig[] = [
-      ...tournamentRoundConfigs(ctx, [],         "honest-baseline",   A, B),
-      ...tournamentRoundConfigs(ctx, specsUp,    "withholder-up",     A, B),
-      ...tournamentRoundConfigs(ctx, specsDown,  "withholder-down",   A, B),
-    ];
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  /**
-   * Tournament Round 1. The `bias-injector` attacker against both contender
-   * aggregators in their BASELINE configuration (no defenses on either side).
-   *
-   * The attacker (see `BiasInjectorValidator` in src/sim/malicious.ts) is
-   * a 1/3-cabal that ratchets the oracle in a chosen direction by combining:
-   *   - Quote mode: withholder-style abstention on against-direction blocks
-   *     (carries forward the round-0 attack on median's minInputs gate).
-   *   - Nudge mode: pool-poisoning input + asymmetric author-side scheme
-   *     (amplify in-direction blocks; FREEZE against-direction blocks). This
-   *     is the new mechanism — the cabal as author skips correction work
-   *     1/3 of the time, biasing the equilibrium oracle position.
-   *
-   * Predicted outcome: median is broken for the same reasons as round 0
-   * (criterion 1 + 3). Nudge: bounded under flat or balanced data, but
-   * the asymmetric-freeze leg interacts with the data window's drift —
-   * if 2025-10-10 → 2025-10-20 has a sustained against-bias trend, the
-   * attack could trip criterion 1.
-   *
-   * See TOURNAMENT.md and `tournament-runs/round-1-bias-injector/`.
-   */
-  async "tournament-round-1"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: tournament-round-1 — bias-injector vs A & B baselines]`);
-    const f = 1 / 3;
-    const specsUp:   GroupSpec[] = [{ type: "bias-injector", fraction: f, params: { biasInjectorDirection: "up" } }];
-    const specsDown: GroupSpec[] = [{ type: "bias-injector", fraction: f, params: { biasInjectorDirection: "down" } }];
-    const A = TOURNAMENT_SYSTEM_A_BASELINE(ctx);
-    const B = TOURNAMENT_SYSTEM_B_BASELINE;
-    const configs: SimulationConfig[] = [
-      ...tournamentRoundConfigs(ctx, [],         "honest-baseline",      A, B),
-      ...tournamentRoundConfigs(ctx, specsUp,    "bias-injector-up",     A, B),
-      ...tournamentRoundConfigs(ctx, specsDown,  "bias-injector-down",   A, B),
-    ];
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  /**
-   * Tournament Round 2. The `overshoot-ratchet` attacker against both
-   * contender aggregators in their BASELINE configuration.
-   *
-   * Designed to target System A (nudge) — the asymmetric-abstention class
-   * (round 0/1) breaks median but only bends nudge. OvershootRatchet's new
-   * mechanism is to inject bias-direction movement on EVERY cabal-authored
-   * block (not just with-bias real motion). On with-bias blocks the cabal
-   * activates 200 honest + 100 cabal pool-poison bumps for a maxBlockDelta
-   * overshoot AND honest authors find no correction-direction bumps in the
-   * pool to draw on (key seam: when real moves up, honest emit Up, so the
-   * Down pool is empty when oracle has overshot up). On against-bias blocks
-   * the cabal still activates its 100 pool-poison bumps for a 1/3
-   * maxBlockDelta injection. A ceiling-based freeze leg locks in gains when
-   * cumulative overshoot is large, avoiding giveback.
-   *
-   * Predicted outcome: median is broken on the same axes as round 0/1 (the
-   * quote leg is byte-equivalent to withholder). Nudge: the new injection-
-   * even-on-against-bias-blocks mechanism gives a stronger, more persistent
-   * ratchet than bias-injector. Whether this trips criterion 1 (mean dev > 5%)
-   * on the 10-day window depends on real DOT directional asymmetry. If real
-   * trends with the bias direction, deviation accumulates uncorrectably.
-   *
-   * See TOURNAMENT.md and `tournament-runs/round-2-overshoot-ratchet/`.
-   */
-  async "tournament-round-2"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: tournament-round-2 — overshoot-ratchet vs A & hardened B (defense #1)]`);
-    const f = 1 / 3;
-    const specsUp:   GroupSpec[] = [{ type: "overshoot-ratchet", fraction: f, params: { overshootRatchetDirection: "up" } }];
-    const specsDown: GroupSpec[] = [{ type: "overshoot-ratchet", fraction: f, params: { overshootRatchetDirection: "down" } }];
-    // After defense-2 was committed, B carries wideband confidence tracking.
-    // A is still at baseline (no defenses earned yet).
-    const A = TOURNAMENT_SYSTEM_A_CURRENT(ctx);
-    const B = TOURNAMENT_SYSTEM_B_CURRENT;
-    const configs: SimulationConfig[] = [
-      ...tournamentRoundConfigs(ctx, [],         "honest-baseline",         A, B),
-      ...tournamentRoundConfigs(ctx, specsUp,    "overshoot-ratchet-up",    A, B),
-      ...tournamentRoundConfigs(ctx, specsDown,  "overshoot-ratchet-down",  A, B),
-    ];
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
 
   /**
    * Defense-ladder candidate #1 for System B (median).
@@ -908,515 +805,84 @@ export const scenarios: Record<string, ScenarioFn> = {
    * against hardened B + reference baseline A.
    */
   /**
-   * Tournament re-run at the STRICT Polkadot threshold (byzantine < N/3).
+   * Strict-threshold rerun (byzantine = 99/300).
    *
-   * The first 5 rounds tested at fraction = 1/3 = 100/300, which JS resolves
-   * to exactly 100 byzantine. The minInputs default `floor(2N/3) + 1 = 201`
-   * is calibrated for byzantine ≤ 99, so testing at 100 sits one past the
-   * protocol's stated assumption ("≥ 2/3 + 1 honest" → byzantine ≤ 99).
+   * Compares median (no confidence tracking; that path was found harmful) to
+   * three nudge variants at decreasing epsilon:
    *
-   * This scenario runs all 6 attacker classes (each in {up, down}) at the
-   * corrected fraction 99/300 against:
-   *   - A baseline (nudge, minInputs=0) — should still hold
-   *   - B baseline (median, no defenses) — should now hold against the
-   *     abstention class because 201 honest meet minInputs even with
-   *     all 99 cabal members abstaining
-   *   - B hardened-v3 (wideband-attributed confidence) — should hold against
-   *     all classes; the question is whether inband-shifter still triggers
-   *     the venue-dispersion cascading exclusion at this lower fraction
+   *   [A ε:1]  nudge with epsilon = auto = maxBlockDelta / N
+   *   [A ε:½]  nudge with epsilon = auto / 2
+   *   [A ε:¼]  nudge with epsilon = auto / 4
+   *   [B med]  median + minInputs = floor(2N/3)+1
+   *
+   * Smaller epsilon = slower reaction to fast real-price moves but lower
+   * per-block noise floor and less per-block leverage for attackers — a
+   * potential nudge "hardening" without adding any per-validator state.
+   *
+   * Direction-suffixed labels use ↑ / ↓ for compactness.
    */
   async "tournament-rerun-strict-threshold"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: tournament-rerun-strict-threshold — all attackers at 99/300 byzantine]`);
-    const f = 99 / 300; // strictly below 1/3
-    const A = TOURNAMENT_SYSTEM_A_BASELINE(ctx);
-    const B_BASELINE = TOURNAMENT_SYSTEM_B_BASELINE;
-    const B_HARDENED: AggregatorConfig = {
-      kind: "median",
-      confidence: "wideband-attributed",
-      permanentExclusion: true,
-    };
-    const wUp:  GroupSpec[] = [{ type: "withholder",         fraction: f, params: { withholderDirection: "up" } }];
-    const wDn:  GroupSpec[] = [{ type: "withholder",         fraction: f, params: { withholderDirection: "down" } }];
-    const biUp: GroupSpec[] = [{ type: "bias-injector",      fraction: f, params: { biasInjectorDirection: "up" } }];
-    const biDn: GroupSpec[] = [{ type: "bias-injector",      fraction: f, params: { biasInjectorDirection: "down" } }];
-    const orUp: GroupSpec[] = [{ type: "overshoot-ratchet",  fraction: f, params: { overshootRatchetDirection: "up" } }];
-    const orDn: GroupSpec[] = [{ type: "overshoot-ratchet",  fraction: f, params: { overshootRatchetDirection: "down" } }];
-    const swUp: GroupSpec[] = [{ type: "stealth-withholder", fraction: f, params: { stealthWithholderDirection: "up" } }];
-    const swDn: GroupSpec[] = [{ type: "stealth-withholder", fraction: f, params: { stealthWithholderDirection: "down" } }];
-    const ccUp: GroupSpec[] = [{ type: "convergent-cabal",   fraction: f, params: { convergentCabalDirection: "up" } }];
-    const ccDn: GroupSpec[] = [{ type: "convergent-cabal",   fraction: f, params: { convergentCabalDirection: "down" } }];
-    const ibUp: GroupSpec[] = [{ type: "inband-shifter",     fraction: f, params: { inbandShifterDirection: "up" } }];
-    const ibDn: GroupSpec[] = [{ type: "inband-shifter",     fraction: f, params: { inbandShifterDirection: "down" } }];
+    console.log(`\n[Scenario: tournament-rerun-strict-threshold — nudge ε sweep + median, byzantine = 99/300]`);
+    const f = 99 / 300;
 
-    // Helper: 3-system tuple of configs (A, B baseline, B hardened) for one attacker.
-    const triple = (specs: GroupSpec[], label: string): SimulationConfig[] => [
-      makeConfig(ctx, specs, `[A nudge] ${label}`,         A),
-      makeConfig(ctx, specs, `[B baseline] ${label}`,      B_BASELINE),
-      // makeConfig(ctx, specs, `[B hardened-v3] ${label}`,   B_HARDENED),
+    // Pre-resolve the auto epsilon so we can scale it.
+    const autoEps = maxBlockDelta(priceSource.pricePoints) / Math.max(1, ctx.validatorCount);
+    const A_full: AggregatorConfig = { kind: "nudge", epsilon: autoEps };
+    const A_half: AggregatorConfig = { kind: "nudge", epsilon: autoEps / 2 };
+    const A_qtr:  AggregatorConfig = { kind: "nudge", epsilon: autoEps / 4 };
+    const B_med = TOURNAMENT_SYSTEM_B_BASELINE;
+
+    // Attackers split by directionality:
+    //   directional → emits ↑ and ↓ variants
+    //   directionless → single variant (intrinsic direction or stateless)
+    const directional: Array<{ short: string; up: GroupSpec; dn: GroupSpec }> = [
+      { short: "withholder",     up: { type: "withholder",         fraction: f, params: { withholderDirection:        "up"   } },
+                                 dn: { type: "withholder",         fraction: f, params: { withholderDirection:        "down" } } },
+      { short: "bias-injector",  up: { type: "bias-injector",      fraction: f, params: { biasInjectorDirection:      "up"   } },
+                                 dn: { type: "bias-injector",      fraction: f, params: { biasInjectorDirection:      "down" } } },
+      { short: "overshoot",      up: { type: "overshoot-ratchet",  fraction: f, params: { overshootRatchetDirection:  "up"   } },
+                                 dn: { type: "overshoot-ratchet",  fraction: f, params: { overshootRatchetDirection:  "down" } } },
+      { short: "stealth-with",   up: { type: "stealth-withholder", fraction: f, params: { stealthWithholderDirection: "up"   } },
+                                 dn: { type: "stealth-withholder", fraction: f, params: { stealthWithholderDirection: "down" } } },
+      { short: "convergent",     up: { type: "convergent-cabal",   fraction: f, params: { convergentCabalDirection:   "up"   } },
+                                 dn: { type: "convergent-cabal",   fraction: f, params: { convergentCabalDirection:   "down" } } },
+      { short: "inband-shifter", up: { type: "inband-shifter",     fraction: f, params: { inbandShifterDirection:     "up"   } },
+                                 dn: { type: "inband-shifter",     fraction: f, params: { inbandShifterDirection:     "down" } } },
     ];
+
+    const directionless: Array<{ short: string; spec: GroupSpec }> = [
+      { short: "malicious", spec: { type: "malicious", fraction: f } },
+      { short: "pushy",     spec: { type: "pushy",     fraction: f } },
+      { short: "noop",      spec: { type: "noop",      fraction: f } },
+      { short: "delayed",   spec: { type: "delayed",   fraction: f } },
+      { short: "drift",     spec: { type: "drift",     fraction: f } },
+    ];
+
+    const systems: Array<{ tag: string; agg: AggregatorConfig }> = [
+      { tag: "A ε:1", agg: A_full },
+      { tag: "A ε:½", agg: A_half },
+      { tag: "A ε:¼", agg: A_qtr  },
+      { tag: "B med", agg: B_med  },
+    ];
+
+    /** Cross product (every system × this attacker variant). */
+    const sweep = (specs: GroupSpec[], attackerLabel: string): SimulationConfig[] =>
+      systems.map(s => makeConfig(ctx, specs, `[${s.tag}] ${attackerLabel}`, s.agg));
 
     const configs: SimulationConfig[] = [
-      ...triple([],   "honest-baseline"),
-      ...triple(wUp,  "withholder-up"),
-      ...triple(wDn,  "withholder-down"),
-      ...triple(biUp, "bias-injector-up"),
-      ...triple(biDn, "bias-injector-down"),
-      ...triple(orUp, "overshoot-ratchet-up"),
-      ...triple(orDn, "overshoot-ratchet-down"),
-      ...triple(swUp, "stealth-withholder-up"),
-      ...triple(swDn, "stealth-withholder-down"),
-      ...triple(ccUp, "convergent-cabal-up"),
-      ...triple(ccDn, "convergent-cabal-down"),
-      ...triple(ibUp, "inband-shifter-up"),
-      ...triple(ibDn, "inband-shifter-down"),
+      ...sweep([], "honest"),
+      ...directional.flatMap(a => [
+        ...sweep([a.up], `${a.short}↑`),
+        ...sweep([a.dn], `${a.short}↓`),
+      ]),
+      ...directionless.flatMap(a => sweep([a.spec], a.short)),
     ];
-    console.log(`  Total sims: ${configs.length} (13 attacker variants × 3 systems)`);
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
 
-  /**
-   * Defense-ladder candidate #6 for System B (median).
-   *
-   * Round 5 (`inband-shifter`) demonstrated that confidence-based defenses
-   * have a structural conflict with random-venue observation: any goodBand
-   * tight enough to catch attackers also false-positives honest validators
-   * during real-world volatile price moves, leading to cascading exclusion
-   * and oracle collapse.
-   *
-   * Defense-6 abandons per-validator confidence and uses **k-trim by value**.
-   * Median(k=0.4) drops top/bottom 40% of quotes by value before computing
-   * the median. With 1/3 cabal placed at one extreme (e.g. lastPrice * 0.96),
-   * trimming 40% from each tail removes all 100 cabal quotes plus 20 honest
-   * outliers from each side, leaving the middle ~140 honest. Median over
-   * those 140 = honest cluster ≈ real. No per-validator state, so no
-   * exclusion cascade.
-   *
-   * Tradeoff: k=0.4 trims aggressively, reducing the effective sample size.
-   * Per-block variance is higher than untrimmed median in honest baseline,
-   * but should still be well-bounded.
-   */
-  async "tournament-defense-6-ktrim"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: tournament-defense-6-ktrim — k-trim instead of confidence]`);
-    const f = 1 / 3;
-    const A = TOURNAMENT_SYSTEM_A_BASELINE(ctx);
-    const B_HARDENED_v5: AggregatorConfig = {
-      kind: "median",
-      k: 0.4,
-      // No confidence tracking. permanentExclusion irrelevant.
-    };
-    const wUp:  GroupSpec[] = [{ type: "withholder",         fraction: f, params: { withholderDirection: "up" } }];
-    const wDn:  GroupSpec[] = [{ type: "withholder",         fraction: f, params: { withholderDirection: "down" } }];
-    const biUp: GroupSpec[] = [{ type: "bias-injector",      fraction: f, params: { biasInjectorDirection: "up" } }];
-    const biDn: GroupSpec[] = [{ type: "bias-injector",      fraction: f, params: { biasInjectorDirection: "down" } }];
-    const swUp: GroupSpec[] = [{ type: "stealth-withholder", fraction: f, params: { stealthWithholderDirection: "up" } }];
-    const swDn: GroupSpec[] = [{ type: "stealth-withholder", fraction: f, params: { stealthWithholderDirection: "down" } }];
-    const ccUp: GroupSpec[] = [{ type: "convergent-cabal",   fraction: f, params: { convergentCabalDirection: "up" } }];
-    const ccDn: GroupSpec[] = [{ type: "convergent-cabal",   fraction: f, params: { convergentCabalDirection: "down" } }];
-    const ibUp: GroupSpec[] = [{ type: "inband-shifter",     fraction: f, params: { inbandShifterDirection: "up" } }];
-    const ibDn: GroupSpec[] = [{ type: "inband-shifter",     fraction: f, params: { inbandShifterDirection: "down" } }];
-    const configs: SimulationConfig[] = [
-      ...tournamentRoundConfigs(ctx, [],   "honest-baseline",            A, B_HARDENED_v5),
-      ...tournamentRoundConfigs(ctx, wUp,  "withholder-up",              A, B_HARDENED_v5),
-      ...tournamentRoundConfigs(ctx, wDn,  "withholder-down",            A, B_HARDENED_v5),
-      ...tournamentRoundConfigs(ctx, biUp, "bias-injector-up",           A, B_HARDENED_v5),
-      ...tournamentRoundConfigs(ctx, biDn, "bias-injector-down",         A, B_HARDENED_v5),
-      ...tournamentRoundConfigs(ctx, swUp, "stealth-withholder-up",      A, B_HARDENED_v5),
-      ...tournamentRoundConfigs(ctx, swDn, "stealth-withholder-down",    A, B_HARDENED_v5),
-      ...tournamentRoundConfigs(ctx, ccUp, "convergent-cabal-up",        A, B_HARDENED_v5),
-      ...tournamentRoundConfigs(ctx, ccDn, "convergent-cabal-down",      A, B_HARDENED_v5),
-      ...tournamentRoundConfigs(ctx, ibUp, "inband-shifter-up",          A, B_HARDENED_v5),
-      ...tournamentRoundConfigs(ctx, ibDn, "inband-shifter-down",        A, B_HARDENED_v5),
-    ];
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  /**
-   * Defense-ladder candidate #5 for System B (median).
-   *
-   * Defense-4 (strict 5× absent penalty) was rejected because honest
-   * validators were getting -0.05 every time a cabal author dropped them
-   * from the inherent — eventually decaying to permanent exclusion.
-   *
-   * Defense-5 keeps the 5× absent penalty (essential for closing the
-   * round-4 reward arbitrage seam) but attributes absence: the penalty
-   * only fires if the validator self-abstained (kind="abstain" in
-   * `inputs`, or didn't submit at all). If the validator submitted a real
-   * quote/nudge in `inputs` but the author dropped them, no penalty.
-   *
-   * Re-test all five attackers (withholder, bias-injector, stealth-
-   * withholder, convergent-cabal — each up/down) against B-hardened-v3.
-   */
-  async "tournament-defense-5-attributed"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: tournament-defense-5-attributed — re-test all attackers vs B with attributed absence]`);
-    const f = 1 / 3;
-    const A = TOURNAMENT_SYSTEM_A_BASELINE(ctx);
-    const B_HARDENED_v4: AggregatorConfig = {
-      kind: "median",
-      confidence: "wideband-attributed",
-      permanentExclusion: true,
-    };
-    const wUp:  GroupSpec[] = [{ type: "withholder",         fraction: f, params: { withholderDirection: "up" } }];
-    const wDn:  GroupSpec[] = [{ type: "withholder",         fraction: f, params: { withholderDirection: "down" } }];
-    const biUp: GroupSpec[] = [{ type: "bias-injector",      fraction: f, params: { biasInjectorDirection: "up" } }];
-    const biDn: GroupSpec[] = [{ type: "bias-injector",      fraction: f, params: { biasInjectorDirection: "down" } }];
-    const swUp: GroupSpec[] = [{ type: "stealth-withholder", fraction: f, params: { stealthWithholderDirection: "up" } }];
-    const swDn: GroupSpec[] = [{ type: "stealth-withholder", fraction: f, params: { stealthWithholderDirection: "down" } }];
-    const ccUp: GroupSpec[] = [{ type: "convergent-cabal",   fraction: f, params: { convergentCabalDirection: "up" } }];
-    const ccDn: GroupSpec[] = [{ type: "convergent-cabal",   fraction: f, params: { convergentCabalDirection: "down" } }];
-    const configs: SimulationConfig[] = [
-      ...tournamentRoundConfigs(ctx, [],   "honest-baseline",        A, B_HARDENED_v4),
-      ...tournamentRoundConfigs(ctx, wUp,  "withholder-up",          A, B_HARDENED_v4),
-      ...tournamentRoundConfigs(ctx, wDn,  "withholder-down",        A, B_HARDENED_v4),
-      ...tournamentRoundConfigs(ctx, biUp, "bias-injector-up",       A, B_HARDENED_v4),
-      ...tournamentRoundConfigs(ctx, biDn, "bias-injector-down",     A, B_HARDENED_v4),
-      ...tournamentRoundConfigs(ctx, swUp, "stealth-withholder-up",  A, B_HARDENED_v4),
-      ...tournamentRoundConfigs(ctx, swDn, "stealth-withholder-down", A, B_HARDENED_v4),
-      ...tournamentRoundConfigs(ctx, ccUp, "convergent-cabal-up",    A, B_HARDENED_v4),
-      ...tournamentRoundConfigs(ctx, ccDn, "convergent-cabal-down",  A, B_HARDENED_v4),
-    ];
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  /**
-   * Defense-ladder candidate #4 for System B (median).
-   *
-   * Round 4's `convergent-cabal` exposed the symmetric reward/penalty seam
-   * in defenses 1+2: `+REWARD_DELTA == ABSENT_PENALTY == 0.01`, so a cabal
-   * abstaining < 50% of blocks has non-decreasing long-run confidence and
-   * is never excluded.
-   *
-   * Defense #4 breaks the symmetry: STRICT_ABSENT_PENALTY = 0.05 (5× the
-   * reward). Breakeven abstain rate drops to ~16.7%; any cabal abstaining
-   * above that decays toward exclusion.
-   *
-   * Re-test all five prior attackers (withholder, bias-injector,
-   * stealth-withholder, convergent-cabal — each up/down) against the
-   * upgraded hardened B.
-   */
-  async "tournament-defense-4-strict"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: tournament-defense-4-strict — re-test all attackers vs B with strict absent penalty]`);
-    const f = 1 / 3;
-    const A = TOURNAMENT_SYSTEM_A_BASELINE(ctx);
-    const B_HARDENED_v3: AggregatorConfig = {
-      kind: "median",
-      confidence: "wideband-strict",
-      permanentExclusion: true,
-    };
-    const wUp:  GroupSpec[] = [{ type: "withholder",         fraction: f, params: { withholderDirection: "up" } }];
-    const wDn:  GroupSpec[] = [{ type: "withholder",         fraction: f, params: { withholderDirection: "down" } }];
-    const biUp: GroupSpec[] = [{ type: "bias-injector",      fraction: f, params: { biasInjectorDirection: "up" } }];
-    const biDn: GroupSpec[] = [{ type: "bias-injector",      fraction: f, params: { biasInjectorDirection: "down" } }];
-    const swUp: GroupSpec[] = [{ type: "stealth-withholder", fraction: f, params: { stealthWithholderDirection: "up" } }];
-    const swDn: GroupSpec[] = [{ type: "stealth-withholder", fraction: f, params: { stealthWithholderDirection: "down" } }];
-    const ccUp: GroupSpec[] = [{ type: "convergent-cabal",   fraction: f, params: { convergentCabalDirection: "up" } }];
-    const ccDn: GroupSpec[] = [{ type: "convergent-cabal",   fraction: f, params: { convergentCabalDirection: "down" } }];
-    const configs: SimulationConfig[] = [
-      ...tournamentRoundConfigs(ctx, [],   "honest-baseline",        A, B_HARDENED_v3),
-      ...tournamentRoundConfigs(ctx, wUp,  "withholder-up",          A, B_HARDENED_v3),
-      ...tournamentRoundConfigs(ctx, wDn,  "withholder-down",        A, B_HARDENED_v3),
-      ...tournamentRoundConfigs(ctx, biUp, "bias-injector-up",       A, B_HARDENED_v3),
-      ...tournamentRoundConfigs(ctx, biDn, "bias-injector-down",     A, B_HARDENED_v3),
-      ...tournamentRoundConfigs(ctx, swUp, "stealth-withholder-up",  A, B_HARDENED_v3),
-      ...tournamentRoundConfigs(ctx, swDn, "stealth-withholder-down", A, B_HARDENED_v3),
-      ...tournamentRoundConfigs(ctx, ccUp, "convergent-cabal-up",    A, B_HARDENED_v3),
-      ...tournamentRoundConfigs(ctx, ccDn, "convergent-cabal-down",  A, B_HARDENED_v3),
-    ];
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  /**
-   * Defense-ladder candidate #3 for System B (median).
-   *
-   * Round 3's `stealth-withholder` exploited a structural seam: the median
-   * aggregator's freeze branch returned early WITHOUT calling the confidence
-   * callback, so a cabal that aligned every abstain block with a freeze
-   * block accrued zero absent-penalty.
-   *
-   * Defense-3 plugs the seam by extending the `ConfidenceUpdate` signature
-   * with a `priceUpdated: boolean` flag and calling the callback on BOTH
-   * branches (success and freeze). The wideband callback now penalises
-   * absences regardless of whether a median was computed; the goodBand
-   * reward path is skipped on freeze (no median to compare against).
-   *
-   * Re-test all four prior attackers (withholder, bias-injector,
-   * stealth-withholder up/down each) against the upgraded hardened B.
-   */
-  async "tournament-defense-3-freeze-aware"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: tournament-defense-3-freeze-aware — re-test all attackers vs B with freeze-aware confidence]`);
-    const f = 1 / 3;
-    const A = TOURNAMENT_SYSTEM_A_BASELINE(ctx);
-    const B_HARDENED_v2: AggregatorConfig = {
-      kind: "median",
-      confidence: "wideband",
-      permanentExclusion: true,
-    };
-    const wUp:  GroupSpec[] = [{ type: "withholder",        fraction: f, params: { withholderDirection: "up" } }];
-    const wDn:  GroupSpec[] = [{ type: "withholder",        fraction: f, params: { withholderDirection: "down" } }];
-    const biUp: GroupSpec[] = [{ type: "bias-injector",     fraction: f, params: { biasInjectorDirection: "up" } }];
-    const biDn: GroupSpec[] = [{ type: "bias-injector",     fraction: f, params: { biasInjectorDirection: "down" } }];
-    const swUp: GroupSpec[] = [{ type: "stealth-withholder", fraction: f, params: { stealthWithholderDirection: "up" } }];
-    const swDn: GroupSpec[] = [{ type: "stealth-withholder", fraction: f, params: { stealthWithholderDirection: "down" } }];
-    const configs: SimulationConfig[] = [
-      ...tournamentRoundConfigs(ctx, [],   "honest-baseline",            A, B_HARDENED_v2),
-      ...tournamentRoundConfigs(ctx, wUp,  "withholder-up",              A, B_HARDENED_v2),
-      ...tournamentRoundConfigs(ctx, wDn,  "withholder-down",            A, B_HARDENED_v2),
-      ...tournamentRoundConfigs(ctx, biUp, "bias-injector-up",           A, B_HARDENED_v2),
-      ...tournamentRoundConfigs(ctx, biDn, "bias-injector-down",         A, B_HARDENED_v2),
-      ...tournamentRoundConfigs(ctx, swUp, "stealth-withholder-up",      A, B_HARDENED_v2),
-      ...tournamentRoundConfigs(ctx, swDn, "stealth-withholder-down",    A, B_HARDENED_v2),
-    ];
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  async "tournament-defense-2-wideband"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: tournament-defense-2-wideband — wideband confidence vs rounds 0/1 attackers]`);
-    const f = 1 / 3;
-    const A = TOURNAMENT_SYSTEM_A_BASELINE(ctx);
-    const B_HARDENED_v2: AggregatorConfig = {
-      kind: "median",
-      confidence: "wideband",
-      permanentExclusion: true,
-    };
-    const wUp:  GroupSpec[] = [{ type: "withholder",    fraction: f, params: { withholderDirection: "up" } }];
-    const wDn:  GroupSpec[] = [{ type: "withholder",    fraction: f, params: { withholderDirection: "down" } }];
-    const biUp: GroupSpec[] = [{ type: "bias-injector", fraction: f, params: { biasInjectorDirection: "up" } }];
-    const biDn: GroupSpec[] = [{ type: "bias-injector", fraction: f, params: { biasInjectorDirection: "down" } }];
-    const configs: SimulationConfig[] = [
-      ...tournamentRoundConfigs(ctx, [],   "honest-baseline",    A, B_HARDENED_v2),
-      ...tournamentRoundConfigs(ctx, wUp,  "withholder-up",      A, B_HARDENED_v2),
-      ...tournamentRoundConfigs(ctx, wDn,  "withholder-down",    A, B_HARDENED_v2),
-      ...tournamentRoundConfigs(ctx, biUp, "bias-injector-up",   A, B_HARDENED_v2),
-      ...tournamentRoundConfigs(ctx, biDn, "bias-injector-down", A, B_HARDENED_v2),
-    ];
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  /**
-   * Tournament Round 3. The `stealth-withholder` attacker against System A
-   * (nudge baseline) and System B (median + wideband-confidence — defense #1).
-   *
-   * Designed against the SEAM in defense #1: the wideband-confidence callback
-   * is gated behind the aggregator's `quotes.length < effectiveMinInputs`
-   * early-return. On a freeze block, `updateConfidence` is NEVER called →
-   * absent-penalty doesn't fire. Round 0/1 attackers were caught only because
-   * per-validator jitter spread the abstain decision across the cabal — on
-   * blocks where a fraction of cabal abstained but the inherent still met
-   * minInputs, the absent fraction got penalised. The round-3 attacker
-   * eliminates that exposure by:
-   *
-   *   1. Running with `priceSource = { kind: "cross-venue", jitterStdDev: 0 }`.
-   *      All 100 cabal members observe the IDENTICAL real price every block.
-   *      Their abstain/quote decision is deterministically synchronised.
-   *
-   *   2. Abstaining only when the observation pushes the oracle in the bias
-   *      direction by ≥ `stealthAbstainThreshold` (default 0.0005 = 0.05% of
-   *      lastPrice). All 100 cabal members agree → simultaneous abstain →
-   *      300-100 = 200 quotes < 201 minInputs → freeze. Confidence not
-   *      updated. No penalty.
-   *
-   *   3. On non-abstain blocks (real ≤ lastPrice·(1+threshold) for "up"),
-   *      submitting an honest quote near the median → +REWARD_DELTA on every
-   *      such block. Confidence drifts to 1.0 and pins.
-   *
-   * Quote-leg net effect on B: every block where real has drifted >0.05%
-   * above oracle is frozen. Oracle behaviour during sustained up-trends:
-   * pinned at the trend-start price. Down-runs and flat periods catch up
-   * normally (median ≈ real). Cabal NEVER excluded.
-   *
-   * Nudge-leg vs A: pool-poison + overshoot-ratchet author logic. Same
-   * structural ceiling we hit in round 2 — expected ~1% mean dev on A.
-   *
-   * Predicted outcomes: A bounded; B BROKEN with high probability on
-   * criterion 3 (long stretches of `deviationPct ≥ 0.5%` whenever real
-   * up-trends exceed 0.5% over multiple blocks); criterion 1 may also trip
-   * if 2025-10-10→20 has sustained up-runs.
-   *
-   * If B does NOT break under this attack, that's strong evidence the
-   * defense-#1 + median combo is genuinely robust to a much harder attack
-   * class. If A does break (unexpected), it'd be an order-of-magnitude
-   * surprise relative to the round-2 result.
-   */
-  async "tournament-round-3"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: tournament-round-3 — stealth-withholder vs A & hardened B (defense #1)]`);
-    const f = 1 / 3;
-    // The cabal MUST observe with zero jitter so all 100 members evaluate
-    // the suppress predicate identically. cross-venue with jitterStdDev=0
-    // → every cabal member sees the exact real price. This is the linchpin
-    // of the freeze-skips-callback bypass.
-    const cabalPS: ValidatorPriceSource = { kind: "cross-venue", jitterStdDev: 0 };
-    const specsUp: GroupSpec[] = [{
-      type: "stealth-withholder",
-      fraction: f,
-      priceSource: cabalPS,
-      params: { stealthWithholderDirection: "up", stealthAbstainThreshold: 0.0005 },
-    }];
-    const specsDown: GroupSpec[] = [{
-      type: "stealth-withholder",
-      fraction: f,
-      priceSource: cabalPS,
-      params: { stealthWithholderDirection: "down", stealthAbstainThreshold: 0.0005 },
-    }];
-    const A = TOURNAMENT_SYSTEM_A_CURRENT(ctx);
-    const B = TOURNAMENT_SYSTEM_B_CURRENT;
-    const configs: SimulationConfig[] = [
-      ...tournamentRoundConfigs(ctx, [],         "honest-baseline",          A, B),
-      ...tournamentRoundConfigs(ctx, specsUp,    "stealth-withholder-up",    A, B),
-      ...tournamentRoundConfigs(ctx, specsDown,  "stealth-withholder-down",  A, B),
-    ];
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  /**
-   * Tournament Round 4. The `convergent-cabal` attacker against System A
-   * (nudge baseline) and System B-hardened-v2 (median + wideband + freeze-aware).
-   *
-   * Round 3's stealth-withholder broke B-hardened-v1 by aligning lock-step
-   * abstention with freeze branches that skipped the confidence callback.
-   * Defense #2 closed that seam; on hardened-v2, stealth-withholder's
-   * cabal hits zero confidence in ~100 freeze blocks and is permanently
-   * excluded.
-   *
-   * Round 4 introduces a structurally new mechanism: **stateful trend
-   * detection + reward arbitrage**. Cabal members maintain identical
-   * rolling buffers of recent observations (zero-jitter lock-step) and
-   * abstain ONLY when (a) the local observation pushes oracle in the
-   * bias direction AND (b) real has moved >= `trendMagnitude` over the
-   * trend window. On all other blocks they submit honest in-band quotes
-   * and earn +REWARD_DELTA. The intuition: if the cabal can spend
-   * abstention budget on rare-but-impactful blocks while accumulating
-   * reward budget on common-but-low-impact blocks, they may stay active
-   * indefinitely AND occasionally freeze the oracle during damaging trends.
-   *
-   * The attack is also nudge-amplified: pool-poison every block, and on
-   * cabal-authored blocks during a trend window activate ALL in-direction
-   * bumps in the pool (carrying forward overshoot-ratchet's author logic
-   * with a trend gate).
-   *
-   * Predicted outcomes:
-   *   - System A (nudge baseline): bounded. Asymmetric author injection
-   *     hits the same ~1% ceiling we've established in rounds 1-3.
-   *   - System B (hardened-v2): bounded. Reward/penalty are both 0.01
-   *     per block; if abstain rate is moderate (< ~50% of blocks), cabal
-   *     stays active, but each freeze block is a single-block freeze and
-   *     the oracle catches up on the next non-trend block. Long sustained
-   *     trends in DOT data are real but rare and bounded; expected mean
-   *     deviation comparable to round-3 hardened-B (0.2-0.4%).
-   *
-   * If both systems remain bounded, this is decisive evidence we are at
-   * the hardening floor of the current defense stack against the lock-step-
-   * + selective-abstention attack class.
-   *
-   * See TOURNAMENT.md.
-   */
-  async "tournament-round-4"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: tournament-round-4 — convergent-cabal vs A baseline & B-hardened-v2]`);
-    const f = 1 / 3;
-    // Lock-step observation: every cabal member sees the identical real
-    // price each block, so each member's rolling trend buffer is byte-
-    // identical, and the abstain predicate fires across all 100 in
-    // perfect coordination. (Same trick as round-3 stealth-withholder.)
-    const cabalPS: ValidatorPriceSource = { kind: "cross-venue", jitterStdDev: 0 };
-    const specsUp: GroupSpec[] = [{
-      type: "convergent-cabal",
-      fraction: f,
-      priceSource: cabalPS,
-      params: {
-        convergentCabalDirection: "up",
-        convergentCabalTrendBlocks: 30,
-        convergentCabalTrendMagnitude: 0.0030,
-        convergentCabalCeilingBumps: 200,
-      },
-    }];
-    const specsDown: GroupSpec[] = [{
-      type: "convergent-cabal",
-      fraction: f,
-      priceSource: cabalPS,
-      params: {
-        convergentCabalDirection: "down",
-        convergentCabalTrendBlocks: 30,
-        convergentCabalTrendMagnitude: 0.0030,
-        convergentCabalCeilingBumps: 200,
-      },
-    }];
-    const A = TOURNAMENT_SYSTEM_A_CURRENT(ctx);
-    const B = TOURNAMENT_SYSTEM_B_CURRENT;
-    const configs: SimulationConfig[] = [
-      ...tournamentRoundConfigs(ctx, [],         "honest-baseline",         A, B),
-      ...tournamentRoundConfigs(ctx, specsUp,    "convergent-cabal-up",     A, B),
-      ...tournamentRoundConfigs(ctx, specsDown,  "convergent-cabal-down",   A, B),
-    ];
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  /**
-   * tournament-round-5 — InBandShifter vs A baseline & B-hardened-v3.
-   *
-   * First of two stopping-rule rounds: B has 3 committed defenses, A has 0,
-   * and a "decisive win" requires A to survive two more rounds without
-   * breaking. Round 5's attacker is designed to probe the remaining attack
-   * surface honestly:
-   *   - Quote leg: in-band biased quotes at 4% bias (strictly inside the
-   *     5% wideband). Cabal never abstains, never sends bad quotes →
-   *     attribution-immune. Tests whether a median can still be shifted by
-   *     a 1/3 cabal that is invisible to all three committed B defenses.
-   *   - Nudge leg: pool-poison + always-inject author (no ceiling freeze).
-   *     Slightly more aggressive than overshoot-ratchet for A.
-   *
-   * Default jitter (0.1%) for the cabal — no zero-jitter trick is needed
-   * since this attacker doesn't depend on lock-step abstention. Both
-   * directions tested.
-   */
-  async "tournament-round-5"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: tournament-round-5 — inband-shifter vs A baseline & B-hardened-v3]`);
-    const f = 1 / 3;
-    const specsUp: GroupSpec[] = [{
-      type: "inband-shifter",
-      fraction: f,
-      params: {
-        inbandShifterDirection: "up",
-        inbandShifterQuoteBias: 0.04,
-        inbandShifterCeilingBumps: 200,
-      },
-    }];
-    const specsDown: GroupSpec[] = [{
-      type: "inband-shifter",
-      fraction: f,
-      params: {
-        inbandShifterDirection: "down",
-        inbandShifterQuoteBias: 0.04,
-        inbandShifterCeilingBumps: 200,
-      },
-    }];
-    const A = TOURNAMENT_SYSTEM_A_CURRENT(ctx);
-    const B = TOURNAMENT_SYSTEM_B_CURRENT;
-    const configs: SimulationConfig[] = [
-      ...tournamentRoundConfigs(ctx, [],         "honest-baseline",      A, B),
-      ...tournamentRoundConfigs(ctx, specsUp,    "inband-shifter-up",    A, B),
-      ...tournamentRoundConfigs(ctx, specsDown,  "inband-shifter-down",  A, B),
-    ];
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  async "tournament-defense-1-confidence"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: tournament-defense-1-confidence — re-test rounds 0 & 1 attackers vs hardened B]`);
-    const f = 1 / 3;
-    const A = TOURNAMENT_SYSTEM_A_BASELINE(ctx);
-    const B_HARDENED_v1: AggregatorConfig = {
-      kind: "median",
-      confidence: "default",
-      permanentExclusion: true,
-    };
-    const wUp:   GroupSpec[] = [{ type: "withholder",    fraction: f, params: { withholderDirection: "up" } }];
-    const wDn:   GroupSpec[] = [{ type: "withholder",    fraction: f, params: { withholderDirection: "down" } }];
-    const biUp:  GroupSpec[] = [{ type: "bias-injector", fraction: f, params: { biasInjectorDirection: "up" } }];
-    const biDn:  GroupSpec[] = [{ type: "bias-injector", fraction: f, params: { biasInjectorDirection: "down" } }];
-    const configs: SimulationConfig[] = [
-      ...tournamentRoundConfigs(ctx, [],    "honest-baseline",        A, B_HARDENED_v1),
-      ...tournamentRoundConfigs(ctx, wUp,   "withholder-up",          A, B_HARDENED_v1),
-      ...tournamentRoundConfigs(ctx, wDn,   "withholder-down",        A, B_HARDENED_v1),
-      ...tournamentRoundConfigs(ctx, biUp,  "bias-injector-up",       A, B_HARDENED_v1),
-      ...tournamentRoundConfigs(ctx, biDn,  "bias-injector-down",     A, B_HARDENED_v1),
-    ];
+    const variantCount = 1 + 2 * directional.length + directionless.length;
+    console.log(
+      `  Auto-ε resolved: ${autoEps.toFixed(6)}  (½ = ${(autoEps/2).toFixed(6)}, ¼ = ${(autoEps/4).toFixed(6)})`,
+    );
+    console.log(`  Total sims: ${configs.length} (${variantCount} variants × ${systems.length} systems)`);
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 };

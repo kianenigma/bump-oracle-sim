@@ -1,0 +1,36 @@
+## Future Research
+
+1. We need a short price path that demonstrates:
+
+* For each drop and increase in price of 10%, 30%, 70%
+	* one variation where venues are in sync and just have jitter
+		* one variation where price recovers to 20% of the original
+		* one variation where price recovers to 50% of the original
+		* one variation where price recovers to 90% of the original
+	* one variation where venues diverge with 10x jitter
+* some period of mild volatility in between with venues in sync within normal jitter
+* real price is still MEAN of all venues (un weighted)
+
+This should be a new parameter in the CLI called `----data-source synthetic` that will do this, and it will reject --from and so on.
+
+---
+
+Then we need to refactor all our malicious validators to be applicable to either the median model or the nudge.
+A lot of them are doing the same thing in the nudge model, because they are realistically only relevant to the median model.
+
+Each malicious validator has a associated property that is checked in the engine. It is either applicable to a nudge run, or a median run. If worngly configured, the run will fail.
+
+We also need to keep, but exclude all malicious validators that are targeted towards defeating the confidence tracking, from our new scenario. They are not relevant anymore.
+
+---
+
+The new scenario will:
+
+* Run mean (with no confidence tracking) and nudge model against only those malicious actors that are relevant
+	* While we mostly focus on 33% malicious (+ honest), also run 10% as an extra data-point
+	* we will run with auto epsilon, epsilon/2 and epsilon/4 as we do now.
+
+
+---
+
+Then I presume our conclusion would be that the mean model is always better. Validate this against the synthetic data and conclude that it is the case.

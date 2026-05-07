@@ -698,6 +698,69 @@ Either ships. **Don't add confidence tracking** — at the protocol's actual thr
 
 The earlier round-by-round narrative is preserved above as evidence of *what attacks become available at byzantine = 100* and *why the natural confidence-based defenses introduce more attack surface than they remove*. Useful as a guide rail for future engineering work that might tempt the addition of similar mechanisms.
 
+---
+
+# ε-Sweep: Nudge Hardening at the Strict Threshold
+
+The strict-threshold rerun above was extended to test nudge with three epsilons:
+- `[A ε:1]` — auto = `maxBlockDelta / N` (default)
+- `[A ε:½]` — auto / 2 (slower reaction, smaller per-block leverage for attackers)
+- `[A ε:¼]` — auto / 4 (slower still)
+- `[B med]` — median + `floor(2N/3)+1` minInputs (no confidence)
+
+Plus all 11 malicious validator types (6 directional × ↑/↓ + 5 directionless: malicious, pushy, noop, delayed, drift). 72 sims total at byzantine = 99/300 over the same 10-day window.
+
+**Scenario**: `tournament-rerun-strict-threshold`. **Evidence**: `tournament-runs/rerun-strict-threshold-eps-sweep.simdata/index.json` (preserved).
+
+## Results matrix (mean deviation %)
+
+| Attacker            | A ε:1   | A ε:½   | A ε:¼   | B med   |
+|---------------------|---------|---------|---------|---------|
+| honest              | 0.156   | 0.159   | 0.165   | **0.079** |
+| withholder↑         | 0.167   | 0.168   | 0.174   | **0.107** |
+| withholder↓         | 0.153   | 0.157   | 0.158   | **0.088** |
+| bias-injector↑      | 0.597   | 0.350   | 0.227   | **0.107** |
+| bias-injector↓      | 0.611   | 0.366   | 0.254   | **0.088** |
+| overshoot↑          | 0.942   | 0.523   | 0.314   | **0.107** |
+| overshoot↓          | 0.960   | 0.543   | 0.342   | **0.088** |
+| stealth-with↑       | 0.942   | 0.523   | 0.314   | **0.101** |
+| stealth-with↓       | 0.960   | 0.543   | 0.342   | **0.082** |
+| convergent↑         | 0.943   | 0.527   | 0.318   | **0.088** |
+| convergent↓         | 0.960   | 0.544   | 0.344   | **0.074** |
+| inband-shifter↑     | 0.942   | 0.523   | 0.314   | **0.192** |
+| inband-shifter↓     | 0.960   | 0.543   | 0.342   | **0.161** |
+| malicious           | 0.269   | 0.262   | 0.251   | **0.095** |
+| pushy               | 0.751   | 0.435   | 0.282   | **0.090** |
+| noop                | 0.158   | 0.165   | 0.168   | **0.086** |
+| delayed             | 0.171   | 0.175   | 0.179   | **0.095** |
+| drift               | 1.258   | 0.712   | 0.445   | **0.193** |
+
+(Bold cells = lowest mean deviation in that row.)
+
+## Findings
+
+1. **Median wins every row.** Mean deviation 0.07-0.19% across all 18 attacker variants, plus the lowest honest baseline (0.079% — half of nudge's). The minInputs gate works as designed at the strict threshold; no defense needed.
+
+2. **Smaller ε is a clean hardening for nudge against amplification attacks.** The bias-injector / overshoot / stealth-withholder / convergent-cabal / inband-shifter / pushy / drift class all have damage that scales linearly with ε. Halving ε halves the mean dev:
+   - `overshoot↑`: 0.94 → 0.52 → 0.31 (almost exactly 2× per halving)
+   - `drift`: 1.26 → 0.71 → 0.45
+   - `pushy`: 0.75 → 0.44 → 0.28
+   - `bias-injector↑`: 0.60 → 0.35 → 0.23
+
+3. **Smaller ε is irrelevant for non-amplification attacks.** withholder, malicious, noop, delayed are all at the noise floor (~0.15-0.27% mean dev) regardless of ε; their attack vector doesn't depend on bump magnitude. ε:¼ shows a tiny worsening (~5%) compared to ε:1 because chain reaction time goes up.
+
+4. **Smaller ε slightly raises honest noise.** Mean dev 0.156 → 0.165 — a 6% relative increase. Max single-block deviation goes 33% → 57% during sharp real-price moves (chain takes more blocks to catch up). Still well below the 100% break threshold and the 5% mean-dev threshold.
+
+5. **A ε:¼ approaches B med on amplification attacks but doesn't reach it.** ε:¼ overshoot↑ = 0.31% vs B med 0.11%. Median's structural outlier robustness is still the better defense; smaller ε just narrows the gap.
+
+## Updated recommendation
+
+If the deployment chooses **median**: ship `{ kind: "median" }` — minInputs default `floor(2N/3)+1` does the job, no extras.
+
+If the deployment chooses **nudge** for orthogonal reasons (1-bit gossip, simpler block author math, etc.): use `epsilon: "auto" / 4` (or equivalently a ratio scaled accordingly). The amplification-attack improvement is large (3× on the worst class) and the cost (slightly slower reaction during real-price spikes) is small. The `ε:¼` curve is the dominant nudge configuration in this sweep.
+
+The data in this section is the strongest empirical evidence the tournament has produced. Median + `2N/3+1` minInputs is unambiguously the best default; nudge with ε / 4 is a viable simpler alternative.
+
 | Round | Attacker             | A outcome             | B outcome           | Discriminating? | Defenses added | Evidence                                                                                                                                |
 |-------|----------------------|-----------------------|---------------------|-----------------|----------------|-----------------------------------------------------------------------------------------------------------------------------------------|
 | 0     | withholder-up        | bounded (0.17%)       | broken (1, 3)       | yes             | none           | `tournament-runs/round-0-withholder.simdata/{a-nudge-withholder-up_2, b-median-withholder-up_3}/`                                        |
