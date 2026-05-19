@@ -1814,6 +1814,36 @@
         const lines = [
           `<div style="font-weight:600;margin-bottom:3px">Block #${data.block.toLocaleString()} · ${blockTime}</div>`,
         ];
+
+        // Synthetic-only: label the hovered block with the event it belongs to.
+        // `data.event` is null when the .simdata isn't synthetic (no events.json)
+        // or when the block falls into inter-event filler.
+        if (data.event) {
+          const ev = data.event;
+          const dirArrow = ev.descriptor.direction === 'drop' ? '▼' : '▲';
+          const magPct = (ev.descriptor.magnitude * 100).toFixed(0);
+          // recovered = 1 means the price ends back at start; recovery=0.2 means
+          // 20% of the move is recovered, i.e. 80% of the displacement remains.
+          const variantText =
+              ev.descriptor.variant === 'diverge'
+                ? 'diverge (10× venue jitter)'
+                : `${(ev.descriptor.recovery * 100).toFixed(0)}% recovery`;
+          const moveBlk = ev.descriptor.moveBlocks ?? '?';
+          const phaseColor = {
+            'move':     '#fc6',
+            'hold':     '#e88',
+            'recovery': '#9cf',
+            'post':     '#aaa',
+          }[ev.phase] || '#aaa';
+          lines.push(
+            `<div style="margin:4px 0 6px 0;padding:4px 6px;background:rgba(255,255,255,0.04);border-left:2px solid ${phaseColor}">` +
+            `<div><b>${dirArrow} event #${ev.index + 1}</b> · ${ev.descriptor.direction} ${magPct}% · ${variantText}</div>` +
+            `<div style="opacity:0.75;font-size:11px">phase: <b style="color:${phaseColor}">${ev.phase}</b>` +
+            ` · move-blocks: ${moveBlk}` +
+            ` · path: ${ev.startPrice.toFixed(4)} → ${ev.extremePrice.toFixed(4)} → ${ev.recoveredPrice.toFixed(4)}</div>` +
+            `</div>`
+          );
+        }
         // Cap to keep the tooltip readable; remaining count shown below.
         const MAX_ROWS = 12;
         const rows = data.authors.slice(0, MAX_ROWS);

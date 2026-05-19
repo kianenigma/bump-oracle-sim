@@ -2,6 +2,7 @@ import { join } from "path";
 import { mkdirSync, existsSync } from "fs";
 import type { BlockMetrics, SimulationConfig, SimulationSummary, SimDataIndex, ScenarioMeta, BlockChunk, ResolvedPriceSource, VenueId } from "../types.js";
 import { BLOCKS_PER_CHUNK } from "../types.js";
+import { BLOCK_TIME_SECONDS } from "../config.js";
 import type { BlockSink } from "../sim/engine.js";
 
 /**
@@ -194,6 +195,33 @@ export function writeIndex(
     };
     Bun.write(join(outputDir, "venues.json"), JSON.stringify(payload));
   }
+
+  // Synthetic-only: persist the per-event span list so the chart can label
+  // each hovered block with the event it belongs to. Same lifetime rule as
+  // venues.json — emitted alongside the .simdata directory.
+  if (priceSource?.events && priceSource.events.length > 0) {
+    const payload: EventsFile = {
+      firstBlockTimestamp: priceSource.pricePoints[0]?.timestamp ?? 0,
+      blockTimeSeconds: BLOCK_TIME_SECONDS,
+      events: priceSource.events,
+    };
+    Bun.write(join(outputDir, "events.json"), JSON.stringify(payload));
+  }
+}
+
+/** Shape of `events.json`. The block-time + first-block-timestamp pair lets
+ *  the server map (timestamp → block index) without loading any chunk. */
+export interface EventsFile {
+  firstBlockTimestamp: number;
+  blockTimeSeconds: number;
+  events: import("../types.js").SyntheticEventSpanLite[];
+}
+
+/** Load events.json if present (synthetic-mode .simdata only). */
+export async function loadEvents(outputDir: string): Promise<EventsFile | null> {
+  const path = join(outputDir, "events.json");
+  if (!existsSync(path)) return null;
+  return Bun.file(path).json();
 }
 
 /** Shape of `venues.json` (alongside index.json in a .simdata directory). */

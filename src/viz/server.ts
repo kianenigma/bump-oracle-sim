@@ -14,7 +14,7 @@ import type {
 } from "../types.js";
 import { BLOCKS_PER_CHUNK } from "../types.js";
 import { aggregateOHLC, aggregateLine, aggregateDeviation } from "./aggregation.js";
-import { loadIndex, loadChunk, loadVenues, type VenuesFile } from "./writer.js";
+import { loadIndex, loadChunk, loadVenues, loadEvents, type VenuesFile, type EventsFile } from "./writer.js";
 import { mulberry32 } from "../rng.js";
 import { BLOCK_TIME_SECONDS } from "../config.js";
 
@@ -102,6 +102,28 @@ function validatorTypeAt(validators: ValidatorGroup[], authorIdx: number): Valid
   }
   // Fallback for out-of-range; shouldn't happen unless authorIdx ≥ total.
   return validators.length > 0 ? validators[validators.length - 1].type : "honest";
+}
+
+/** Find which synthetic event covers the given block index (full span runs
+ *  from `moveStartBlock` to `postEndBlock` inclusive). Returns null when the
+ *  block falls into inter-event filler or precedes the first event. Linear
+ *  scan; events arrays are tiny (24-72 entries typically). The returned
+ *  shape mirrors the on-disk EventsFile entry plus a derived `phase` tag
+ *  describing which sub-phase of the event the hovered block is in. */
+function findEventForBlock(
+  evf: EventsFile,
+  block: number,
+): (EventsFile["events"][number] & { phase: "move" | "hold" | "recovery" | "post" }) | null {
+  for (const ev of evf.events) {
+    if (block < ev.moveStartBlock || block > ev.postEndBlock) continue;
+    let phase: "move" | "hold" | "recovery" | "post";
+    if (block <= ev.extremeBlock)             phase = "move";
+    else if (block < ev.recoveryStartBlock)   phase = "hold";
+    else if (block <= ev.recoveredBlock)      phase = "recovery";
+    else                                       phase = "post";
+    return { ...ev, phase };
+  }
+  return null;
 }
 
 /** Floor a timestamp to the block index using uniform 6s spacing from
@@ -356,6 +378,7 @@ export async function startServer(
 ): Promise<void> {
   const index = await loadIndex(outputDir);
   const venues = await loadVenues(outputDir);
+  const events = await loadEvents(outputDir);
   const templateHtml = await Bun.file(TEMPLATE_PATH).text();
   const metaResponse = JSON.stringify(buildMetaResponse(index, filterIndices, timeConstraint));
 
@@ -462,7 +485,12 @@ export async function startServer(
           };
         }));
 
-        return new Response(JSON.stringify({ block, timestamp: blockTimestamp, authors }), {
+        // Synthetic-only: resolve which event (if any) this block belongs to.
+        // Returned as a structural payload — null when between events or when
+        // the simdata wasn't produced from synthetic data.
+        const event = events ? findEventForBlock(events, block) : null;
+
+        return new Response(JSON.stringify({ block, timestamp: blockTimestamp, authors, event }), {
           headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
         });
       }

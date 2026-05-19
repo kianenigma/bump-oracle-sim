@@ -21,8 +21,8 @@ export const DEFAULT_PRICE_SOURCE: ValidatorPriceSource = {
 // group's `params` is missing or partial.
 export const DEFAULT_VALIDATOR_PARAMS: Required<ValidatorParams> = {
   delayBlocks: 10,             // 60s at 6s blocks
-  pushyQuoteBias: 0.1,        // 5% outlier in motion direction (quote mode)
-  maliciousQuoteBias: 0.1,    // 5% outlier OPPOSITE motion (quote mode)
+  pushyQuoteBias: 10,        // 5% outlier in motion direction (quote mode)
+  maliciousQuoteBias: 10,    // 5% outlier OPPOSITE motion (quote mode)
   driftQuoteStep: 0.1,       // 0.1% upward bias per block (quote mode)
   withholderDirection: "up",  // suppress upward oracle moves by default
   biasInjectorDirection: "up", // ratchet oracle upward by default

@@ -147,11 +147,37 @@ export type ValidatorPriceSource =
   | { kind: "cross-venue"; jitterStdDev: number }
   | { kind: "random-venue"; jitterStdDev: number };
 
+/** Structural shape of one entry in the synthetic event span list. Defined
+ *  here (rather than in `src/data/synthetic.ts`) so `ResolvedPriceSource` can
+ *  carry it without a circular import. The runtime producer lives in
+ *  synthetic.ts and the consumer (writer/server) treats it as opaque data. */
+export interface SyntheticEventSpanLite {
+  index: number;
+  descriptor: {
+    direction: "drop" | "increase";
+    magnitude: number;
+    variant: "insync-r20" | "insync-r50" | "insync-r90" | "diverge";
+    recovery: number;
+    moveBlocks?: number;
+  };
+  moveStartBlock: number;
+  extremeBlock: number;
+  recoveryStartBlock: number;
+  recoveredBlock: number;
+  postEndBlock: number;
+  startPrice: number;
+  extremePrice: number;
+  recoveredPrice: number;
+}
+
 /** What `loadPriceSource` returns: the resolved 6s price grid plus, when in
- *  trades mode, per-venue carry-forward-filled price arrays of the same length. */
+ *  trades mode, per-venue carry-forward-filled price arrays of the same length.
+ *  When in synthetic mode the source also carries an event-span list so the
+ *  chart can label each hovered block with the event it belongs to. */
 export interface ResolvedPriceSource {
   pricePoints: PricePoint[];
   venuePrices?: Record<VenueId, number[]>;
+  events?: SyntheticEventSpanLite[];
 }
 
 // ── Validator groups ────────────────────────────────────────────────────────
@@ -159,7 +185,10 @@ export interface ResolvedPriceSource {
 // old top-level (validatorCount, validatorMix, jitterStdDev,
 // validatorPriceSource, maliciousParams) bundle. A simulation's full
 // validator set is the concatenation of all groups, in order.
-export type ValidatorType = "honest" | "malicious" | "pushy" | "noop" | "delayed" | "drift" | "withholder" | "bias-injector" | "overshoot-ratchet" | "stealth-withholder" | "convergent-cabal" | "inband-shifter" | "boundary-cluster" | "author-censor" | "state-aware-sandwich" | "median-walking-cabal" | "trim-edge" | "inner-cluster-shifter" | "asymmetric-trim-chaser" | "author-only-trim" | "drift-track-trim" | "hopping-trim";
+export type ValidatorType =
+  "honest" | "malicious" | "pushy" | "noop" | "delayed" | "drift" |
+  "withholder" | "bias-injector" | "overshoot-ratchet" | "stealth-withholder" | "convergent-cabal" | "inband-shifter" |
+  "boundary-cluster" | "author-censor" | "state-aware-sandwich" | "median-walking-cabal" | "trim-edge" | "inner-cluster-shifter" | "asymmetric-trim-chaser" | "author-only-trim" | "drift-track-trim" | "hopping-trim";
 
 /** Type-specific behavior knobs. Required keys depend on `type`:
  *    delayed   → delayBlocks
