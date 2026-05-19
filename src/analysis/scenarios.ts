@@ -194,7 +194,7 @@ function buildCoreAttackerConfigs(
   ctx: ScenarioCtx,
   opts: { includeAdaptive?: boolean } = {},
 ): SimulationConfig[] {
-  const fractions = [0.10, 0.33];
+  const fractions = [0.10, 0.33, 0.49];
   const autoEps = 1 / ctx.validatorCount / 10;
   const epsilons: Array<{ label: string; value: number }> = [
     { label: "auto",   value: autoEps },

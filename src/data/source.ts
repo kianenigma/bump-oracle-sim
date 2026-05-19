@@ -32,10 +32,16 @@ export async function loadPriceSource(
     return { pricePoints: interpolateToBlocks(cacheData.data) };
   }
   if (spec.kind === "synthetic") {
+    // `moveBlocks` is a *schedule*: each entry drives one full pass of the
+    // 24-event sequence at that duration. `[10, 100, 1000]` interleaves fast,
+    // medium, and slow price changes. Undefined → single pass at the
+    // generator's default. The recovery-phase length mirrors the move-phase
+    // length per event (symmetric design).
     return generateSyntheticSource({
       venues: spec.venues,
       venueJitterStdDev: spec.venueJitterStdDev,
       seed: seed ?? 42,
+      ...(spec.moveBlocks !== undefined ? { moveBlocksSchedule: spec.moveBlocks } : {}),
     });
   }
   return loadTradeSourcePoints(spec.venues, startDate, endDate, spec.crossVenue ?? { kind: "median" });

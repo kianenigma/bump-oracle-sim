@@ -68,6 +68,7 @@ const { values: args } = parseArgs({
     "cross-venue": { type: "string" },
     "price-source": { type: "string" },
     "synthetic-venue-jitter": { type: "string", default: String(DEFAULT_SYNTHETIC_VENUE_JITTER) },
+    "synthetic-move-blocks": { type: "string", default: "10" },
     help: { type: "boolean", default: false },
   },
 });
@@ -116,6 +117,12 @@ Options:
                                 random-venue requires --data-source=trades.
   --synthetic-venue-jitter <f> Per-venue Gaussian jitter as fraction of price for --data-source=synthetic
                                 (default: ${DEFAULT_SYNTHETIC_VENUE_JITTER}). Divergence events use 10× this.
+  --synthetic-move-blocks <list>
+                                Comma-separated schedule of move-phase block counts for
+                                --data-source=synthetic (default: "10"). Each entry triggers one full
+                                24-event pass at that duration — e.g. "10,100,1000" interleaves fast,
+                                medium, and slow price changes into one 72-event timeline. Larger
+                                events within a pass still stretch sub-linearly via sqrt(m/0.10).
   --help                       Show this help
 `);
   process.exit(0);
@@ -167,6 +174,7 @@ function parseRealPriceArg(
   venuesRaw: string | undefined,
   crossVenueRaw: string | undefined,
   syntheticJitterRaw: string,
+  syntheticMoveBlocksRaw: string | undefined,
 ): RealPriceSpec {
   if (kind === "candles") {
     if (venuesRaw) console.error(`Warning: --venues ignored when --data-source=candles`);
@@ -185,7 +193,34 @@ function parseRealPriceArg(
       console.error(`Invalid --synthetic-venue-jitter: "${syntheticJitterRaw}". Expected a non-negative number.`);
       process.exit(1);
     }
-    return { kind: "synthetic", venues: parseVenuesList(venuesRaw, "synthetic"), venueJitterStdDev: jitter };
+    // `--synthetic-move-blocks` is a *schedule* — a comma-separated list of
+    // positive integers. `10` → single 24-event pass at 10-block moves.
+    // `10,100,1000` → three back-to-back passes interleaving fast, medium,
+    // and slow price changes (72 events total). Defaults to `"10"`.
+    let moveBlocks: number[] | undefined;
+    if (syntheticMoveBlocksRaw !== undefined) {
+      const parts = syntheticMoveBlocksRaw.split(",").map(s => s.trim()).filter(s => s.length > 0);
+      if (parts.length === 0) {
+        console.error(`Invalid --synthetic-move-blocks: "${syntheticMoveBlocksRaw}". Expected one or more positive integers, comma-separated.`);
+        process.exit(1);
+      }
+      const parsed: number[] = [];
+      for (const p of parts) {
+        const n = parseInt(p, 10);
+        if (isNaN(n) || n < 1 || String(n) !== p) {
+          console.error(`Invalid --synthetic-move-blocks entry "${p}". Expected positive integers, comma-separated (e.g. "10,100,1000").`);
+          process.exit(1);
+        }
+        parsed.push(n);
+      }
+      moveBlocks = parsed;
+    }
+    return {
+      kind: "synthetic",
+      venues: parseVenuesList(venuesRaw, "synthetic"),
+      venueJitterStdDev: jitter,
+      ...(moveBlocks !== undefined ? { moveBlocks } : {}),
+    };
   }
   console.error(`Invalid --data-source: "${kind}". Expected: candles, trades, synthetic.`);
   process.exit(1);
@@ -226,18 +261,32 @@ function printSyntheticEventTable(source: import("./data/synthetic.js").Syntheti
   const baseline = events[0]?.startPrice;
   const totalBlocks = source.pricePoints.length;
 
+  // Show the `moveBlocks` column only when the schedule has more than one
+  // unique value — otherwise it's the same number every row and just clutters.
+  const moveBlocksValues = new Set(events.map(e => e.descriptor.moveBlocks));
+  const showMoveCol = moveBlocksValues.size > 1;
+  const blockRangeWidth = Math.max(13, events[events.length - 1].postEndBlock.toString().length * 2 + 1);
+
   console.log(`\nSynthetic event sequence — ${events.length} events, baseline=${baseline.toFixed(4)}, ${totalBlocks.toLocaleString()} blocks (6s each):`);
   console.log("");
-  console.log("   #    blocks         direction   variant                                     path (start → extreme → recovered)");
-  console.log("  ──── ────────────── ───────────  ─────────────────────────────────────────  ─────────────────────────────────────");
+  if (showMoveCol) {
+    console.log(`   #    ${"blocks".padEnd(blockRangeWidth)} move-blk  direction   variant                                     path (start → extreme → recovered)`);
+  } else {
+    console.log(`   #    ${"blocks".padEnd(blockRangeWidth)} direction   variant                                     path (start → extreme → recovered)`);
+  }
   for (const ev of events) {
     const idx = String(ev.index + 1).padStart(3, " ");
-    const blockRange = `${ev.moveStartBlock.toString().padStart(4)}–${ev.postEndBlock.toString().padStart(4)}`.padEnd(13);
+    const blockRange = `${ev.moveStartBlock.toString().padStart(5)}–${ev.postEndBlock.toString().padStart(5)}`.padEnd(blockRangeWidth);
     const dir = ev.descriptor.direction === "drop" ? "drop" : "rise";
     const dirCol = `${dir} ${(ev.descriptor.magnitude * 100).toFixed(0).padStart(2)}%`.padEnd(11);
     const variant = variantLabel(ev.descriptor).padEnd(43);
     const path = `${ev.startPrice.toFixed(4)} → ${ev.extremePrice.toFixed(4)} → ${ev.recoveredPrice.toFixed(4)}`;
-    console.log(`  ${idx}   ${blockRange}  ${dirCol}  ${variant}  ${path}`);
+    if (showMoveCol) {
+      const mb = (ev.descriptor.moveBlocks ?? 0).toString().padStart(7);
+      console.log(`  ${idx}   ${blockRange} ${mb}   ${dirCol}  ${variant}  ${path}`);
+    } else {
+      console.log(`  ${idx}   ${blockRange} ${dirCol}  ${variant}  ${path}`);
+    }
   }
   console.log("");
 }
@@ -359,6 +408,7 @@ const realPrice = parseRealPriceArg(
   args.venues,
   args["cross-venue"],
   args["synthetic-venue-jitter"]!,
+  args["synthetic-move-blocks"],
 );
 
 if (realPrice.kind === "synthetic") {
@@ -379,7 +429,8 @@ if (realPrice.kind === "candles") {
 } else if (realPrice.kind === "trades") {
   console.log(`\nLoading DOT/USDT data (trades, venues: ${realPrice.venues.join(", ")}, cross-venue=${realPrice.crossVenue?.kind ?? "mean"}): ${startDate} to ${endDate}`);
 } else {
-  console.log(`\nGenerating synthetic price path (venues: ${realPrice.venues.join(", ")}, venue-jitter=${realPrice.venueJitterStdDev}, seed=${seedForSource})`);
+  const moveStr = realPrice.moveBlocks !== undefined ? `, move-blocks=[${realPrice.moveBlocks.join(",")}]` : "";
+  console.log(`\nGenerating synthetic price path (venues: ${realPrice.venues.join(", ")}, venue-jitter=${realPrice.venueJitterStdDev}${moveStr}, seed=${seedForSource})`);
 }
 
 const priceSource = await loadPriceSource(realPrice, startDate, endDate, seedForSource);

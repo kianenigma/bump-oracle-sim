@@ -20,6 +20,12 @@ export interface SyntheticEventDescriptor {
   magnitude: number;     // fraction of baseline: 0.10 | 0.30 | 0.70
   variant: SyntheticVariant;
   recovery: number;      // fraction of the move recovered: 0.2 | 0.5 | 0.9 | 1.0
+  /** Per-event override of the move/recovery phase length (block count). When
+   *  set, overrides `phaseLengths.moveBlocks` (and the symmetric recovery
+   *  length) for this event only. Used by the multi-schedule mode so a single
+   *  run can interleave fast and slow price changes — see
+   *  `buildSyntheticEvents(schedule)`. Undefined → fall back to phaseLengths. */
+  moveBlocks?: number;
 }
 
 const MAGNITUDES = [0.10, 0.30, 0.70];
@@ -31,15 +37,34 @@ const INSYNC_RECOVERIES: Array<{ variant: SyntheticVariant; recovery: number }> 
 
 /** The canonical 24-event sequence, ordered drops-first then rises, with
  *  magnitudes ascending small-to-large within each direction and in-sync
- *  variants before divergence. */
-export function buildSyntheticEvents(): SyntheticEventDescriptor[] {
+ *  variants before divergence.
+ *
+ *  When `moveBlocksSchedule` is supplied, the full 24-event sequence is
+ *  repeated once per entry, with each pass tagging its events with the
+ *  corresponding `moveBlocks` duration. So `[10, 100, 1000]` produces 72
+ *  events: the first 24 use fast 10-block moves, the next 24 use 100-block
+ *  moves, the last 24 use 1000-block moves. The inter-event filler still
+ *  drifts back to baseline between every pair of events, including across
+ *  pass boundaries. */
+export function buildSyntheticEvents(moveBlocksSchedule?: number[]): SyntheticEventDescriptor[] {
+  const schedule = moveBlocksSchedule && moveBlocksSchedule.length > 0
+    ? moveBlocksSchedule
+    : [undefined as number | undefined];
   const events: SyntheticEventDescriptor[] = [];
-  for (const dir of ["drop", "increase"] as SyntheticDirection[]) {
-    for (const m of MAGNITUDES) {
-      for (const r of INSYNC_RECOVERIES) {
-        events.push({ direction: dir, magnitude: m, variant: r.variant, recovery: r.recovery });
+  for (const moveBlocks of schedule) {
+    for (const dir of ["drop", "increase"] as SyntheticDirection[]) {
+      for (const m of MAGNITUDES) {
+        for (const r of INSYNC_RECOVERIES) {
+          events.push({
+            direction: dir, magnitude: m, variant: r.variant, recovery: r.recovery,
+            ...(moveBlocks !== undefined ? { moveBlocks } : {}),
+          });
+        }
+        events.push({
+          direction: dir, magnitude: m, variant: "diverge", recovery: 1.0,
+          ...(moveBlocks !== undefined ? { moveBlocks } : {}),
+        });
       }
-      events.push({ direction: dir, magnitude: m, variant: "diverge", recovery: 1.0 });
     }
   }
   return events;
@@ -97,6 +122,12 @@ export interface SyntheticConfig {
   seed: number;
   phaseLengths?: Partial<SyntheticPhaseLengths>;
   stochastics?: Partial<SyntheticPathStochastics>;
+  /** Optional list of move-phase block counts. When set, the full 24-event
+   *  sequence runs once per entry, each pass tagging its events with the
+   *  corresponding `moveBlocks` value — `[10, 100, 1000]` interleaves fast,
+   *  medium, and slow price changes in one timeline. Unset → single pass at
+   *  `phaseLengths.moveBlocks`. */
+  moveBlocksSchedule?: number[];
 }
 
 /** Per-block tag so we know which jitter regime to apply. "diverge-hot" is the
@@ -157,8 +188,13 @@ export function computeEventSpans(
     const startPrice = baseline;
     const extremePrice = startPrice + sign * ev.magnitude * startPrice;
     const recoveredPrice = startPrice + sign * ev.magnitude * startPrice * (1 - ev.recovery);
-    const moveBlocks = scaledDuration(phases.moveBlocks, ev.magnitude);
-    const recoveryBlocks = scaledDuration(phases.recoveryBlocks, ev.magnitude);
+    // Per-event override (set by the schedule loop in buildSyntheticEvents)
+    // wins; otherwise fall back to the global phase default. Recovery mirrors
+    // the move-block count — they're symmetric by design.
+    const baseMove = ev.moveBlocks ?? phases.moveBlocks;
+    const baseRecovery = ev.moveBlocks ?? phases.recoveryBlocks;
+    const moveBlocks = scaledDuration(baseMove, ev.magnitude);
+    const recoveryBlocks = scaledDuration(baseRecovery, ev.magnitude);
 
     cursor += phases.preBlocks;
     const moveStartBlock = cursor;
@@ -272,8 +308,12 @@ function buildMeanPath(
     const end = start + sign * ev.magnitude * start * (1 - ev.recovery);
     const moveReg: JitterRegime = ev.variant === "diverge" ? "diverge-hot" : "normal";
 
-    const moveBlocks = scaledDuration(phases.moveBlocks, ev.magnitude);
-    const recoveryBlocks = scaledDuration(phases.recoveryBlocks, ev.magnitude);
+    // Per-event override (multi-schedule mode) wins; otherwise fall back to
+    // the global phase default. Recovery duration mirrors the move duration.
+    const baseMove = ev.moveBlocks ?? phases.moveBlocks;
+    const baseRecovery = ev.moveBlocks ?? phases.recoveryBlocks;
+    const moveBlocks = scaledDuration(baseMove, ev.magnitude);
+    const recoveryBlocks = scaledDuration(baseRecovery, ev.magnitude);
 
     ouHold(start, phases.preBlocks, "normal");
     bridge(extreme, moveBlocks, moveReg);
@@ -299,7 +339,7 @@ export function generateSyntheticSource(cfg: SyntheticConfig): SyntheticSource {
   const stoch: SyntheticPathStochastics = { ...DEFAULT_PATH_STOCHASTICS, ...(cfg.stochastics ?? {}) };
   const rng = mulberry32(cfg.seed);
 
-  const events = buildSyntheticEvents();
+  const events = buildSyntheticEvents(cfg.moveBlocksSchedule);
   const { mean, regime } = buildMeanPath(events, baseline, phases, stoch, rng);
   const N = mean.length;
 
