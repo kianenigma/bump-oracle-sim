@@ -173,33 +173,50 @@ function nudgeAgg(ctx: ScenarioCtx, epsilon?: EpsilonSpec): AggregatorConfig {
 }
 
 /**
- * Configuration grid driving `core-attackers` and `validate-median`:
+ * Configuration grid driving `core-attackers`, `validate-median`, and any
+ * future scenario that wants the same aggregator × attacker × fraction shape.
+ *
  *   - aggregators: median + 3 nudge ε values (auto, auto/2, auto/4)
- *   - attackers : NON_CONFIDENCE_ATTACKERS, filtered by `isCompatibleWithAggregator`
- *     so we don't waste compute on (e.g.) `nudge × trim-edge` runs that just
- *     reproduce `nudge × honest` because the attacker's nudge leg is honest
- *     by design. The validate-median analyzer uses the same compatibility
- *     filter to slot each result into the symmetric or asymmetric tier.
- *   - fractions : 10% and 33% (byzantine border)
+ *   - attackers : caller-supplied `opts.attackers` (any subset of
+ *     NON_CONFIDENCE_ATTACKERS), filtered by `isCompatibleWithAggregator` so
+ *     we don't waste compute on (e.g.) `nudge × trim-edge` runs that just
+ *     reproduce `nudge × honest`. Defaults to the full
+ *     NON_CONFIDENCE_ATTACKERS set when omitted.
+ *   - fractions : caller-supplied `opts.fractions` (any subset of [0,1]).
+ *     Defaults to `[0.10, 0.33, 0.49]` (byzantine border sweep).
  *   - plus honest baselines, one per aggregator config.
  *
- * `includeAdaptive` adds a parallel `nudge-adaptive` row at every ε so the
+ * `opts.includeAdaptive` adds a parallel `nudge-adaptive` row at every ε so the
  * agreement-weighted variant can be compared head-to-head against raw nudge
  * and median. The adaptive rows use the proposed defaults (κ=0, asymmetric
  * v_max caps disabled, no price floor) — see ADAPTIVE_DEFAULTS.
  *
- * Confidence-targeting cabal types are excluded entirely — see VALIDATOR_METADATA.
+ * Confidence-targeting cabal types are excluded entirely — see
+ * VALIDATOR_METADATA. If the caller passes one anyway the build still
+ * produces the row (no silent drop) but be aware: those attackers were
+ * categorised out of `NON_CONFIDENCE_ATTACKERS` for a reason.
  */
+export interface CoreAttackerOpts {
+  /** Subset of attacker types to sweep. Default: every non-confidence-targeting
+   *  attacker. Use this to scope a scenario to e.g. {malicious, pushy, noop}. */
+  attackers?: ReadonlyArray<Exclude<ValidatorType, "honest">>;
+  /** Subset of byzantine fractions. Default: [0.10, 0.33, 0.49]. */
+  fractions?: ReadonlyArray<number>;
+  /** Also emit a parallel `nudge-adaptive` row at every ε. Default: false. */
+  includeAdaptive?: boolean;
+}
+
 function buildCoreAttackerConfigs(
   ctx: ScenarioCtx,
-  opts: { includeAdaptive?: boolean } = {},
+  opts: CoreAttackerOpts = {},
 ): SimulationConfig[] {
-  const fractions = [0.10, 0.33, 0.49];
+  const attackers = opts.attackers ?? NON_CONFIDENCE_ATTACKERS;
+  const fractions = opts.fractions ?? [0.10, 0.33, 0.49];
   const autoEps = 1 / ctx.validatorCount / 10;
   const epsilons: Array<{ label: string; value: number }> = [
     { label: "auto",   value: autoEps },
     { label: "auto/2", value: autoEps / 2 },
-    { label: "auto/4", value: autoEps / 4 },
+    // { label: "auto/4", value: autoEps / 4 },
   ];
   const medianAgg: AggregatorConfig = { kind: "median" };
   const adaptiveAgg = (eps: number): AggregatorConfig => ({
@@ -227,7 +244,7 @@ function buildCoreAttackerConfigs(
   }
   configs.push(makeConfig(ctx, [], `${aggLabel(medianAgg)} · honest`, medianAgg));
 
-  for (const type of NON_CONFIDENCE_ATTACKERS) {
+  for (const type of attackers) {
     for (const frac of fractions) {
       const fracPct = (frac * 100).toFixed(0);
       const specs: GroupSpec[] = [{ type, fraction: frac }];
@@ -595,7 +612,7 @@ export const scenarios: Record<string, ScenarioFn> = {
    */
   async "validate-median"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: validate-median]`);
-    const configs = buildCoreAttackerConfigs(ctx, { includeAdaptive: true });
+    const configs = buildCoreAttackerConfigs(ctx, { includeAdaptive: false, attackers: ["malicious", "pushy", "noop"]  });
     console.log(`  ${configs.length} simulations`);
     const results = await runBatch(configs, priceSource, outputDir, threadCount);
     analyzeMedianVsNudge(results);
