@@ -186,7 +186,7 @@ export interface ResolvedPriceSource {
 // validatorPriceSource, maliciousParams) bundle. A simulation's full
 // validator set is the concatenation of all groups, in order.
 export type ValidatorType =
-  "honest" | "malicious" | "pushy" | "noop" | "delayed" | "drift" |
+  "honest" | "malicious" | "pushy" | "pushy-max" | "noop" | "delayed" | "drift" |
   "withholder" | "bias-injector" | "overshoot-ratchet" | "stealth-withholder" | "convergent-cabal" | "inband-shifter" |
   "boundary-cluster" | "author-censor" | "state-aware-sandwich" | "median-walking-cabal" | "trim-edge" | "inner-cluster-shifter" | "asymmetric-trim-chaser" | "author-only-trim" | "drift-track-trim" | "hopping-trim";
 

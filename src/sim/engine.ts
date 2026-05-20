@@ -18,6 +18,7 @@ import { HonestValidator, type ValidatorAgent } from "./validator.js";
 import {
   MaliciousValidator,
   PushyMaliciousValidator,
+  MaximallyPushyNudgeValidator,
   NoopValidator,
   DelayedValidator,
   DriftValidator,
@@ -59,6 +60,7 @@ const VALIDATOR_REGISTRY: Record<ValidatorGroup["type"], ValidatorCtor> = {
   honest: HonestValidator,
   malicious: MaliciousValidator,
   pushy: PushyMaliciousValidator,
+  "pushy-max": MaximallyPushyNudgeValidator,
   noop: NoopValidator,
   delayed: DelayedValidator,
   drift: DriftValidator,

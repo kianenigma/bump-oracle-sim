@@ -612,7 +612,7 @@ export const scenarios: Record<string, ScenarioFn> = {
    */
   async "validate-median"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: validate-median]`);
-    const configs = buildCoreAttackerConfigs(ctx, { includeAdaptive: false, attackers: ["malicious", "pushy", "noop"]  });
+    const configs = buildCoreAttackerConfigs(ctx, { includeAdaptive: false, attackers: ["malicious", "pushy", "pushy-max", "noop"]  });
     console.log(`  ${configs.length} simulations`);
     const results = await runBatch(configs, priceSource, outputDir, threadCount);
     analyzeMedianVsNudge(results);

@@ -198,6 +198,74 @@ export class PushyMaliciousValidator extends BaseValidator {
   }
 }
 
+
+/// A pushy validator that works on the nudge model and instead of always maximally pushing the price in the right direction, it simply maximally pushes the price in any direction that will cause the msot divergence from the real price.
+/// Production of nudge remains same as the honest.
+/// It is fully incompatible with quote mode, for now the produceQoute functions return a runtime error.
+///
+/// This is a valid attack because in pUSD there is value to be extracted both if the price is pushed up or down. All that matters for you, as an attacker cabal that control x% of the validators with this behavior, to casue the maximum difference from the real price:
+/// * divergence up: you can over-borrow pUSD (not super profitable, but okay)
+/// * Divergence down: you have a direct way to profit from the system by redeeming against DOTs in the vaults for cheap.
+export class MaximallyPushyNudgeValidator extends BaseValidator {
+  readonly type: ValidatorType = "pushy-max";
+
+  protected produceQuoteInput(_ctx: ProduceCtx): Submission {
+    throw new Error(
+      `MaximallyPushyNudgeValidator (index=${this.index}): quote-mode is unsupported. ` +
+      `Use --aggregator=nudge or --aggregator=nudge-adaptive.`,
+    );
+  }
+
+  protected produceQuoteInherent(_inputs: Submission[], _ctx: ProduceCtx): Submission[] {
+    throw new Error(
+      `MaximallyPushyNudgeValidator (index=${this.index}): quote-mode is unsupported. ` +
+      `Use --aggregator=nudge or --aggregator=nudge-adaptive.`,
+    );
+  }
+
+  protected produceNudgeInput(ctx: ProduceCtx): Submission {
+    const honest = this.observe(ctx.blockIndex);
+    return nudge(this.index, honest >= ctx.lastPrice ? Bump.Up : Bump.Down);
+  }
+
+  // Author-side: count the Up and Down bumps available in gossip; simulate
+  // both "activate all Up" and "activate all Down"; pick whichever yields the
+  // larger post-block divergence from the author's observation of real.
+  //
+  // This is strictly stronger than the existing `malicious` attacker (which
+  // always pushes away-from-real). When the honest-direction overshoot would
+  // travel further past real than the wrong-direction extreme, this attacker
+  // takes it; otherwise it falls back to the wrong-direction push. Ties go
+  // to UP arbitrarily (consistent, RNG-free).
+  protected produceNudgeInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
+    let upCount = 0, downCount = 0;
+    for (const s of inputs) {
+      if (s.kind !== "nudge") continue;
+      if (s.bump === Bump.Up) upCount++;
+      else if (s.bump === Bump.Down) downCount++;
+    }
+
+    // Predict the post-block price for each candidate net signed sum,
+    // mirroring the aggregator's update rule so the choice is exact rather
+    // than approximate. Adaptive aggregator's quadratic damping is handled
+    // here too — full consensus moves further than partial.
+    const priceForNet = (net: number): number => {
+      if (ctx.inputKind === "nudge-adaptive") {
+        const V = ctx.validatorCount;
+        const agreement = V > 0 ? Math.abs(net) / V : 0;
+        return ctx.lastPrice + ctx.epsilon * net * agreement;
+      }
+      return ctx.lastPrice + net * ctx.epsilon;
+    };
+
+    const obs = this.observe(ctx.blockIndex);
+    const upDiv   = Math.abs(priceForNet(+upCount)   - obs);
+    const downDiv = Math.abs(priceForNet(-downCount) - obs);
+    const direction = upDiv >= downDiv ? Bump.Up : Bump.Down;
+    return pickAllInDirectionBumps(inputs, direction);
+  }
+}
+
 // ── NoopValidator ───────────────────────────────────────────────────────────
 // Author-side censorship.
 //   Nudge: emit honest bumps; as author activate none → freeze.

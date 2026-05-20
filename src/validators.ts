@@ -31,6 +31,7 @@ export const VALIDATOR_METADATA: Record<ValidatorType, ValidatorTypeMetadata> = 
   // Basic attackers: well-defined in both aggregator families.
   malicious:            { attackCategory: "both",  targetsConfidence: false },
   pushy:                { attackCategory: "both",  targetsConfidence: false },
+  "pushy-max":          { attackCategory: "nudge", targetsConfidence: false },
   noop:                 { attackCategory: "both",  targetsConfidence: false },
   delayed:              { attackCategory: "both",  targetsConfidence: false },
   drift:                { attackCategory: "both",  targetsConfidence: false },
@@ -295,7 +296,7 @@ export function parseValidatorsCli(
 }
 
 function isValidatorType(s: string): s is ValidatorType {
-  return s === "honest" || s === "malicious" || s === "pushy" || s === "noop"
+  return s === "honest" || s === "malicious" || s === "pushy" || s === "pushy-max" || s === "noop"
     || s === "delayed" || s === "drift" || s === "withholder" || s === "bias-injector"
     || s === "overshoot-ratchet" || s === "stealth-withholder" || s === "convergent-cabal"
     || s === "inband-shifter" || s === "boundary-cluster" || s === "author-censor"
