@@ -64,10 +64,12 @@ export class Chain {
       validatorCount: this.validators.length,
     };
 
-    // 1. Gather one input per validator (offchain gossip).
-    const inputs: Submission[] = new Array(this.validators.length);
+    // 1. Gather one input per validator (offchain gossip). Validators that
+    // return `null` are abstaining — they simply don't appear in the gossip.
+    const inputs: Submission[] = [];
     for (let i = 0; i < this.validators.length; i++) {
-      inputs[i] = this.validators[i].produceInput(ctx);
+      const s = this.validators[i].produceInput(ctx);
+      if (s !== null) inputs.push(s);
     }
 
     // 2. Pick a uniformly random author from ALL validators.
@@ -85,12 +87,10 @@ export class Chain {
     });
     this.lastPrice = out.newPrice;
 
-    // Inherent composition. Abstains are excluded (they never end up in an
-    // inherent in practice, but the guard keeps the count semantically clean).
-    // Non-honest = any validator with isHonest === false (malicious, pushy,
-    // noop, delayed, drift). The percentage is reported alongside the raw
-    // counts so the CSV reader doesn't have to renormalize when comparing
-    // blocks with different inherent sizes.
+    // Inherent composition. Non-honest = any validator with isHonest === false
+    // (malicious, pushy, pushy-max, noop, delayed, drift, withholder). The
+    // percentage is reported alongside the raw counts so the CSV reader doesn't
+    // have to renormalize when comparing blocks with different inherent sizes.
     let inherentTotal = 0;
     let inherentNonHonest = 0;
     // Build per-block inherentVotes only for median-mode (quote-input) runs;
@@ -99,7 +99,6 @@ export class Chain {
     const trackInherentVotes = this.aggregator.inputKind === "quote";
     const inherentVotes: BlockMetrics["inherentVotes"] = trackInherentVotes ? [] : undefined;
     for (const s of inherent) {
-      if (s.kind === "abstain") continue;
       inherentTotal++;
       const v = this.validators[s.validatorIndex];
       if (!v.isHonest) inherentNonHonest++;

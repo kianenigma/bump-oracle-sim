@@ -42,13 +42,13 @@ export interface Aggregator {
 
 /**
  * Strict input-kind check. Every aggregator only understands one `Submission`
- * shape (nudge or quote) plus abstains. Encountering any other kind in `inputs`
- * or `inherent` is a misconfiguration (typically: an attacker class compatible
+ * shape (nudge or quote). Encountering any other kind in `inputs` or
+ * `inherent` is a misconfiguration (typically: an attacker class compatible
  * with one engine being run under the other), so we throw a standard error
  * rather than silently dropping the rogue submission.
  *
- * Abstains are always allowed — they represent a validator that chose not
- * to submit and contribute neither to `minInputs` nor to the price math.
+ * Abstention is modelled as the absence of a submission, not a third kind,
+ * so the kind comparison is exhaustive.
  */
 function assertSubmissionKind(
   s: Submission,
@@ -56,7 +56,7 @@ function assertSubmissionKind(
   where: "inputs" | "inherent",
   mode: "nudge" | "median",
 ): void {
-  if (s.kind === "abstain" || s.kind === expected) return;
+  if (s.kind === expected) return;
   throw new Error(
     `${mode} aggregator: expected '${expected}' submissions in ${where} but got ` +
     `'${s.kind}' from validator ${s.validatorIndex}. ` +
@@ -73,8 +73,8 @@ function assertSubmissionKind(
 // `minInputs` defaults to 0 — a sparse inherent already holds price naturally
 // (net = 0 → no bump). The knob is exposed for symmetry with the quote
 // aggregator, not because nudge needs it. It is checked against the size of
-// the inherent (excluding abstains), NOT against `inputs` — gossip volume
-// must not influence the aggregator's decision.
+// the inherent, NOT against `inputs` — gossip volume must not influence the
+// aggregator's decision.
 export class NudgeAggregator implements Aggregator {
   readonly mode = "nudge" as const;
   readonly inputKind = "nudge" as const;
@@ -88,27 +88,21 @@ export class NudgeAggregator implements Aggregator {
     for (const s of ctx.inherent) assertSubmissionKind(s, "nudge", "inherent", this.mode);
 
     // Gossip-volume metric (informational only; never gates minInputs).
-    let totalBumps = 0;
-    for (const s of ctx.inputs) if (s.kind === "nudge") totalBumps++;
+    const totalBumps = ctx.inputs.length;
 
-    // After the assertion above, every non-abstain inherent entry IS a nudge.
-    let inherentCount = 0;
-    for (const s of ctx.inherent) if (s.kind === "nudge") inherentCount++;
-    if (inherentCount < this.minInputs) {
+    if (ctx.inherent.length < this.minInputs) {
       return { newPrice: ctx.lastPrice, totalBumps, activatedBumps: 0, netDirection: 0, priceUpdated: false };
     }
 
     let net = 0;
-    let activated = 0;
     for (const s of ctx.inherent) {
-      if (s.kind !== "nudge") continue;
+      if (s.kind !== "nudge") continue; // unreachable: assertion above threw
       net += s.bump; // Up=+1, Down=-1
-      activated++;
     }
     return {
       newPrice: ctx.lastPrice + net * ctx.epsilon,
       totalBumps,
-      activatedBumps: activated,
+      activatedBumps: ctx.inherent.length,
       netDirection: net,
       priceUpdated: true,
     };

@@ -185,15 +185,16 @@ export interface ValidatorGroup {
 }
 
 // ── Submissions / inherent ──────────────────────────────────────────────────
-// A single validator's input for a block. Aggregators consume an array of these
-// (after the block author has picked which to include in the inherent).
-//   "nudge"   : signed direction only (used by nudge aggregator)
-//   "quote"   : absolute price (used by median / mean)
-//   "abstain" : validator opted not to submit
+// A single validator's input for a block. Aggregators consume an array of
+// these (after the block author has picked which to include in the inherent).
+//   "nudge" : signed direction only (used by nudge aggregator)
+//   "quote" : absolute price (used by median)
+// A validator that wants to abstain returns `null` from `produceInput` (or
+// omits the entry from its `produceInherent` output) — there is no explicit
+// abstain submission kind in the protocol.
 export type Submission =
   | { kind: "nudge"; validatorIndex: number; bump: Bump }
-  | { kind: "quote"; validatorIndex: number; price: number }
-  | { kind: "abstain"; validatorIndex: number };
+  | { kind: "quote"; validatorIndex: number; price: number };
 
 export interface BlockMetrics {
   block: number;

@@ -55,14 +55,15 @@ abstract class BaseValidator implements ValidatorAgent {
   }
 
   // ── Mode-specific hooks ──────────────────────────────────────────────────
-  protected abstract produceQuoteInput(ctx: ProduceCtx): Submission;
-  protected abstract produceNudgeInput(ctx: ProduceCtx): Submission;
+  // produceXxxInput may return `null` to abstain (no submission this block).
+  protected abstract produceQuoteInput(ctx: ProduceCtx): Submission | null;
+  protected abstract produceNudgeInput(ctx: ProduceCtx): Submission | null;
   protected abstract produceQuoteInherent(inputs: Submission[], ctx: ProduceCtx): Submission[];
   protected abstract produceNudgeInherent(inputs: Submission[], ctx: ProduceCtx): Submission[];
 
   // ── ValidatorAgent dispatch ──────────────────────────────────────────────
 
-  produceInput(ctx: ProduceCtx): Submission {
+  produceInput(ctx: ProduceCtx): Submission | null {
     return ctx.inputKind === "quote"
       ? this.produceQuoteInput(ctx)
       : this.produceNudgeInput(ctx);
@@ -77,9 +78,6 @@ abstract class BaseValidator implements ValidatorAgent {
 }
 
 // ── Shared helpers ──────────────────────────────────────────────────────────
-
-const abstain = (validatorIndex: number): Submission =>
-  ({ kind: "abstain", validatorIndex });
 
 const quote = (validatorIndex: number, price: number): Submission =>
   ({ kind: "quote", validatorIndex, price });
@@ -254,8 +252,8 @@ export class NoopValidator extends BaseValidator {
   static readonly compatibleEngines: ReadonlyArray<AggregatorMode> = ["nudge", "median"];
   readonly type: ValidatorType = "noop";
 
-  protected produceQuoteInput(_ctx: ProduceCtx): Submission {
-    return abstain(this.index);
+  protected produceQuoteInput(_ctx: ProduceCtx): Submission | null {
+    return null;
   }
 
   protected produceNudgeInput(ctx: ProduceCtx): Submission {
@@ -363,9 +361,9 @@ export class WithholderValidator extends BaseValidator {
     );
   }
 
-  protected produceNudgeInput(ctx: ProduceCtx): Submission {
+  protected produceNudgeInput(ctx: ProduceCtx): Submission | null {
     const observed = this.observe(ctx.blockIndex);
-    if (this.suppressing(observed, ctx.lastPrice)) return abstain(this.index);
+    if (this.suppressing(observed, ctx.lastPrice)) return null;
     return nudge(this.index, observed >= ctx.lastPrice ? Bump.Up : Bump.Down);
   }
 

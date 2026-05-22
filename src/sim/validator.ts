@@ -25,8 +25,9 @@ export interface ValidatorAgent {
   readonly type: ValidatorType;
   readonly isHonest: boolean;
 
-  /** This validator's local input for the block (gossiped to other nodes). */
-  produceInput(ctx: ProduceCtx): Submission;
+  /** This validator's local input for the block (gossiped to other nodes).
+   *  Returns `null` to abstain — there is no explicit abstain submission. */
+  produceInput(ctx: ProduceCtx): Submission | null;
 
   /**
    * As block author: from all gossiped inputs, select the subset that
@@ -34,8 +35,8 @@ export interface ValidatorAgent {
    * to compute the new price.
    *
    * Nudge mode: returns the activated bumps (a subset of `inputs`).
-   * Quote mode: default is pass-through (drop only abstains). Author-side
-   *             attacks could selectively include — see TASKS.md §C.
+   * Quote mode: default is pass-through. Author-side attacks may
+   *             selectively include — see TASKS.md §C.
    */
   produceInherent(inputs: Submission[], ctx: ProduceCtx): Submission[];
 }
@@ -69,11 +70,10 @@ export function optimalBumpCount(absDiff: number, ctx: ProduceCtx, maxBumps: num
   return nextDev < baseDev ? Math.min(base + 1, maxBumps) : base;
 }
 
-/** Filter out abstains; default quote-mode inherent is everyone else. */
+/** Default quote-mode author selection: pass every gossiped submission
+ *  through untouched. Author-side attacks override this to drop or reorder. */
 export function passThroughQuotes(inputs: Submission[]): Submission[] {
-  const out: Submission[] = [];
-  for (const s of inputs) if (s.kind !== "abstain") out.push(s);
-  return out;
+  return inputs.slice();
 }
 
 /** Pick activated bumps from gossiped inputs — in-direction first, up to `n`. */
