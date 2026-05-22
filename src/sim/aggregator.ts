@@ -110,22 +110,18 @@ export class NudgeAggregator implements Aggregator {
 }
 
 // ── MedianAggregator ────────────────────────────────────────────────────────
-// Optionally trims top/bottom k% of the inherent quotes by value, then takes
-// the median of what remains. Empty inherent → hold price.
+// Sorts the inherent quotes by value and takes the median. Empty inherent or
+// below-minInputs inherent → hold price.
 //
 // Metric semantics (matches the nudge aggregator):
-//   totalBumps     = quotes gossiped (count in `inputs`)        — pre-author
-//   activatedBumps = quotes that contributed to the median      — post-trim
+//   totalBumps     = quotes gossiped (count in `inputs`)
+//   activatedBumps = quotes in the inherent (contributed to the median)
 // The gap surfaces author-side censorship in the block metrics.
 export class MedianAggregator implements Aggregator {
   readonly mode = "median" as const;
   readonly inputKind = "quote" as const;
 
-  constructor(
-    private k: number = 0,
-    private minInputs: number = 0,
-  ) {
-    if (k < 0 || k >= 0.5) throw new Error(`median k must be in [0, 0.5), got ${k}`);
+  constructor(private minInputs: number = 0) {
     if (minInputs < 0) throw new Error(`median minInputs must be ≥ 0, got ${minInputs}`);
   }
 
@@ -133,21 +129,18 @@ export class MedianAggregator implements Aggregator {
     for (const s of ctx.inputs)   assertSubmissionKind(s, "quote", "inputs",   this.mode);
     for (const s of ctx.inherent) assertSubmissionKind(s, "quote", "inherent", this.mode);
 
-    const totalQuotes = countQuotes(ctx.inputs);
+    const totalQuotes = ctx.inputs.length;
     const quoteEntries = collectQuoteEntries(ctx.inherent);
     if (quoteEntries.length < this.minInputs || quoteEntries.length === 0) {
       return { newPrice: ctx.lastPrice, totalBumps: totalQuotes, activatedBumps: 0, netDirection: 0, priceUpdated: false };
     }
     const { prices: sorted, indices: sortedIndices } = sortQuotesWithIndex(quoteEntries);
-    const trim = Math.floor(sorted.length * this.k);
-    const trimmedTrim = (sorted.length - 2 * trim <= 0) ? 0 : trim;
-    const lo = trimmedTrim;
-    const hi = sorted.length - trimmedTrim;
-    const { value: newPrice, index: medianValidatorIndex } = medianOfRangeWithIndex(sorted, sortedIndices, lo, hi);
+    const { value: newPrice, index: medianValidatorIndex } =
+      medianOfRangeWithIndex(sorted, sortedIndices, 0, sorted.length);
     return {
       newPrice,
       totalBumps: totalQuotes,
-      activatedBumps: hi - lo,
+      activatedBumps: sorted.length,
       netDirection: Math.sign(newPrice - ctx.lastPrice),
       priceUpdated: true,
       medianValidatorIndex,
@@ -172,7 +165,7 @@ export function makeAggregator(cfg: AggregatorConfig, validatorCount: number): A
     case "nudge":
       return new NudgeAggregator(minInputs);
     case "median":
-      return new MedianAggregator(cfg.k ?? 0, minInputs);
+      return new MedianAggregator(minInputs);
   }
 }
 
@@ -192,18 +185,16 @@ function sortQuotesWithIndex(entries: Array<{ price: number; index: number }>): 
   return { prices, indices };
 }
 
-/** Like collectQuotes but keeps each quote paired with its validatorIndex
- *  so we can report which validator's quote became the median. */
+/** Project the inherent (all guaranteed `quote` after the kind assertion)
+ *  into a (price, validatorIndex) pair list. */
 function collectQuoteEntries(submissions: Submission[]): Array<{ price: number; index: number }> {
-  const out: Array<{ price: number; index: number }> = [];
-  for (const s of submissions) if (s.kind === "quote") out.push({ price: s.price, index: s.validatorIndex });
+  const out: Array<{ price: number; index: number }> = new Array(submissions.length);
+  for (let i = 0; i < submissions.length; i++) {
+    const s = submissions[i];
+    if (s.kind !== "quote") continue; // unreachable: asserted by caller
+    out[i] = { price: s.price, index: s.validatorIndex };
+  }
   return out;
-}
-
-function countQuotes(submissions: Submission[]): number {
-  let n = 0;
-  for (const s of submissions) if (s.kind === "quote") n++;
-  return n;
 }
 
 /** Median of `sorted[lo, hi)` returned alongside the validator index whose

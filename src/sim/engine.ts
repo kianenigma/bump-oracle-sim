@@ -236,7 +236,6 @@ export function runSimulation(
 function printConfig(config: SimulationConfig, pricePoints?: PricePoint[]): void {
   const agg = config.aggregator ?? DEFAULT_AGGREGATOR;
   const aggParts: string[] = [];
-  if (agg.kind === "median" && agg.k && agg.k > 0) aggParts.push(`k=${agg.k}`);
   if (agg.minInputs !== undefined) aggParts.push(`minInputs=${agg.minInputs}`);
   const aggStr = aggParts.length > 0 ? `${agg.kind}(${aggParts.join(", ")})` : agg.kind;
 

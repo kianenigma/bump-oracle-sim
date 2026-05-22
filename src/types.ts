@@ -27,11 +27,8 @@ export interface PricePoint {
 //   "nudge"  : validators emit Up/Down, author picks subset, runtime applies
 //              (net × ε). Only mode that uses ε. Epsilon lives on the
 //              aggregator config (was top-level before).
-//   "median" : validators submit absolute price quotes; runtime sorts, drops
-//              the top `k` and bottom `k` by value, then takes the median of
-//              what remains. k defaults to 0 (plain median). Trimming before
-//              the median rarely changes the price (median is already
-//              outlier-robust) but reflects in the activated-vs-total counts.
+//   "median" : validators submit absolute price quotes; runtime sorts and
+//              takes the median of the inherent.
 export type AggregatorMode = "nudge" | "median";
 
 // Epsilon specification: how much the oracle price moves per activated bump.
@@ -50,7 +47,7 @@ export type EpsilonMode = "abs" | "ratio";
 // Defaults are resolved by the engine once it knows N.
 export type AggregatorConfig =
   | { kind: "nudge"; epsilon: EpsilonSpec; minInputs?: number }
-  | { kind: "median"; k?: number; minInputs?: number };
+  | { kind: "median"; minInputs?: number };
 
 export function aggregatorMode(cfg: AggregatorConfig): AggregatorMode {
   return cfg.kind;

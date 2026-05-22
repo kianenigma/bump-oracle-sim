@@ -490,10 +490,7 @@
       }},
       { key: 'aggregator', label: 'Aggregator', type: 'string', getter: sc => {
         const a = sc.config.aggregator;
-        if (!a) return 'median';
-        return ((a.kind === 'median' || a.kind === 'mean') && a.k > 0)
-          ? `${a.kind}(k=${a.k})`
-          : a.kind;
+        return a?.kind ?? 'median';
       }},
       { key: 'validators', label: 'Validators', type: 'number', getter: sc => configView(sc.config).validatorCount },
       { key: 'validatorMix', label: 'Validator Mix', type: 'string', getter: sc => {
@@ -1019,10 +1016,7 @@
     function scenarioTooltip(c) {
       const v = configView(c);
       const aggCfg = v.aggregator;
-      const aggStr = !aggCfg ? 'median'
-        : ((aggCfg.kind === 'median' || aggCfg.kind === 'mean') && aggCfg.k > 0)
-          ? `${aggCfg.kind}(k=${aggCfg.k})`
-          : aggCfg.kind;
+      const aggStr = aggCfg?.kind ?? 'median';
       const mix = v.validatorMix;
       const mixParts = Object.entries(mix).map(([k, frac]) => `${(frac*100).toFixed(1)}% ${k}`);
       const honestPct = 100 - Object.values(mix).reduce((a, frac) => a + frac, 0) * 100;
@@ -1473,11 +1467,7 @@
         serverMeta = await res.json();
 
         const configEl = document.getElementById('config-info');
-        const fmtAgg = (a) => {
-          if (!a) return 'median';
-          if ((a.kind === 'median' || a.kind === 'mean') && a.k > 0) return `${a.kind}(k=${a.k})`;
-          return a.kind;
-        };
+        const fmtAgg = (a) => a?.kind ?? 'median';
         const fmtDs = (d) => !d || d.kind === 'candles' ? 'candles' : `trades(${(d.venues || []).join(',')})`;
         if (serverMeta.scenarios.length === 1) {
           const v = configView(serverMeta.scenarios[0].config);

@@ -28,8 +28,7 @@ import { buildValidators, formatValidators, isCompatibleWithAggregator, type Gro
 // Engines:
 //   nudge   Validators submit Up/Down. Author picks subset.
 //           price' = lastPrice + (net activated bumps) × ε.
-//   median  Validators submit absolute prices. price' = median(quotes), with
-//           an optional `k` trim of each tail before the median.
+//   median  Validators submit absolute prices. price' = median(inherent quotes).
 //
 // Validators (and the engines they declare compatibility with):
 //   honest        — both. Submits a jittered observation; honest nudge author.
@@ -105,7 +104,6 @@ function engineLabel(cfg: AggregatorConfig): string {
     return `nudge(ε=${epsStr})`;
   }
   const parts: string[] = [];
-  if (cfg.k && cfg.k > 0) parts.push(`k=${cfg.k}`);
   if (cfg.minInputs !== undefined) parts.push(`min=${cfg.minInputs}`);
   return parts.length ? `median(${parts.join(",")})` : "median";
 }

@@ -62,7 +62,6 @@ const { values: args } = parseArgs({
     threads: { type: "string", default: String(cpus().length) },
     force: { type: "boolean", default: false },
     aggregator: { type: "string" },
-    "aggregator-k": { type: "string", default: "0" },
     "data-source": { type: "string", default: "trades" },
     venues: { type: "string" },
     "cross-venue": { type: "string" },
@@ -104,8 +103,6 @@ Options:
   --threads <number>           Worker threads for batch scenarios (default: CPU count)
   --force                      Overwrite existing output directory
   --aggregator <mode>          Aggregation rule: "nudge" or "median" (default)
-  --aggregator-k <fraction>    For median: trim this fraction from each tail before taking the median (default: 0).
-                                 k=0 → plain median. k>0 → trimmed median.
   --data-source <kind>         "trades" (default, per-trade multi-venue), "candles" (Binance US 1m),
                                 or "synthetic" (deterministic scripted price path; --start-date /
                                 --end-date are rejected in this mode).
@@ -226,10 +223,10 @@ function parseRealPriceArg(
   process.exit(1);
 }
 
-function parseAggregatorArg(raw: string | undefined, k: number, epsilon: EpsilonSpec): AggregatorConfig | undefined {
+function parseAggregatorArg(raw: string | undefined, epsilon: EpsilonSpec): AggregatorConfig | undefined {
   if (raw === undefined) return undefined;
   if (raw === "nudge") return { kind: "nudge", epsilon };
-  if (raw === "median") return k > 0 ? { kind: "median", k } : { kind: "median" };
+  if (raw === "median") return { kind: "median" };
   console.error(`Invalid --aggregator: "${raw}". Expected: nudge, median.`);
   process.exit(1);
 }
@@ -467,11 +464,7 @@ if (priceSourceKind === undefined) {
 }
 const ctxPriceSource: ValidatorPriceSource = { kind: priceSourceKind, jitterStdDev };
 
-const aggregatorOverride = parseAggregatorArg(
-  args.aggregator,
-  parseFloat(args["aggregator-k"]!),
-  epsilon,
-);
+const aggregatorOverride = parseAggregatorArg(args.aggregator, epsilon);
 const ctxAggregator: AggregatorConfig = aggregatorOverride
   ?? (DEFAULT_CONFIG.aggregator ?? { kind: "median" });
 
