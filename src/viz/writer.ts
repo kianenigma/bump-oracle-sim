@@ -21,9 +21,6 @@ export class ChunkWriter {
   private priceUpdated: number[] = [];
   private inherentTotals: number[] = [];
   private medianValidatorIndices: number[] = [];
-  // Sparse: only populated on blocks where m.confidenceSnapshot was attached.
-  private confTicks: number[] = [];
-  private confSamples: number[][] = [];
   private firstTimestamp = 0;
   private lastTimestamp = 0;
   private chunkTimeRanges: Array<{ from: number; to: number }> = [];
@@ -41,7 +38,6 @@ export class ChunkWriter {
     if (this.totalBlocks === 0) this.firstTimestamp = m.timestamp;
     this.lastTimestamp = m.timestamp;
 
-    const tickInChunk = this.timestamps.length;
     this.timestamps.push(m.timestamp);
     this.realPrices.push(m.realPrice);
     this.oraclePrices.push(m.oraclePrice);
@@ -49,11 +45,6 @@ export class ChunkWriter {
     this.priceUpdated.push(m.priceUpdated ? 1 : 0);
     this.inherentTotals.push(m.inherentTotal);
     this.medianValidatorIndices.push(m.medianValidatorIndex ?? -1);
-    if (m.confidenceSnapshot) {
-      this.confTicks.push(tickInChunk);
-      // Convert Float32Array to plain number[] for JSON.
-      this.confSamples.push(Array.from(m.confidenceSnapshot));
-    }
     this.totalBlocks++;
 
     if (this.timestamps.length >= BLOCKS_PER_CHUNK) {
@@ -86,9 +77,6 @@ export class ChunkWriter {
       inherentTotals: this.inherentTotals,
       medianValidatorIndices: this.medianValidatorIndices,
     };
-    if (this.confTicks.length > 0) {
-      chunk.confidenceSamples = { ticks: this.confTicks, samples: this.confSamples };
-    }
 
     this.chunkTimeRanges.push({
       from: this.timestamps[0],
@@ -107,8 +95,6 @@ export class ChunkWriter {
     this.priceUpdated = [];
     this.inherentTotals = [];
     this.medianValidatorIndices = [];
-    this.confTicks = [];
-    this.confSamples = [];
   }
 }
 
@@ -138,29 +124,6 @@ function writeChunkStreaming(path: string, chunk: BlockChunk): void {
     }
     writer.write("]");
     if (a < arrays.length - 1) writer.write(",");
-  }
-
-  if (chunk.confidenceSamples) {
-    writer.write(`,"confidenceSamples":{"ticks":[`);
-    const ticks = chunk.confidenceSamples.ticks;
-    for (let i = 0; i < ticks.length; i++) {
-      if (i > 0) writer.write(",");
-      writer.write(String(ticks[i]));
-    }
-    writer.write(`],"samples":[`);
-    const samples = chunk.confidenceSamples.samples;
-    for (let i = 0; i < samples.length; i++) {
-      if (i > 0) writer.write(",");
-      writer.write("[");
-      const row = samples[i];
-      for (let j = 0; j < row.length; j++) {
-        if (j > 0) writer.write(",");
-        // Cap precision: 4 decimals is plenty for visualisation.
-        writer.write(row[j].toFixed(4));
-      }
-      writer.write("]");
-    }
-    writer.write("]}");
   }
 
   writer.write("}");

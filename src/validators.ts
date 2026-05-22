@@ -5,80 +5,21 @@ import type {
   ValidatorType,
   ValidatorParams,
 } from "./types.js";
+import { VALIDATOR_REGISTRY } from "./sim/registry.js";
 
-// ── Validator metadata ──────────────────────────────────────────────────────
-// Per-type classification consumed by the engine and by scenarios.
-//
-//   attackCategory:
-//     "nudge"   — only meaningful under the nudge aggregator (the bump-pool
-//                 attack surface). Used with median → engine throws.
-//     "median"  — only meaningful under the median aggregator (quote-based
-//                 attack surface). Used with nudge → engine throws.
-//     "both"    — strategy is well-defined in either aggregator.
-//
-//   targetsConfidence:
-//     true  — the attack is specifically designed to defeat the wideband-
-//             confidence defenses (ABSENT_PENALTY / BAD_QUOTE_PENALTY etc.).
-//             Kept in the codebase but excluded from new research scenarios.
+// ── Compatibility ──────────────────────────────────────────────────────────
+// Every validator class declares its own `static readonly compatibleEngines`.
+// The engine reads it off the constructor via `VALIDATOR_REGISTRY`, so there
+// is no parallel metadata table to keep in sync — adding a new validator
+// only requires adding its class + a registry entry.
 
-export interface ValidatorTypeMetadata {
-  attackCategory: "nudge" | "median" | "both";
-  targetsConfidence: boolean;
-}
-
-export const VALIDATOR_METADATA: Record<ValidatorType, ValidatorTypeMetadata> = {
-  honest:               { attackCategory: "both",  targetsConfidence: false },
-  // Basic attackers: well-defined in both aggregator families.
-  malicious:            { attackCategory: "both",  targetsConfidence: false },
-  pushy:                { attackCategory: "both",  targetsConfidence: false },
-  "pushy-max":          { attackCategory: "nudge", targetsConfidence: false },
-  noop:                 { attackCategory: "both",  targetsConfidence: false },
-  delayed:              { attackCategory: "both",  targetsConfidence: false },
-  drift:                { attackCategory: "both",  targetsConfidence: false },
-  // Confidence-targeting cabals — kept in code, excluded from new scenarios.
-  withholder:           { attackCategory: "nudge", targetsConfidence: true  },
-  "bias-injector":      { attackCategory: "nudge", targetsConfidence: true  },
-  "overshoot-ratchet":  { attackCategory: "nudge", targetsConfidence: true  },
-  "stealth-withholder": { attackCategory: "nudge", targetsConfidence: true  },
-  "convergent-cabal":   { attackCategory: "nudge", targetsConfidence: true  },
-  "inband-shifter":     { attackCategory: "median", targetsConfidence: true  },
-  // Median-only research attackers (rounds 1-10). Their nudge-mode hooks are
-  // HonestValidator clones — i.e. running them under nudge produces a clean
-  // honest baseline, not a meaningful attack. Tagged "median" so the engine
-  // refuses misconfigured runs and the validate-median analyzer can present
-  // them in the asymmetric tier rather than pretending the nudge column
-  // measures their effect.
-  "boundary-cluster":        { attackCategory: "median", targetsConfidence: false },
-  "author-censor":           { attackCategory: "median", targetsConfidence: false },
-  "state-aware-sandwich":    { attackCategory: "median", targetsConfidence: false },
-  "median-walking-cabal":    { attackCategory: "median", targetsConfidence: false },
-  "trim-edge":               { attackCategory: "median", targetsConfidence: false },
-  "inner-cluster-shifter":   { attackCategory: "median", targetsConfidence: false },
-  "asymmetric-trim-chaser":  { attackCategory: "median", targetsConfidence: false },
-  "author-only-trim":        { attackCategory: "median", targetsConfidence: false },
-  "drift-track-trim":        { attackCategory: "median", targetsConfidence: false },
-  "hopping-trim":            { attackCategory: "median", targetsConfidence: false },
-};
-
-/** Returns true iff a validator of `type` can run under aggregator `mode`.
- *  `nudge-adaptive` shares the nudge submission surface, so any attacker
- *  classified `attackCategory: "nudge"` is compatible with it too. */
+/** True iff a validator of `type` can run under aggregator `mode`. */
 export function isCompatibleWithAggregator(
   type: ValidatorType,
   mode: AggregatorMode,
 ): boolean {
-  const cat = VALIDATOR_METADATA[type].attackCategory;
-  if (cat === "both") return true;
-  if (cat === "nudge") return mode === "nudge" || mode === "nudge-adaptive";
-  return cat === mode;
+  return VALIDATOR_REGISTRY[type].compatibleEngines.includes(mode);
 }
-
-/** Validator types that are NOT designed to defeat confidence tracking — the
- *  set used by the new core-attackers research scenario. */
-export const NON_CONFIDENCE_ATTACKERS: Exclude<ValidatorType, "honest">[] =
-  (Object.entries(VALIDATOR_METADATA) as [ValidatorType, ValidatorTypeMetadata][])
-    .filter(([t, m]) => t !== "honest" && !m.targetsConfidence)
-    .map(([t]) => t as Exclude<ValidatorType, "honest">);
 
 // ── Builders ────────────────────────────────────────────────────────────────
 
@@ -126,8 +67,6 @@ export function buildValidators(
       `buildValidators: non-honest fractions sum to >1 (total=${total}, claimed=${nonHonest}).`,
     );
   }
-  // Honest group is always emitted first, even if 0 — keeps the array
-  // non-empty for all-malicious edge cases? No, drop it if 0.
   if (honestCount > 0) {
     out.unshift({
       type: "honest",
@@ -238,6 +177,9 @@ export interface ParsedMix {
   honestJitter?: number;
 }
 
+const VALIDATOR_TYPE_NAMES: ReadonlyArray<ValidatorType> =
+  Object.keys(VALIDATOR_REGISTRY) as ValidatorType[];
+
 export function parseValidatorsCli(
   str: string,
   defaultPriceSource: ValidatorPriceSource,
@@ -281,7 +223,8 @@ export function parseValidatorsCli(
     }
 
     if (!isValidatorType(name) || name === "honest") {
-      console.error(`Unknown validator type "${name}" in --mix. Available: malicious, pushy, noop, delayed, drift, withholder, bias-injector, overshoot-ratchet, stealth-withholder, convergent-cabal, inband-shifter, boundary-cluster, author-censor, state-aware-sandwich, median-walking-cabal, trim-edge, inner-cluster-shifter, asymmetric-trim-chaser, author-only-trim, drift-track-trim, hopping-trim.`);
+      const available = VALIDATOR_TYPE_NAMES.filter((t) => t !== "honest").join(", ");
+      console.error(`Unknown validator type "${name}" in --mix. Available: ${available}.`);
       process.exit(1);
     }
 
@@ -296,12 +239,5 @@ export function parseValidatorsCli(
 }
 
 function isValidatorType(s: string): s is ValidatorType {
-  return s === "honest" || s === "malicious" || s === "pushy" || s === "pushy-max" || s === "noop"
-    || s === "delayed" || s === "drift" || s === "withholder" || s === "bias-injector"
-    || s === "overshoot-ratchet" || s === "stealth-withholder" || s === "convergent-cabal"
-    || s === "inband-shifter" || s === "boundary-cluster" || s === "author-censor"
-    || s === "state-aware-sandwich" || s === "median-walking-cabal" || s === "trim-edge"
-    || s === "inner-cluster-shifter" || s === "asymmetric-trim-chaser"
-    || s === "author-only-trim" || s === "drift-track-trim"
-    || s === "hopping-trim";
+  return (VALIDATOR_TYPE_NAMES as ReadonlyArray<string>).includes(s);
 }

@@ -32,7 +32,7 @@ export interface PricePoint {
 //              what remains. k defaults to 0 (plain median). Trimming before
 //              the median rarely changes the price (median is already
 //              outlier-robust) but reflects in the activated-vs-total counts.
-export type AggregatorMode = "nudge" | "nudge-adaptive" | "median";
+export type AggregatorMode = "nudge" | "median";
 
 // Epsilon specification: how much the oracle price moves per activated bump.
 // - number: absolute step size (e.g. 0.00033)
@@ -45,48 +45,12 @@ export type EpsilonMode = "abs" | "ratio";
 // aggregator to update the price. If fewer arrive, the price is held.
 //   nudge  default = 0      (a 0-bump inherent already holds price naturally)
 //   median default = floor(2/3 × N) + 1   (≥ 50%+1 must be honest under
-//   mean   default = floor(2/3 × N) + 1    Polkadot's 2/3-honest assumption,
-//                                          so the median/mean is protected)
+//                                          Polkadot's 2/3-honest assumption,
+//                                          so the median is protected)
 // Defaults are resolved by the engine once it knows N.
-// `confidence`: opt-in confidence-tracking + exclusion policy. See
-// src/sim/aggregator.ts for the callback. "off" (default) is the legacy
-// behaviour: no per-validator state, no exclusion. "default" wires in
-// `defaultConfidenceUpdate`, which slowly rewards quotes near the final
-// price and penalises absence + far-from-median quotes; once a validator
-// hits 0 confidence they are excluded from future aggregation.
-//
-// `permanentExclusion`: when a validator's confidence first reaches 0,
-// is the exclusion sticky (cannot recover) or transient (recovers when
-// the callback raises confidence again). Default true.
-export type ConfidencePolicy = "off" | "default" | "wideband" | "wideband-strict" | "wideband-attributed";
-
-// `nudge-adaptive` extends the basic nudge rule with three knobs intended as
-// a closer match to the proposed governance surface for the on-chain pallet:
-//
-//   - `kappa`    : agreement gate. If `|n|/V < kappa` the block is treated as
-//                  a noop (no price update). Default 0 (disabled).
-//   - `vMaxUp`   : per-block upward velocity cap, expressed as a fraction of
-//                  the current price. Default Infinity (disabled).
-//   - `vMaxDown` : per-block downward velocity cap, fraction of current price.
-//                  Default Infinity. Asymmetric so up- and down-side risk can
-//                  be tuned independently.
-//   - `pMin`     : absolute floor on the post-update price. Default 0.
-//
-// The core update is `delta = ε · P · n · (|n|/V)` — i.e. plain nudge with the
-// per-block step quadratically damped by the agreement fraction. Full
-// consensus → full step; 1/3 consensus → 1/9 of plain nudge's step.
 export type AggregatorConfig =
   | { kind: "nudge"; epsilon: EpsilonSpec; minInputs?: number }
-  | {
-      kind: "nudge-adaptive";
-      epsilon: EpsilonSpec;
-      minInputs?: number;
-      kappa?: number;
-      vMaxUp?: number;
-      vMaxDown?: number;
-      pMin?: number;
-    }
-  | { kind: "median"; k?: number; minInputs?: number; confidence?: ConfidencePolicy; permanentExclusion?: boolean };
+  | { kind: "median"; k?: number; minInputs?: number };
 
 export function aggregatorMode(cfg: AggregatorConfig): AggregatorMode {
   return cfg.kind;
@@ -186,9 +150,7 @@ export interface ResolvedPriceSource {
 // validatorPriceSource, maliciousParams) bundle. A simulation's full
 // validator set is the concatenation of all groups, in order.
 export type ValidatorType =
-  "honest" | "malicious" | "pushy" | "pushy-max" | "noop" | "delayed" | "drift" |
-  "withholder" | "bias-injector" | "overshoot-ratchet" | "stealth-withholder" | "convergent-cabal" | "inband-shifter" |
-  "boundary-cluster" | "author-censor" | "state-aware-sandwich" | "median-walking-cabal" | "trim-edge" | "inner-cluster-shifter" | "asymmetric-trim-chaser" | "author-only-trim" | "drift-track-trim" | "hopping-trim";
+  "honest" | "malicious" | "pushy" | "pushy-max" | "noop" | "delayed" | "drift" | "withholder";
 
 /** Type-specific behavior knobs. Required keys depend on `type`:
  *    delayed   → delayBlocks
@@ -213,158 +175,6 @@ export interface ValidatorParams {
    *  Coordination is implicit: every withholder evaluates the same condition
    *  against (its observation, lastPrice) — no shared state needed. */
   withholderDirection?: "up" | "down";
-  /** bias-injector: which direction of price motion the cabal biases TOWARD.
-   *  "up"   = oracle is ratcheted upward (against real-down moves)
-   *  "down" = oracle is ratcheted downward (against real-up moves)
-   *  Quote mode: identical to withholder (abstain on against-direction obs).
-   *  Nudge mode: all members emit `direction` bumps unconditionally; cabal
-   *  authors select all in-direction bumps (overshoot); on against-direction
-   *  real motion blocks, cabal authors return [] (freeze the correction). */
-  biasInjectorDirection?: "up" | "down";
-  /** overshoot-ratchet: which direction the cabal ratchets the oracle in.
-   *  "up"   = ratchet upward (oracle drifts above real over time)
-   *  "down" = ratchet downward (oracle drifts below real over time)
-   *  Quote mode: identical to withholder (abstain on against-direction obs).
-   *  Nudge mode: pool-poison every block + adaptive author strategy:
-   *    - oracle-already-overshot-past-ceiling : freeze (avoid giving back gains)
-   *    - oracle-on-or-below-target            : activate ALL in-direction bumps
-   *      regardless of real motion (always inject; never let real correct). */
-  overshootRatchetDirection?: "up" | "down";
-  /** overshoot-ratchet: ceiling on the cumulative deviation the cabal lets
-   *  build up before they freeze. Expressed as a multiple of ε. Default 200
-   *  (≈ 2/3 of one maxBlockDelta). Higher = bolder attack, more likely to
-   *  trip criterion 2 (max single-block deviation) but more givebacks; lower
-   *  = stealthier ratchet. */
-  overshootRatchetCeilingBumps?: number;
-  /** stealth-withholder: bias direction (oracle is suppressed FROM moving
-   *  this way, so the oracle drifts opposite to real over up-trends if "up").
-   *  - "up": abstain when observed > lastPrice * (1 + threshold). Real moves
-   *          up are frozen, so oracle drifts BELOW real over up-trends.
-   *  - "down": abstain when observed < lastPrice * (1 - threshold). Real
-   *          moves down are frozen, so oracle drifts ABOVE real over down-runs.
-   *  Per the round-3 design, the cabal MUST be configured with priceSource
-   *  jitterStdDev=0 so that all members observe identical real prices and
-   *  abstain in lock-step. Stochastic per-validator jitter would defeat the
-   *  whole point — it'd let a fraction of cabal abstain on non-freeze blocks,
-   *  re-exposing them to the wideband-confidence ABSENT_PENALTY path. */
-  stealthWithholderDirection?: "up" | "down";
-  /** stealth-withholder: minimum normalized move (|observed-lastPrice|/lastPrice)
-   *  in the bias direction before the cabal abstains. Smaller threshold →
-   *  more freezes, stronger attack, but threshold must exceed jitter stddev
-   *  to avoid sign-flips across cabal. With recommended jitterStdDev=0 setup
-   *  any threshold ≥ 0 is fine; default 0.0005 (0.05%) gives near-maximum
-   *  freeze rate while still requiring observed to actually be above
-   *  lastPrice (avoids spurious abstentions when the oracle is already
-   *  ahead of real). */
-  stealthAbstainThreshold?: number;
-  /** convergent-cabal: bias direction (oracle is suppressed FROM moving this
-   *  way; oracle drifts opposite to real over up-trends if "up"). */
-  convergentCabalDirection?: "up" | "down";
-  /** convergent-cabal: trend window (blocks). The cabal only abstains when
-   *  real has been moving in the bias direction for this many CONSECUTIVE
-   *  recent blocks (per the cabal member's lockstep observation history).
-   *  Longer window = rarer abstention = lower absent-penalty exposure but
-   *  weaker attack. */
-  convergentCabalTrendBlocks?: number;
-  /** convergent-cabal: minimum cumulative real move in bias direction over
-   *  the trend window (fraction of lastPrice) required to trigger abstention.
-   *  Combined with `convergentCabalTrendBlocks`, ensures the cabal only
-   *  spends absent-penalty budget when the trend is real and significant. */
-  convergentCabalTrendMagnitude?: number;
-  /** convergent-cabal: nudge-mode author ceiling, in units of ε. Same
-   *  semantics as `overshootRatchetCeilingBumps`. */
-  convergentCabalCeilingBumps?: number;
-  /** inband-shifter: bias direction. "up" = ratchet oracle upward.
-   *  Quote leg submits `lastPrice * (1 + biasSign * quoteBias)`; nudge leg
-   *  pool-poisons this direction every block. */
-  inbandShifterDirection?: "up" | "down";
-  /** inband-shifter: quote-leg per-block bias as a fraction of `lastPrice`,
-   *  applied in `inbandShifterDirection`. Must lie strictly inside the
-   *  defender's wideband `goodBand` (5%) so the cabal never accrues a
-   *  BAD_QUOTE_PENALTY — the whole point of the attack is to be invisible
-   *  to defense #1's quote-distance check. Default 0.04 (4%). */
-  inbandShifterQuoteBias?: number;
-  /** inband-shifter: nudge-mode author ceiling, in units of ε. Same shape
-   *  as `overshootRatchetCeilingBumps` but kept independent so each
-   *  scenario can tune the two attackers without coupling them. Default 200. */
-  inbandShifterCeilingBumps?: number;
-  /** boundary-cluster: which side of `lastPrice` the cabal clusters on.
-   *  "down" = quote `lastPrice * (1 - bias)` (drag median below lastPrice);
-   *  "up"   = quote `lastPrice * (1 + bias)` (drag median above lastPrice). */
-  boundaryClusterDirection?: "up" | "down";
-  /** boundary-cluster: cluster offset as a fraction of `lastPrice`. Must be
-   *  small enough that the cluster lands inside the honest quote spread —
-   *  between the honest lower quartile and the honest median (or upper
-   *  quartile and median, when direction="up"). Default 0.002 (0.2%). */
-  boundaryClusterBias?: number;
-  /** author-censor: which side of the honest distribution the cabal author
-   *  preserves. "down" = drop every quote above pivot (median falls below
-   *  lastPrice); "up" = drop every quote below pivot (median rises above). */
-  authorCensorDirection?: "up" | "down";
-  /** author-censor: pivot offset as a fraction of `lastPrice`. The author
-   *  drops every gossiped quote on the wrong side of
-   *  `lastPrice * (1 + sign * bias)`. Smaller bias = more aggressive censor
-   *  (kept quotes are tightly clustered against the cabal's side). Default
-   *  0.001 (0.1%). */
-  authorCensorBias?: number;
-  /** median-walking-cabal: cabal cluster offset as a fraction of `lastPrice`,
-   *  applied DOWNWARD (cabal quotes at `lastPrice * (1 - medianWalkBias)`).
-   *  Default 0.5 (half lastPrice — extreme low cluster). Must be large enough
-   *  that the cabal cluster is unambiguously separable from honest quotes
-   *  (the cabal-author hook keeps quotes with price < lastPrice * 0.6). */
-  medianWalkBias?: number;
-  /** trim-edge: cabal cluster offset as a fraction of `lastPrice`. All
-   *  cabal members submit `lastPrice * (1 ± trimEdgeBias)`. Default 0.10
-   *  (10%) — large enough that the cabal cluster is unambiguously
-   *  separable from the honest distribution (~0.1% jitter). */
-  trimEdgeBias?: number;
-  /** trim-edge: which side of `lastPrice` the cabal clusters on, and which
-   *  end of the sorted quote list the cabal author trims. "down" = cabal
-   *  quotes at `lastPrice * (1 - bias)`, author drops the top floor(N/3);
-   *  "up" = cabal quotes at `lastPrice * (1 + bias)`, author drops the
-   *  bottom floor(N/3). Default "down". */
-  trimEdgeDirection?: "up" | "down";
-  /** inner-cluster-shifter: cabal cluster offset as a fraction of own
-   *  observation, applied DOWNWARD (cabal quotes at `obs * (1 - bias)`).
-   *  Must lie INSIDE the honest jitter distribution — i.e. on the order of
-   *  0.5σ–2σ of `priceSource.jitterStdDev`. With synthetic σ ≈ 0.001 (0.1%),
-   *  the default 0.0008 (0.08%) places the cabal cluster around the honest
-   *  ~25th percentile, dense enough to occupy the median rank at ~33% cabal
-   *  saturation while remaining indistinguishable from a slightly unlucky
-   *  honest observation in any per-validator audit. Default 0.0008. */
-  innerClusterBias?: number;
-  /** state-aware-sandwich: quote-mode bias as a fraction of `lastPrice`,
-   *  applied AWAY from real in whichever direction the oracle is currently
-   *  drifting (trailing → push further down, leading → push further up).
-   *  Tuned to sit in the middle of the sorted quote distribution at ~1/3
-   *  cabal share — large enough to bite, small enough to avoid saturation.
-   *  Default 0.005 (0.5%). */
-  sandwichBias?: number;
-  /** asymmetric-trim-chaser: cabal cluster offset as a fraction of
-   *  `lastPrice`, applied in the direction that pushes the oracle FURTHER
-   *  from real this block (sign chosen per-block from the observation vs
-   *  lastPrice comparison). Same magnitude semantics as `trimEdgeBias`;
-   *  default 0.10 (10%) — large enough that the cabal cluster is unambiguously
-   *  separable from the honest jitter (~0.1%), so the author-side asymmetric
-   *  trim drops only honest quotes on the opposite side. */
-  trimChaserBias?: number;
-  /** drift-track-trim: cabal cluster offset as a fraction of `targetPrice`,
-   *  applied DOWNWARD. The cabal latches `targetPrice` to ctx.lastPrice on
-   *  its first block and never updates it; quotes are submitted at
-   *  `targetPrice * (1 - driftTrackBias)` regardless of current oracle state.
-   *  As the oracle recovers between cabal-author blocks, the cabal cluster
-   *  remains anchored at the original level, so each cabal-author block
-   *  re-asserts the median below real with a sustained gap. Default 0.10
-   *  (10%) — same magnitude as `trimEdgeBias` for direct comparison. */
-  driftTrackBias?: number;
-  /** hopping-trim: cabal cluster offset as a fraction of `lastPrice`, applied
-   *  in `lockedDir` (set to push the oracle FURTHER from real at lock time).
-   *  Same magnitude semantics as `trimChaserBias`. Default 0.10 (10%). */
-  hoppingTrimBias?: number;
-  /** hopping-trim: number of blocks the cabal commits to a chosen push
-   *  direction before re-evaluating. Avoids the per-block oscillation that
-   *  weakened asymmetric-trim-chaser. Default 100 (≈10 minutes at 6s blocks). */
-  hoppingHoldBlocks?: number;
 }
 
 export interface ValidatorGroup {
@@ -420,11 +230,6 @@ export interface BlockMetrics {
   inherentVotes?: Array<{ type: ValidatorType; price: number }>;
   deviation: number; // absolute difference real - oracle
   deviationPct: number; // percentage deviation
-  /** Sampled confidence vector, populated only on every Nth block (see
-   *  CONFIDENCE_SAMPLE_INTERVAL). One entry per validator, in [0, 1].
-   *  null on non-sampled blocks AND when the aggregator has confidence
-   *  tracking disabled. */
-  confidenceSnapshot?: Float32Array | null;
 }
 
 // ── SimulationConfig ────────────────────────────────────────────────────────
@@ -509,11 +314,6 @@ export interface BlockChunk {
   /** Validator index whose quote was the median, per block. -1 means "not
    *  applicable" (nudge mode or freeze block). Optional for backward compat. */
   medianValidatorIndices?: number[];
-  /** Optional: sparse confidence samples for this chunk. `tick` indexes are
-   *  block offsets within the chunk (0..blockCount-1). Each entry of
-   *  `samples` is a length-N array (one per validator). Absent when the
-   *  scenario didn't track confidence. */
-  confidenceSamples?: { ticks: number[]; samples: number[][] };
 }
 
 export interface ScenarioMeta {
@@ -526,10 +326,6 @@ export interface ScenarioMeta {
   chunkTimeRanges?: Array<{ from: number; to: number }>;
   /** Directory name within the .simdata dir (absent in legacy dirs → falls back to scenario_<idx>). */
   dir?: string;
-  /** When confidence tracking was on, this is the per-validator-index type
-   *  string (e.g. ["honest", "honest", ..., "withholder", ...]). Used by the
-   *  UI's confidence tab to label/colour validators. Absent when off. */
-  validatorTypes?: ValidatorType[];
 }
 
 export interface SimDataIndex {
@@ -586,26 +382,4 @@ export interface ApiDataResponse {
   /** Per-venue price lines, present only when the .simdata was produced from
    *  trade data. Keyed by VenueId. Each is downsampled for the visible window. */
   venues?: Record<string, LinePoint[]>;
-}
-
-// ── Confidence API ──
-export interface ConfidenceSeries {
-  /** Validator index, or -1 to indicate a per-type aggregate. */
-  validatorIndex: number;
-  type: ValidatorType;
-  /** Optional label for aggregates (e.g. "honest aggregate"). */
-  label?: string;
-  points: LinePoint[];
-}
-
-export interface ApiConfidenceResponse {
-  scenarioIndex: number;
-  from: number;
-  to: number;
-  /** Type aggregates (always present, one per type with at least one validator). */
-  typeAggregates: ConfidenceSeries[];
-  /** Per-validator series (only when explicitly requested). */
-  perValidator?: ConfidenceSeries[];
-  /** Validator index → type mapping for the whole scenario. */
-  validatorTypes: ValidatorType[];
 }

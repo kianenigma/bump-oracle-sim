@@ -7,7 +7,7 @@ import { formatValidators } from "../validators.js";
 function configEpsilonSpec(cfg: { aggregator?: AggregatorConfig }): EpsilonSpec {
   const a = cfg.aggregator;
   if (!a) return 0;
-  if (a.kind === "nudge" || a.kind === "nudge-adaptive") return a.epsilon;
+  if (a.kind === "nudge") return a.epsilon;
   return 0;
 }
 

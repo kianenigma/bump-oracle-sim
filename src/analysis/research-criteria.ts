@@ -3,12 +3,11 @@ import type { AggregatorConfig, EpsilonSpec, SimulationSummary, SimulationResult
 import { BLOCK_TIME_SECONDS } from "../config.js";
 import { isBaselineValidators, hasGroupAtFraction } from "../validators.js";
 
-/** Pull the EpsilonSpec out of a config's aggregator (only nudge-family
- *  aggregators carry one). */
+/** Pull the EpsilonSpec out of a config's aggregator (only nudge carries one). */
 function configEpsilonSpec(cfg: { aggregator?: AggregatorConfig }): EpsilonSpec {
   const a = cfg.aggregator;
   if (!a) return 0;
-  if (a.kind === "nudge" || a.kind === "nudge-adaptive") return a.epsilon;
+  if (a.kind === "nudge") return a.epsilon;
   return 0;
 }
 

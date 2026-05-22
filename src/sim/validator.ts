@@ -1,28 +1,22 @@
 import { Bump } from "../types.js";
-import type { Submission, ValidatorParams, ValidatorPriceSource, ValidatorType } from "../types.js";
+import type { AggregatorMode, Submission, ValidatorParams, ValidatorPriceSource, ValidatorType } from "../types.js";
 import type { PriceEndpoint } from "./price-endpoint.js";
 
-/** What kind of input an aggregator wants this block. `"nudge-adaptive"`
- *  uses the same Submission shape as `"nudge"` (still bumps), but the
- *  aggregator's update rule is `delta = ε·n·|n|/V` instead of `delta = ε·n`,
- *  so the block author has to budget MORE bumps to hit the same target
- *  (sqrt scaling instead of linear). Validators look at this tag to pick
- *  the right author-side count. */
-export type InputKind = "nudge" | "nudge-adaptive" | "quote";
+/** What kind of input an aggregator wants this block. Plain nudge submits
+ *  Up/Down bumps; quote submits absolute prices. */
+export type InputKind = "nudge" | "quote";
 
 /** Per-block context handed to every produceInput / produceInherent call. */
 export interface ProduceCtx {
   lastPrice: number;
   blockIndex: number;
   /** Effective epsilon for this block (already accounts for ratio mode).
-   *  Only meaningful in nudge-family modes; quote-mode validators ignore it. */
+   *  Only meaningful in nudge mode; quote-mode validators ignore it. */
   epsilon: number;
-  /** What kind of input the aggregator expects this block. Validators
-   *  match on this to decide quote vs nudge vs adaptive-nudge behaviour. */
+  /** What kind of input the aggregator expects this block. */
   inputKind: InputKind;
-  /** Total active-validator count this block. Needed by the adaptive
-   *  aggregator's author-side bump-count math (sqrt(|diff|·V/ε)) and by
-   *  any future per-block compatibility check. */
+  /** Total validator count this block. Available for any per-block
+   *  bump-count math. */
   validatorCount: number;
 }
 
@@ -46,40 +40,28 @@ export interface ValidatorAgent {
   produceInherent(inputs: Submission[], ctx: ProduceCtx): Submission[];
 }
 
+/** Constructor contract every validator class satisfies. The static
+ *  `compatibleEngines` field declares which aggregator modes this validator
+ *  is meaningful under — the engine consults it before any sim runs. */
+export interface ValidatorConstructor {
+  readonly compatibleEngines: ReadonlyArray<AggregatorMode>;
+  new (
+    index: number,
+    endpoint: PriceEndpoint,
+    rng: () => number,
+    priceSource: ValidatorPriceSource,
+    params: Required<ValidatorParams>,
+  ): ValidatorAgent;
+}
+
 /**
- * Picks the integer n ∈ [0, maxBumps] that minimizes |absDiff − f(n)|, where
- * `f(n)` is the aggregator's per-block delta as a function of activated bumps:
- *
- *   - plain nudge          → f(n) = ε · n      (linear; chooses n ≈ absDiff/ε)
- *   - nudge-adaptive       → f(n) = ε · n²/V   (quadratic; chooses
- *                                              n ≈ √(absDiff·V/ε))
- *
- * The function reads `ctx.inputKind` and `ctx.validatorCount` to pick the
- * right inverse formula. Linear branch is the original behaviour; the
- * adaptive branch is what makes a 100%-honest run track real under the
- * adaptive aggregator (without it, the linear estimate under-corrects every
- * block because each bump only moves price by ε·|n|/V, not ε).
- *
- * Ties prefer fewer bumps (avoids flapping under jitter noise).
+ * Picks the integer n ∈ [0, maxBumps] closest to absDiff/ε (the inverse of the
+ * plain-nudge update rule price' = lastPrice + n·ε). Ties prefer fewer bumps
+ * to avoid flapping under jitter noise.
  */
 export function optimalBumpCount(absDiff: number, ctx: ProduceCtx, maxBumps: number): number {
   const epsilon = ctx.epsilon;
   if (epsilon <= 0 || maxBumps <= 0) return 0;
-
-  if (ctx.inputKind === "nudge-adaptive") {
-    // f(n) = ε · n² / V. Ideal real-valued n is √(absDiff · V / ε); pick the
-    // integer in [0, maxBumps] closest to that ideal.
-    const V = ctx.validatorCount;
-    if (V <= 0) return 0;
-    const ideal = Math.sqrt((absDiff * V) / epsilon);
-    const base = Math.floor(ideal);
-    if (base >= maxBumps) return maxBumps;
-    const baseDev = Math.abs(absDiff - (epsilon * base * base) / V);
-    const nextDev = Math.abs(absDiff - (epsilon * (base + 1) * (base + 1)) / V);
-    return nextDev < baseDev ? Math.min(base + 1, maxBumps) : base;
-  }
-
-  // Plain nudge: f(n) = ε · n.
   const base = Math.floor(absDiff / epsilon);
   if (base >= maxBumps) return maxBumps;
   const baseDev = absDiff - base * epsilon;
@@ -111,6 +93,8 @@ export function pickInDirectionBumps(
 // ── HonestValidator ─────────────────────────────────────────────────────────
 
 export class HonestValidator implements ValidatorAgent {
+  static readonly compatibleEngines: ReadonlyArray<AggregatorMode> = ["nudge", "median"];
+
   readonly index: number;
   readonly type: ValidatorType = "honest";
   readonly isHonest = true;
@@ -138,9 +122,7 @@ export class HonestValidator implements ValidatorAgent {
 
   produceInput(ctx: ProduceCtx): Submission {
     const price = this.observe(ctx.blockIndex);
-    // Both "nudge" and "nudge-adaptive" want bump submissions; only "quote"
-    // wants the absolute price.
-    if (ctx.inputKind === "nudge" || ctx.inputKind === "nudge-adaptive") {
+    if (ctx.inputKind === "nudge") {
       return { kind: "nudge", validatorIndex: this.index, bump: price >= ctx.lastPrice ? Bump.Up : Bump.Down };
     }
     return { kind: "quote", validatorIndex: this.index, price };

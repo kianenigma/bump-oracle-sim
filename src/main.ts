@@ -103,7 +103,7 @@ Options:
   --no-open                    Don't auto-open browser
   --threads <number>           Worker threads for batch scenarios (default: CPU count)
   --force                      Overwrite existing output directory
-  --aggregator <mode>          Aggregation rule: "nudge", "nudge-adaptive", or "median" (default)
+  --aggregator <mode>          Aggregation rule: "nudge" or "median" (default)
   --aggregator-k <fraction>    For median: trim this fraction from each tail before taking the median (default: 0).
                                  k=0 → plain median. k>0 → trimmed median.
   --data-source <kind>         "trades" (default, per-trade multi-venue), "candles" (Binance US 1m),
@@ -229,9 +229,8 @@ function parseRealPriceArg(
 function parseAggregatorArg(raw: string | undefined, k: number, epsilon: EpsilonSpec): AggregatorConfig | undefined {
   if (raw === undefined) return undefined;
   if (raw === "nudge") return { kind: "nudge", epsilon };
-  if (raw === "nudge-adaptive") return { kind: "nudge-adaptive", epsilon };
   if (raw === "median") return k > 0 ? { kind: "median", k } : { kind: "median" };
-  console.error(`Invalid --aggregator: "${raw}". Expected: nudge, nudge-adaptive, median.`);
+  console.error(`Invalid --aggregator: "${raw}". Expected: nudge, median.`);
   process.exit(1);
 }
 
@@ -308,7 +307,7 @@ function ensureOutputDir(dir: string, force: boolean): void {
 function configEpsilon(config: SimulationConfig): number {
   const a = config.aggregator;
   if (!a) return 0;
-  if (a.kind === "nudge" || a.kind === "nudge-adaptive") return epsilonValue(a.epsilon);
+  if (a.kind === "nudge") return epsilonValue(a.epsilon);
   return 0;
 }
 

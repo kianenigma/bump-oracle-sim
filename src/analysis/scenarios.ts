@@ -19,104 +19,51 @@ import { maxBlockDelta } from "../data/interpolator.js";
 import { ChunkWriter, CsvWriter, combineSinks, writeIndex, scenarioDirName } from "../viz/writer.js";
 import { loadCriteria } from "./research-criteria.js";
 import { generateReport } from "./research-report.js";
-import { buildValidators, formatValidators, isCompatibleWithAggregator, NON_CONFIDENCE_ATTACKERS, type GroupSpec } from "../validators.js";
-import { analyzeMedianVsNudge } from "./median-vs-nudge.js";
+import { buildValidators, formatValidators, isCompatibleWithAggregator, type GroupSpec } from "../validators.js";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Glossary — what each agent does. Full implementations: src/sim/validator.ts,
 // src/sim/malicious.ts.
 //
-// Agents (validator types in any group):
-//   honest    Submits an honestly-jittered observation of the real price.
-//             Nudge: bump = sign(observed − lastPrice); as author, picks the
-//             optimal number of in-direction bumps.
-//             Quote: submits the jittered observation directly.
+// Engines:
+//   nudge   Validators submit Up/Down. Author picks subset.
+//           price' = lastPrice + (net activated bumps) × ε.
+//   median  Validators submit absolute prices. price' = median(quotes), with
+//           an optional `k` trim of each tail before the median.
 //
-//   malicious Inverse strategy. Pushes price *away* from real.
-//             Nudge: bump direction flipped; as author activates
-//             same-direction bumps (away-from-real).
-//             Quote: own input is an outlier opposite real motion of size
-//             `params.maliciousQuoteBias × lastPrice`; as author SELECTIVELY
-//             includes only gossiped quotes whose value supports the wrong
-//             direction (i.e. on the opposite side of lastPrice from real).
-//             This is the spec's "select prices that support your value"
-//             attack — visible in the block-metric gap between totalBumps
-//             (gossiped) and activatedBumps (passed by author).
+// Validators (and the engines they declare compatibility with):
+//   honest        — both. Submits a jittered observation; honest nudge author.
+//   malicious     — both. Inverse strategy; pushes price AWAY from real.
+//   pushy         — both. Honest direction but overshoots past real.
+//   pushy-max     — nudge only. Picks whichever bump direction yields the
+//                   larger divergence from the author's observation of real.
+//   noop          — both. Author-side censorship (drops the inherent).
+//   delayed       — both. Honest intent, reads observation `delayBlocks` ago.
+//   drift         — both. Persistent upward bias regardless of real price.
+//   withholder    — nudge only. 1/3-cabal abstaining when honest publication
+//                   would push the oracle in the suppressed direction; the
+//                   chain ratchets the opposite way over a sustained real move.
 //
-//   pushy     Nudge: honest direction; as author activates ALL in-direction
-//             bumps (over-shoot via maximal push).
-//             Quote: own input is `real·(1 ± pushyQuoteBias)`, an outlier
-//             past real in the direction of motion. As author, SELECTIVELY
-//             keeps only quotes whose value is beyond `observed` (≈ real)
-//             in the direction of motion — the overshoot variant of
-//             malicious's selective-inclusion attack. Threshold is real
-//             (not lastPrice) because pushy's goal is "go past real",
-//             not "go in the right direction at all".
-//
-//   noop      Author-side censorship.
-//             Nudge: emits honest bumps, as author selects none → freeze.
-//             Quote: abstains; as author drops the inherent → freeze.
-//
-//   delayed  Honest intent, but reads its observation from `delayBlocks` ago.
-//
-//   drift    Persistent upward bias.
-//            Nudge: always Up; as author activates all Up bumps.
-//            Quote: lastPrice·(1 + driftQuoteStep) every block.
-//
-// Aggregators:
-//   nudge        Validators submit Up/Down. Author picks subset.
-//                price' = lastPrice + (net activated bumps) × ε.
-//   median       Validators submit absolute prices. price' = median(quotes).
-//   median(k)    Sort, drop top k% and bottom k% by value, then median.
-//                k=0 (default) is the plain median.
-//   mean(k)      Sort, drop top k% and bottom k% by value, then arithmetic
-//                mean. k=0 is a plain mean.
-//
-// Per-group ValidatorParams (delayBlocks / pushyQuoteBias / driftQuoteStep)
-// fall back to DEFAULT_VALIDATOR_PARAMS in src/config.ts. Each scenario can
-// override per-group via the `params` field of GroupSpec.
+// Per-group ValidatorParams (delayBlocks / pushyQuoteBias / maliciousQuoteBias
+// / driftQuoteStep / withholderDirection) fall back to
+// DEFAULT_VALIDATOR_PARAMS in src/config.ts. Each scenario can override
+// per-group via the `params` field of GroupSpec.
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Comparison adversary params used by `aggregator-comparison`. Stronger than
-// the defaults so the cross-aggregator differences are visible.
+// the defaults so cross-engine differences are visible.
 const COMPARISON_PARAMS: Required<ValidatorParams> = {
   delayBlocks: 100,
   pushyQuoteBias: 0.5,
   maliciousQuoteBias: 0.5,
   driftQuoteStep: 0.1,
   withholderDirection: "up",
-  biasInjectorDirection: "up",
-  overshootRatchetDirection: "up",
-  overshootRatchetCeilingBumps: 200,
-  stealthWithholderDirection: "up",
-  stealthAbstainThreshold: 0.0005,
-  convergentCabalDirection: "up",
-  convergentCabalTrendBlocks: 30,
-  convergentCabalTrendMagnitude: 0.0030,
-  convergentCabalCeilingBumps: 200,
-  inbandShifterDirection: "up",
-  inbandShifterQuoteBias: 0.04,
-  inbandShifterCeilingBumps: 200,
-  boundaryClusterDirection: "down",
-  boundaryClusterBias: 0.002,
-  authorCensorDirection: "down",
-  authorCensorBias: 0.001,
-  sandwichBias: 0.005,
-  medianWalkBias: 0.5,
-  trimEdgeBias: 0.10,
-  trimEdgeDirection: "down",
-  innerClusterBias: 0.0008,
-  trimChaserBias: 0.10,
-  driftTrackBias: 0.10,
-  hoppingTrimBias: 0.10,
-  hoppingHoldBlocks: 100,
 };
 
 // ── Scenario context ────────────────────────────────────────────────────────
 //
-// Replaces the old `Partial<SimulationConfig>` overrides bag. The CLI builds
-// one of these from --start-date / --validators / --jitter / --aggregator /
-// etc., then hands it to a ScenarioFn.
+// The CLI builds one of these from --start-date / --validators / --jitter /
+// --aggregator / etc., then hands it to a ScenarioFn.
 //
 // The ctx owns the *defaults* a scenario applies when it doesn't have a
 // stronger opinion: validatorCount, the price-source kind/jitter, the
@@ -147,22 +94,47 @@ export type ScenarioFn = (
 
 // ── Helpers used by every scenario ──────────────────────────────────────────
 
-/** Build a SimulationConfig from a context + group specs + label + optional aggregator override. */
+/** One canonical label format every scenario uses: `[engine=<X>] [mix=<Y>]`. */
+function engineLabel(cfg: AggregatorConfig): string {
+  if (cfg.kind === "nudge") {
+    const eps = cfg.epsilon;
+    const epsStr =
+      eps === "auto"                                       ? "auto"
+    : typeof eps === "object" && "ratio" in eps            ? `ratio=${(eps.ratio * 100).toFixed(4)}%`
+    : (eps as number).toFixed(6);
+    return `nudge(ε=${epsStr})`;
+  }
+  const parts: string[] = [];
+  if (cfg.k && cfg.k > 0) parts.push(`k=${cfg.k}`);
+  if (cfg.minInputs !== undefined) parts.push(`min=${cfg.minInputs}`);
+  return parts.length ? `median(${parts.join(",")})` : "median";
+}
+
+function mixLabel(specs: GroupSpec[], validatorCount: number, priceSource: ValidatorPriceSource): string {
+  return specs.length === 0
+    ? "100% honest"
+    : formatValidators(buildValidators(validatorCount, specs, priceSource));
+}
+
+/** Build a SimulationConfig with the canonical `[engine=…] [mix=…]` label. */
 function makeConfig(
   ctx: ScenarioCtx,
   specs: GroupSpec[],
-  label: string,
   aggregatorOverride?: AggregatorConfig,
+  /** Optional extra label suffix (e.g. for sweep variant tagging). */
+  labelSuffix?: string,
 ): SimulationConfig {
   const validators = buildValidators(ctx.validatorCount, specs, ctx.priceSource);
+  const aggregator = aggregatorOverride ?? ctx.aggregator;
+  const baseLabel = `[engine=${engineLabel(aggregator)}] [mix=${mixLabel(specs, ctx.validatorCount, ctx.priceSource)}]`;
   return {
     startDate: ctx.startDate,
     endDate: ctx.endDate,
     seed: ctx.seed,
     convergenceThreshold: ctx.convergenceThreshold,
     realPrice: ctx.realPrice,
-    aggregator: aggregatorOverride ?? ctx.aggregator,
-    label,
+    aggregator,
+    label: labelSuffix ? `${baseLabel} ${labelSuffix}` : baseLabel,
     validators,
   };
 }
@@ -170,173 +142,6 @@ function makeConfig(
 /** Convenience: nudge aggregator with the given epsilon (or ctx.defaultEpsilon). */
 function nudgeAgg(ctx: ScenarioCtx, epsilon?: EpsilonSpec): AggregatorConfig {
   return { kind: "nudge", epsilon: epsilon ?? ctx.defaultEpsilon };
-}
-
-/**
- * Configuration grid driving `core-attackers`, `validate-median`, and any
- * future scenario that wants the same aggregator × attacker × fraction shape.
- *
- *   - aggregators: median + 3 nudge ε values (auto, auto/2, auto/4)
- *   - attackers : caller-supplied `opts.attackers` (any subset of
- *     NON_CONFIDENCE_ATTACKERS), filtered by `isCompatibleWithAggregator` so
- *     we don't waste compute on (e.g.) `nudge × trim-edge` runs that just
- *     reproduce `nudge × honest`. Defaults to the full
- *     NON_CONFIDENCE_ATTACKERS set when omitted.
- *   - fractions : caller-supplied `opts.fractions` (any subset of [0,1]).
- *     Defaults to `[0.10, 0.33, 0.49]` (byzantine border sweep).
- *   - plus honest baselines, one per aggregator config.
- *
- * `opts.includeAdaptive` adds a parallel `nudge-adaptive` row at every ε so the
- * agreement-weighted variant can be compared head-to-head against raw nudge
- * and median. The adaptive rows use the proposed defaults (κ=0, asymmetric
- * v_max caps disabled, no price floor) — see ADAPTIVE_DEFAULTS.
- *
- * Confidence-targeting cabal types are excluded entirely — see
- * VALIDATOR_METADATA. If the caller passes one anyway the build still
- * produces the row (no silent drop) but be aware: those attackers were
- * categorised out of `NON_CONFIDENCE_ATTACKERS` for a reason.
- */
-export interface CoreAttackerOpts {
-  /** Subset of attacker types to sweep. Default: every non-confidence-targeting
-   *  attacker. Use this to scope a scenario to e.g. {malicious, pushy, noop}. */
-  attackers?: ReadonlyArray<Exclude<ValidatorType, "honest">>;
-  /** Subset of byzantine fractions. Default: [0.10, 0.33, 0.49]. */
-  fractions?: ReadonlyArray<number>;
-  /** Also emit a parallel `nudge-adaptive` row at every ε. Default: false. */
-  includeAdaptive?: boolean;
-}
-
-function buildCoreAttackerConfigs(
-  ctx: ScenarioCtx,
-  opts: CoreAttackerOpts = {},
-): SimulationConfig[] {
-  const attackers = opts.attackers ?? NON_CONFIDENCE_ATTACKERS;
-  const fractions = opts.fractions ?? [0.10, 0.33, 0.49];
-  const autoEps = 1 / ctx.validatorCount / 10;
-  const epsilons: Array<{ label: string; value: number }> = [
-    { label: "auto",   value: autoEps },
-    { label: "auto/2", value: autoEps / 2 },
-    // { label: "auto/4", value: autoEps / 4 },
-  ];
-  const medianAgg: AggregatorConfig = { kind: "median" };
-  const adaptiveAgg = (eps: number): AggregatorConfig => ({
-    kind: "nudge-adaptive",
-    epsilon: eps,
-    kappa: ADAPTIVE_DEFAULTS.kappa,
-    vMaxUp: ADAPTIVE_DEFAULTS.vMaxUp,
-    vMaxDown: ADAPTIVE_DEFAULTS.vMaxDown,
-    pMin: ADAPTIVE_DEFAULTS.pMin,
-  });
-  const aggLabel = (a: AggregatorConfig, epsLabel?: string) =>
-      a.kind === "nudge"           ? `nudge ε=${epsLabel}`
-    : a.kind === "nudge-adaptive"  ? `adaptive ε=${epsLabel}`
-                                   : a.kind;
-
-  const configs: SimulationConfig[] = [];
-  // Honest baselines.
-  for (const e of epsilons) {
-    configs.push(makeConfig(ctx, [], `${aggLabel({ kind: "nudge", epsilon: e.value }, e.label)} · honest`,
-      { kind: "nudge", epsilon: e.value }));
-    if (opts.includeAdaptive) {
-      configs.push(makeConfig(ctx, [], `${aggLabel(adaptiveAgg(e.value), e.label)} · honest`,
-        adaptiveAgg(e.value)));
-    }
-  }
-  configs.push(makeConfig(ctx, [], `${aggLabel(medianAgg)} · honest`, medianAgg));
-
-  for (const type of attackers) {
-    for (const frac of fractions) {
-      const fracPct = (frac * 100).toFixed(0);
-      const specs: GroupSpec[] = [{ type, fraction: frac }];
-      // Only run aggregator/attacker pairs that are compatible per metadata.
-      if (isCompatibleWithAggregator(type, "nudge")) {
-        for (const e of epsilons) {
-          configs.push(makeConfig(ctx, specs,
-            `${aggLabel({ kind: "nudge", epsilon: e.value }, e.label)} · ${type}@${fracPct}%`,
-            { kind: "nudge", epsilon: e.value }));
-          if (opts.includeAdaptive && isCompatibleWithAggregator(type, "nudge-adaptive")) {
-            configs.push(makeConfig(ctx, specs,
-              `${aggLabel(adaptiveAgg(e.value), e.label)} · ${type}@${fracPct}%`,
-              adaptiveAgg(e.value)));
-          }
-        }
-      }
-      if (isCompatibleWithAggregator(type, "median")) {
-        configs.push(makeConfig(ctx, specs,
-          `${aggLabel(medianAgg)} · ${type}@${fracPct}%`, medianAgg));
-      }
-    }
-  }
-  return configs;
-}
-
-/**
- * Defaults for the `nudge-adaptive` aggregator used by `validate-median` and
- * `core-attackers`. The agreement-weighting term `|n|/V` already does most of
- * the work — it cuts attacker leverage on partial-agreement blocks while
- * leaving full-consensus tracking unchanged. For a clean head-to-head against
- * raw nudge we keep the extra knobs disabled by default (κ=0, v_max=∞, pMin=0)
- * so the only difference attributable to adaptive is the agreement weight.
- */
-const ADAPTIVE_DEFAULTS = {
-  kappa: 0,
-  vMaxUp: Infinity,
-  vMaxDown: Infinity,
-  pMin: 0,
-} as const;
-
-// ── Tournament harness ──────────────────────────────────────────────────────
-// See TOURNAMENT.md for the methodology. Each round runs the same attacker
-// mix against System A (nudge) and System B (median) under identical seeds /
-// data / placement, and the only difference between the two sims is the
-// aggregator config. Defenses earned by either system get plugged in via
-// `systemA` / `systemB` overrides — the harness itself stays neutral.
-//
-// Usage from a scenario:
-//   const specs: GroupSpec[] = [{ type: "withholder", fraction: 1/3, params: {...} }];
-//   const configs = tournamentRoundConfigs(ctx, specs, "withholder-up", systemA, systemB);
-//   return runBatch(configs, priceSource, outputDir, threadCount);
-function tournamentRoundConfigs(
-  ctx: ScenarioCtx,
-  attackerSpecs: GroupSpec[],
-  attackerLabel: string,
-  systemA: AggregatorConfig,
-  systemB: AggregatorConfig,
-): SimulationConfig[] {
-  return [
-    makeConfig(ctx, attackerSpecs, `[A nudge] ${attackerLabel}`,  systemA),
-    makeConfig(ctx, attackerSpecs, `[B median] ${attackerLabel}`, systemB),
-  ];
-}
-
-/** Frozen baseline configs — never mutated. Used by round-N scenarios that
- *  want the original undefended system for evidence purposes. */
-const TOURNAMENT_SYSTEM_A_BASELINE = (ctx: ScenarioCtx): AggregatorConfig =>
-  ({ kind: "nudge", epsilon: ctx.defaultEpsilon });
-const TOURNAMENT_SYSTEM_B_BASELINE: AggregatorConfig =
-  { kind: "median" }; // minInputs defaults to floor(2N/3)+1 in the engine
-
-/** Current state of the systems including all committed defenses from prior
- *  rounds. Round-N scenarios use these so each new attacker faces the
- *  fully-hardened systems. See TOURNAMENT.md "defense ledger" sections. */
-const TOURNAMENT_SYSTEM_A_CURRENT = TOURNAMENT_SYSTEM_A_BASELINE;
-const TOURNAMENT_SYSTEM_B_CURRENT: AggregatorConfig = {
-  // Defenses committed in B's ledger (defense-4 was rejected, see TOURNAMENT.md):
-  //   #1: wideband confidence tracking (5% goodBand) with permanent exclusion
-  //   #2: freeze-aware callback (absent-penalty fires on freeze blocks too)
-  //   #3: attributed absence detection (defense-5 if accepted) — only
-  //       penalise self-abstain, never penalise validators dropped by a
-  //       malicious author
-  kind: "median",
-  confidence: "wideband-attributed",
-  permanentExclusion: true,
-};
-
-function aggregatorLabel(cfg: AggregatorConfig): string {
-  const parts: string[] = [];
-  if (cfg.kind === "median" && cfg.k && cfg.k > 0) parts.push(`k=${cfg.k}`);
-  if (cfg.minInputs !== undefined) parts.push(`min=${cfg.minInputs}`);
-  return parts.length > 0 ? `${cfg.kind}(${parts.join(",")})` : cfg.kind;
 }
 
 /** Convert the legacy "ValidatorMix"-style record into GroupSpec[]. */
@@ -376,13 +181,6 @@ function runOne(
   if (writer) {
     const info = writer.finish();
     csv?.finish();
-    // Per-validator-index type vector. Cheap to always emit (N strings) and
-    // unconditionally useful for any client that wants per-validator labels
-    // — including the Confidence tab in the UI.
-    const validatorTypes: ValidatorType[] = [];
-    for (const g of result.config.validators) {
-      for (let i = 0; i < g.count; i++) validatorTypes.push(g.type);
-    }
     meta = {
       config: result.config,
       summary: result.summary,
@@ -391,7 +189,6 @@ function runOne(
       timeRange: info.timeRange,
       chunkTimeRanges: info.chunkTimeRanges,
       dir: dirName,
-      validatorTypes,
     };
   }
 
@@ -580,74 +377,46 @@ const RESEARCH_MIXES: Record<string, number>[] = [
 ];
 
 // ── Scenarios ───────────────────────────────────────────────────────────────
+//
+// Every scenario emits configs labelled `[engine=<X>] [mix=<Y>]`. Pick a
+// scenario by what it sweeps: validator mix, ε, or the engine itself.
+//
+// Cross-engine attacker compatibility is enforced by `isCompatibleWithAggregator`
+// (which reads each class's static `compatibleEngines`). Configs that would
+// mix an incompatible (engine, validator) pair are dropped before they reach
+// the runner.
 
 export const scenarios: Record<string, ScenarioFn> = {
-  /**
-   * Core-attackers research sweep — the post-confidence-tracking baseline.
-   *
-   * See `buildCoreAttackerConfigs` for the grid: median + 3 nudge ε's against
-   * the non-confidence-targeting attackers at 10% and 33%, plus baselines.
-   * 44 simulations total.
-   */
-  async "core-attackers"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: core-attackers]`);
-    const configs = buildCoreAttackerConfigs(ctx, { includeAdaptive: true });
-    console.log(`  ${configs.length} simulations`);
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  /**
-   * `validate-median` — runs the core-attackers grid, then evaluates every
-   * (attacker, fraction) row under multiple distinct scoring functions
-   * (mean-deviation, max-deviation, p99-tail, convergence-rate, integral,
-   * recovery-speed, composite). For each row it compares the median
-   * aggregator's score against the best of the three nudge ε's.
-   *
-   * The point: confirm the conclusion that median dominates nudge isn't an
-   * artefact of one arbitrary scoring function. If median wins under every
-   * lens, we can claim dominance with more confidence than the existing
-   * single-composite research-criteria score allowed.
-   *
-   * Designed to run against `--data-source synthetic` for reproducibility.
-   */
-  async "validate-median"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: validate-median]`);
-    const configs = buildCoreAttackerConfigs(ctx, { includeAdaptive: false, attackers: ["malicious", "pushy", "pushy-max", "noop"]  });
-    console.log(`  ${configs.length} simulations`);
-    const results = await runBatch(configs, priceSource, outputDir, threadCount);
-    analyzeMedianVsNudge(results);
-    return results;
-  },
-
-  /** Baseline: 100% honest. */
+  /** Baseline: engine=ctx.aggregator × mix=100% honest. */
   async honest(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: honest]`);
-    const config = makeConfig(ctx, [], "honest (100%)");
-    return runBatch([config], priceSource, outputDir, threadCount);
+    return runBatch([makeConfig(ctx, [])], priceSource, outputDir, threadCount);
   },
 
-  /** Sweep malicious fraction from 0% to 50%. */
+  /** engine=ctx.aggregator × {0, 10, 20, 30, 40, 49, 50}% malicious. */
   async "sweep-malicious"(ctx, priceSource, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3, 0.4, 0.49, 0.5];
     const configs = fractions.map((frac) => {
-      const label = `${(frac * 100).toFixed(0)}% malicious`;
       const specs = frac > 0 ? [{ type: "malicious" as const, fraction: frac }] : [];
-      return makeConfig(ctx, specs, label);
+      return makeConfig(ctx, specs);
     });
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  /** Sweep all malicious variants at fixed (default) ε. */
+  /** engine=ctx.aggregator × every (validator type × fraction) in RESEARCH_MIXES. */
   async "sweep-all-malicious"(ctx, priceSource, outputDir, threadCount) {
     const configs: SimulationConfig[] = [];
     for (const mix of RESEARCH_MIXES) {
       const specs = specsFromMix(mix);
-      const label = formatValidators(buildValidators(ctx.validatorCount, specs, ctx.priceSource));
-      configs.push(makeConfig(ctx, specs, label));
+      // Filter incompatible (e.g. withholder under median).
+      const allCompatible = specs.every((s) => isCompatibleWithAggregator(s.type, ctx.aggregator.kind));
+      if (!allCompatible) continue;
+      configs.push(makeConfig(ctx, specs));
     }
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
+  /** engine=nudge(ε ∈ {base/5, base, base*5}) × {0, 10, 20, 30}% malicious. */
   async "sweep-malicious-and-epsilon"(ctx, priceSource, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3];
     const base = epsilonValue(ctx.defaultEpsilon);
@@ -655,14 +424,14 @@ export const scenarios: Record<string, ScenarioFn> = {
     const configs: SimulationConfig[] = [];
     for (const frac of fractions) {
       for (const eps of epsilons) {
-        const label = `${(frac * 100).toFixed(0)}% malicious, epsilon=${epsilonValue(eps).toFixed(6)}`;
         const specs = frac > 0 ? [{ type: "malicious" as const, fraction: frac }] : [];
-        configs.push(makeConfig(ctx, specs, label, nudgeAgg(ctx, eps)));
+        configs.push(makeConfig(ctx, specs, nudgeAgg(ctx, eps)));
       }
     }
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
+  /** engine=nudge(ε ∈ {base/5, base, base*5}) × {0, 10, 20, 30}% pushy. */
   async "sweep-pushy-and-epsilon"(ctx, priceSource, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3];
     const base = epsilonValue(ctx.defaultEpsilon);
@@ -670,48 +439,47 @@ export const scenarios: Record<string, ScenarioFn> = {
     const configs: SimulationConfig[] = [];
     for (const frac of fractions) {
       for (const eps of epsilons) {
-        const label = `${(frac * 100).toFixed(0)}% pushy, epsilon=${epsilonValue(eps).toFixed(6)}`;
         const specs = frac > 0 ? [{ type: "pushy" as const, fraction: frac }] : [];
-        configs.push(makeConfig(ctx, specs, label, nudgeAgg(ctx, eps)));
+        configs.push(makeConfig(ctx, specs, nudgeAgg(ctx, eps)));
       }
     }
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  /** Vary epsilon to find an optimum (always runs the nudge aggregator). */
+  /** engine=nudge(ε ∈ {0.25, 0.5, 1, 2, 4}×base) × mix=100% honest. */
   async "epsilon-sweep"(ctx, priceSource, outputDir, threadCount) {
     const multipliers = [0.25, 0.5, 1, 2, 4];
     const maxDelta = maxBlockDelta(priceSource.pricePoints);
     const baseEpsilon = maxDelta / ctx.validatorCount;
     const configs = multipliers.map((mult) => {
       const eps = baseEpsilon * mult;
-      const label = `epsilon=${eps.toFixed(6)} (${mult}x)`;
-      return makeConfig(ctx, [], label, nudgeAgg(ctx, eps));
+      return makeConfig(ctx, [], nudgeAgg(ctx, eps), `(${mult}x)`);
     });
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  /** Stress test: 49% malicious. */
+  /** engine=ctx.aggregator × mix=49% malicious. */
   async stress(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: stress]`);
     const specs: GroupSpec[] = [{ type: "malicious", fraction: 0.49 }];
-    return runBatch([makeConfig(ctx, specs, "stress (49% malicious)")], priceSource, outputDir, threadCount);
+    return runBatch([makeConfig(ctx, specs)], priceSource, outputDir, threadCount);
   },
 
-  /** Edge case: 49% / 50% across all malicious variants. */
+  /** engine=ctx.aggregator × {49, 50}% × {malicious, pushy, noop, delayed, drift}. */
   async "edge-malicious"(ctx, priceSource, outputDir, threadCount) {
     const types: Exclude<ValidatorType, "honest">[] = ["malicious", "pushy", "noop", "delayed", "drift"];
     const configs: SimulationConfig[] = [];
     for (const type of types) {
       for (const frac of [0.49, 0.50]) {
         const specs: GroupSpec[] = [{ type, fraction: frac }];
-        const label = `${(frac * 100).toFixed(0)}% ${type}`;
-        configs.push(makeConfig(ctx, specs, label));
+        if (!isCompatibleWithAggregator(type, ctx.aggregator.kind)) continue;
+        configs.push(makeConfig(ctx, specs));
       }
     }
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
+  /** engine=nudge(ε ∈ RESEARCH_MULTIPLIERS × auto-ε) × every RESEARCH_MIXES entry. */
   async "research-absolute-eps"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: research-absolute-eps]`);
     const criteria = loadCriteria();
@@ -728,10 +496,8 @@ export const scenarios: Record<string, ScenarioFn> = {
       const eps = autoEpsilon * mult;
       for (const mix of RESEARCH_MIXES) {
         const specs = specsFromMix(mix);
-        const mixDesc = formatValidators(buildValidators(ctx.validatorCount, specs, ctx.priceSource));
-        const label = `eps=${eps.toFixed(6)} (${mult}x), ${mixDesc}`;
         const cfg: SimulationConfig = {
-          ...makeConfig(ctx, specs, label, nudgeAgg(ctx, eps)),
+          ...makeConfig(ctx, specs, nudgeAgg(ctx, eps), `(${mult}x)`),
           convergenceThreshold: criteria.convergenceThreshold,
         };
         configs.push(cfg);
@@ -745,6 +511,7 @@ export const scenarios: Record<string, ScenarioFn> = {
     return results;
   },
 
+  /** engine=nudge(ratio ∈ RESEARCH_MULTIPLIERS × auto-ratio) × every RESEARCH_MIXES entry. */
   async "research-ratio-eps"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: research-ratio-eps]`);
     const criteria = loadCriteria();
@@ -761,10 +528,8 @@ export const scenarios: Record<string, ScenarioFn> = {
       const ratio = autoRatio * mult;
       for (const mix of RESEARCH_MIXES) {
         const specs = specsFromMix(mix);
-        const mixDesc = formatValidators(buildValidators(ctx.validatorCount, specs, ctx.priceSource));
-        const label = `ratio=${(ratio * 100).toFixed(4)}% (${mult}x), ${mixDesc}`;
         const cfg: SimulationConfig = {
-          ...makeConfig(ctx, specs, label, nudgeAgg(ctx, { ratio })),
+          ...makeConfig(ctx, specs, nudgeAgg(ctx, { ratio }), `(${mult}x)`),
           convergenceThreshold: criteria.convergenceThreshold,
         };
         configs.push(cfg);
@@ -779,11 +544,11 @@ export const scenarios: Record<string, ScenarioFn> = {
   },
 
   /**
-   * Cross-aggregator malicious-fraction sweep. `pushy` and `noop` are
-   * primarily author-side attacks under nudge — their quote translations are
-   * weaker / structurally different. See TASKS.md §C.
-   *
-   * Cross-product: 3 aggregators × (1 honest + 2 types × 4 fractions) = 27.
+   * Cross-engine sweep: 3 aggregators × (1 honest + N validator types × M fractions).
+   *   - aggregators: nudge(ε=ctx.defaultEpsilon), median(min=0), median(min=floor(2N/3)).
+   *   - attacker types: malicious, pushy, noop, drift (those compatible with both engines).
+   *   - fractions: 10%, 33%, 49%, 50%.
+   * Incompatible (engine, validator) pairs are filtered out.
    */
   async "aggregator-comparison"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: aggregator-comparison]`);
@@ -797,256 +562,19 @@ export const scenarios: Record<string, ScenarioFn> = {
 
     const configs: SimulationConfig[] = [];
     for (const agg of aggregators) {
-      // Baseline (honest) per aggregator.
-      configs.push(makeConfig(ctx, [], `${aggregatorLabel(agg)} · honest`, agg));
+      configs.push(makeConfig(ctx, [], agg));
 
       for (const type of adversaryTypes) {
+        if (!isCompatibleWithAggregator(type, agg.kind)) continue;
         for (const frac of fractions) {
-          const label = `${aggregatorLabel(agg)} · ${type}@${(frac * 100).toFixed(0)}%`;
           const specs: GroupSpec[] = [{ type, fraction: frac, params: COMPARISON_PARAMS }];
-          configs.push(makeConfig(ctx, specs, label, agg));
+          configs.push(makeConfig(ctx, specs, agg));
         }
       }
     }
 
-    console.log(`  Grid: ${aggregators.length} aggregators × (1 honest + ${adversaryTypes.length} types × ${fractions.length} fractions) = ${configs.length}`);
+    console.log(`  Grid: ${aggregators.length} engines × (1 honest + ${adversaryTypes.length} types × ${fractions.length} fractions) = ${configs.length} configs`);
     console.log(`  Comparison knobs: maliciousQuoteBias=${(COMPARISON_PARAMS.maliciousQuoteBias * 100).toFixed(1)}%, pushyQuoteBias=${(COMPARISON_PARAMS.pushyQuoteBias * 100).toFixed(1)}%, delayBlocks=${COMPARISON_PARAMS.delayBlocks}, driftQuoteStep=${(COMPARISON_PARAMS.driftQuoteStep * 100).toFixed(1)}%`);
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  /**
-   * Compare validator-observation modes under realistic per-trade data.
-   * Requires a trades data source with ≥1 venue. Sweeps:
-   *   - 2 obs modes (cross-venue, random-venue)
-   *   - 3 aggregators (nudge, median, mean(k=0.1))
-   *   - 4 malicious fractions (0, 10%, 33%, 49%)
-   */
-  async "validator-observation"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: validator-observation]`);
-    if (!priceSource.venuePrices) {
-      throw new Error(
-        `validator-observation scenario requires --data-source=trades and ≥1 venue. ` +
-        `Re-run with: --data-source trades --venues binance,bybit,gate,kraken`,
-      );
-    }
-
-    const obsKinds: ("cross-venue" | "random-venue")[] = ["cross-venue", "random-venue"];
-    const aggregators: AggregatorConfig[] = [
-      nudgeAgg(ctx),
-      { kind: "median" },
-      { kind: "median", k: 0.1 },
-    ];
-    const fractions = [0, 0.10, 0.33, 0.49];
-
-    const configs: SimulationConfig[] = [];
-    for (const obs of obsKinds) {
-      const ps: ValidatorPriceSource = { kind: obs, jitterStdDev: ctx.priceSource.jitterStdDev };
-      const obsCtx: ScenarioCtx = { ...ctx, priceSource: ps };
-      for (const agg of aggregators) {
-        for (const frac of fractions) {
-          const aggLabel = aggregatorLabel(agg);
-          const advLabel = frac === 0 ? "honest" : `mal@${(frac * 100).toFixed(0)}%`;
-          const specs: GroupSpec[] = frac === 0 ? [] : [{ type: "malicious", fraction: frac }];
-          const label = `${obs} obs · ${aggLabel} · ${advLabel}`;
-          configs.push(makeConfig(obsCtx, specs, label, agg));
-        }
-      }
-    }
-
-    console.log(`  Grid: ${obsKinds.length} obs modes × ${aggregators.length} aggregators × ${fractions.length} fractions = ${configs.length}`);
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  /**
-   * Withholder demonstration. The `withholder` validator is a coordinated
-   * 1/3-cabal that abstains *only* when honest publication would push the
-   * oracle in a chosen direction. At 1/3 saturation this trips the default
-   *  median minInputs = 2N/3 + 1 freeze-branch — but selectively, so the
-   * oracle ratchets only against the attack direction.
-   *
-   * Compares against existing 1/3-cabals (malicious, pushy — bounded by
-   * jitter; noop — full freeze). Confidence tracking is OFF here so the
-   * raw attack is visible. See `withholder-vs-confidence` for the defended
-   * version.
-   */
-  async "withholder-baseline"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: withholder-baseline]`);
-    const f = 1 / 3;
-    const configs: SimulationConfig[] = [
-      makeConfig(ctx, [], "baseline-honest"),
-      makeConfig(ctx, [{ type: "malicious", fraction: f }], "malicious-1/3"),
-      makeConfig(ctx, [{ type: "pushy",     fraction: f }], "pushy-1/3"),
-      makeConfig(ctx, [{ type: "noop",      fraction: f }], "noop-1/3"),
-      makeConfig(ctx, [{ type: "withholder", fraction: f, params: { withholderDirection: "up" } }],
-                 "withholder-up-1/3"),
-      makeConfig(ctx, [{ type: "withholder", fraction: f, params: { withholderDirection: "down" } }],
-                 "withholder-down-1/3"),
-    ];
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  /**
-   * Same threat model as `withholder-baseline`, but with the default
-   * confidence-update callback wired into the median aggregator. After ~100
-   * blocks of selective abstention, withholders hit confidence 0 and are
-   * permanently excluded. The active set drops to the honest 200 and the
-   * rescaled minInputs (~134) lets the chain continue cleanly.
-   */
-  async "withholder-vs-confidence"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: withholder-vs-confidence]`);
-    const f = 1 / 3;
-    const aggWithConfidence: AggregatorConfig = {
-      kind: "median",
-      confidence: "default",
-      permanentExclusion: true,
-    };
-    const configs: SimulationConfig[] = [
-      makeConfig(ctx, [], "baseline-honest", aggWithConfidence),
-      makeConfig(ctx, [{ type: "malicious", fraction: f }], "malicious-1/3", aggWithConfidence),
-      makeConfig(ctx, [{ type: "pushy",     fraction: f }], "pushy-1/3",     aggWithConfidence),
-      makeConfig(ctx, [{ type: "noop",      fraction: f }], "noop-1/3",      aggWithConfidence),
-      makeConfig(ctx, [{ type: "withholder", fraction: f, params: { withholderDirection: "up" } }],
-                 "withholder-up-1/3", aggWithConfidence),
-      makeConfig(ctx, [{ type: "withholder", fraction: f, params: { withholderDirection: "down" } }],
-                 "withholder-down-1/3", aggWithConfidence),
-    ];
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  /**
-   * Sanity check: confidence tracking should NOT punish honest validators
-   * even at higher-than-default jitter, and should expose how it treats
-   * `delayed` validators (honest intent, stale observation). Useful for
-   * spotting bad parameter choices in the default callback.
-   */
-  async "confidence-stress"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: confidence-stress]`);
-    const aggWithConfidence: AggregatorConfig = {
-      kind: "median",
-      confidence: "default",
-      permanentExclusion: true,
-    };
-    const highJitter: ValidatorPriceSource = { ...ctx.priceSource, jitterStdDev: 0.005 };
-    const ctxHigh: ScenarioCtx = { ...ctx, priceSource: highJitter };
-    const configs: SimulationConfig[] = [
-      makeConfig(ctx,     [], "100% honest, default jitter", aggWithConfidence),
-      makeConfig(ctxHigh, [], "100% honest, 5x jitter",      aggWithConfidence),
-      makeConfig(ctx,     [{ type: "delayed", fraction: 1 / 3 }], "33% delayed", aggWithConfidence),
-    ];
-    return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-
-  /**
-   * Defense-ladder candidate #1 for System B (median).
-   *
-   * After two consecutive discriminating rounds (round 0 withholder, round 1
-   * bias-injector) where median was broken by selective abstention defeating
-   * the 2N/3+1 minInputs gate, we apply the FIRST defense from B's ladder:
-   * confidence tracking with permanent exclusion (already implemented).
-   *
-   * Mechanism: each block, the median aggregator runs a callback that
-   * decrements the confidence of validators absent from the inherent
-   * (`-ABSENT_PENALTY`). After ~100 abstain-blocks the cabal hits 0 and is
-   * permanently excluded. The active set shrinks to honest 200; the rescaled
-   * `floor(2/3 · 200)+1 = 134` minInputs is easily met → chain unfreezes.
-   *
-   * The same withholder + bias-injector attackers from rounds 0/1 are re-run
-   * here against the hardened B (and an unchanged A baseline for reference).
-   * If hardened B holds (mean dev < 5%, max consec < 10% of blocks), defense
-   * #1 enters B's permanent ledger and round 2 starts with hardened B.
-   */
-  /**
-   * Defense-ladder candidate #2 for System B (median).
-   *
-   * Defense #1 (1% goodBand confidence tracking) was rejected because it
-   * false-positived honest validators on `random-venue` observation mode.
-   * This widens the goodBand to 5%, large enough to absorb cross-venue
-   * dispersion while still rejecting attacker bias magnitudes (withholder
-   * doesn't submit bad quotes — it ABSTAINS, so absent-penalty handles it).
-   *
-   * Same scenario layout as defense-1: re-test withholder + bias-injector
-   * against hardened B + reference baseline A.
-   */
-  /**
-   * Strict-threshold rerun (byzantine = 99/300).
-   *
-   * Compares median (no confidence tracking; that path was found harmful) to
-   * three nudge variants at decreasing epsilon:
-   *
-   *   [A ε:1]  nudge with epsilon = auto = maxBlockDelta / N
-   *   [A ε:½]  nudge with epsilon = auto / 2
-   *   [A ε:¼]  nudge with epsilon = auto / 4
-   *   [B med]  median + minInputs = floor(2N/3)+1
-   *
-   * Smaller epsilon = slower reaction to fast real-price moves but lower
-   * per-block noise floor and less per-block leverage for attackers — a
-   * potential nudge "hardening" without adding any per-validator state.
-   *
-   * Direction-suffixed labels use ↑ / ↓ for compactness.
-   */
-  async "tournament-rerun-strict-threshold"(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: tournament-rerun-strict-threshold — nudge ε sweep + median, byzantine = 99/300]`);
-    const f = 99 / 300;
-
-    // Pre-resolve the auto epsilon so we can scale it.
-    const autoEps = maxBlockDelta(priceSource.pricePoints) / Math.max(1, ctx.validatorCount);
-    const A_full: AggregatorConfig = { kind: "nudge", epsilon: autoEps };
-    const A_half: AggregatorConfig = { kind: "nudge", epsilon: autoEps / 2 };
-    const A_qtr:  AggregatorConfig = { kind: "nudge", epsilon: autoEps / 4 };
-    const B_med = TOURNAMENT_SYSTEM_B_BASELINE;
-
-    // Attackers split by directionality:
-    //   directional → emits ↑ and ↓ variants
-    //   directionless → single variant (intrinsic direction or stateless)
-    const directional: Array<{ short: string; up: GroupSpec; dn: GroupSpec }> = [
-      { short: "withholder",     up: { type: "withholder",         fraction: f, params: { withholderDirection:        "up"   } },
-                                 dn: { type: "withholder",         fraction: f, params: { withholderDirection:        "down" } } },
-      { short: "bias-injector",  up: { type: "bias-injector",      fraction: f, params: { biasInjectorDirection:      "up"   } },
-                                 dn: { type: "bias-injector",      fraction: f, params: { biasInjectorDirection:      "down" } } },
-      { short: "overshoot",      up: { type: "overshoot-ratchet",  fraction: f, params: { overshootRatchetDirection:  "up"   } },
-                                 dn: { type: "overshoot-ratchet",  fraction: f, params: { overshootRatchetDirection:  "down" } } },
-      { short: "stealth-with",   up: { type: "stealth-withholder", fraction: f, params: { stealthWithholderDirection: "up"   } },
-                                 dn: { type: "stealth-withholder", fraction: f, params: { stealthWithholderDirection: "down" } } },
-      { short: "convergent",     up: { type: "convergent-cabal",   fraction: f, params: { convergentCabalDirection:   "up"   } },
-                                 dn: { type: "convergent-cabal",   fraction: f, params: { convergentCabalDirection:   "down" } } },
-      { short: "inband-shifter", up: { type: "inband-shifter",     fraction: f, params: { inbandShifterDirection:     "up"   } },
-                                 dn: { type: "inband-shifter",     fraction: f, params: { inbandShifterDirection:     "down" } } },
-    ];
-
-    const directionless: Array<{ short: string; spec: GroupSpec }> = [
-      { short: "malicious", spec: { type: "malicious", fraction: f } },
-      { short: "pushy",     spec: { type: "pushy",     fraction: f } },
-      { short: "noop",      spec: { type: "noop",      fraction: f } },
-      { short: "delayed",   spec: { type: "delayed",   fraction: f } },
-      { short: "drift",     spec: { type: "drift",     fraction: f } },
-    ];
-
-    const systems: Array<{ tag: string; agg: AggregatorConfig }> = [
-      { tag: "A ε:1", agg: A_full },
-      { tag: "A ε:½", agg: A_half },
-      { tag: "A ε:¼", agg: A_qtr  },
-      { tag: "B med", agg: B_med  },
-    ];
-
-    /** Cross product (every system × this attacker variant). */
-    const sweep = (specs: GroupSpec[], attackerLabel: string): SimulationConfig[] =>
-      systems.map(s => makeConfig(ctx, specs, `[${s.tag}] ${attackerLabel}`, s.agg));
-
-    const configs: SimulationConfig[] = [
-      ...sweep([], "honest"),
-      ...directional.flatMap(a => [
-        ...sweep([a.up], `${a.short}↑`),
-        ...sweep([a.dn], `${a.short}↓`),
-      ]),
-      ...directionless.flatMap(a => sweep([a.spec], a.short)),
-    ];
-
-    const variantCount = 1 + 2 * directional.length + directionless.length;
-    console.log(
-      `  Auto-ε resolved: ${autoEps.toFixed(6)}  (½ = ${(autoEps/2).toFixed(6)}, ¼ = ${(autoEps/4).toFixed(6)})`,
-    );
-    console.log(`  Total sims: ${configs.length} (${variantCount} variants × ${systems.length} systems)`);
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 };

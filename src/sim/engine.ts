@@ -14,73 +14,13 @@ import type {
 } from "../types.js";
 import { mulberry32 } from "../rng.js";
 import { PriceEndpoint } from "./price-endpoint.js";
-import { HonestValidator, type ValidatorAgent } from "./validator.js";
-import {
-  MaliciousValidator,
-  PushyMaliciousValidator,
-  MaximallyPushyNudgeValidator,
-  NoopValidator,
-  DelayedValidator,
-  DriftValidator,
-  WithholderValidator,
-  BiasInjectorValidator,
-  OvershootRatchetValidator,
-  StealthWithholderValidator,
-  ConvergentCabalValidator,
-  InBandShifterValidator,
-  BoundaryClusterValidator,
-  AuthorCensorValidator,
-  StateAwareSandwichValidator,
-  MedianWalkingCabalValidator,
-  TrimEdgeValidator,
-  InnerClusterShifterValidator,
-  AsymmetricTrimChaserValidator,
-  AuthorOnlyTrimValidator,
-  DriftTrackTrimValidator,
-  HoppingTrimValidator,
-} from "./malicious.js";
+import { type ValidatorAgent } from "./validator.js";
+import { VALIDATOR_REGISTRY } from "./registry.js";
 import { Chain } from "./chain.js";
 import { makeAggregator, defaultMinInputs } from "./aggregator.js";
 import { maxBlockDelta } from "../data/interpolator.js";
-import { BLOCK_TIME_SECONDS, CONFIDENCE_SAMPLE_INTERVAL, DEFAULT_VALIDATOR_PARAMS } from "../config.js";
-import { totalValidators, isCompatibleWithAggregator, VALIDATOR_METADATA } from "../validators.js";
-
-// Constructor signature shared by every validator type. The unified ctor
-// keeps engine code small — each group just instantiates `count` of one
-// constructor with its own (priceSource, params).
-type ValidatorCtor = new (
-  index: number,
-  endpoint: PriceEndpoint,
-  rng: () => number,
-  priceSource: ValidatorGroup["priceSource"],
-  params: Required<ValidatorParams>,
-) => ValidatorAgent;
-
-const VALIDATOR_REGISTRY: Record<ValidatorGroup["type"], ValidatorCtor> = {
-  honest: HonestValidator,
-  malicious: MaliciousValidator,
-  pushy: PushyMaliciousValidator,
-  "pushy-max": MaximallyPushyNudgeValidator,
-  noop: NoopValidator,
-  delayed: DelayedValidator,
-  drift: DriftValidator,
-  withholder: WithholderValidator,
-  "bias-injector": BiasInjectorValidator,
-  "overshoot-ratchet": OvershootRatchetValidator,
-  "stealth-withholder": StealthWithholderValidator,
-  "convergent-cabal": ConvergentCabalValidator,
-  "inband-shifter": InBandShifterValidator,
-  "boundary-cluster": BoundaryClusterValidator,
-  "author-censor": AuthorCensorValidator,
-  "state-aware-sandwich": StateAwareSandwichValidator,
-  "median-walking-cabal": MedianWalkingCabalValidator,
-  "trim-edge": TrimEdgeValidator,
-  "inner-cluster-shifter": InnerClusterShifterValidator,
-  "asymmetric-trim-chaser": AsymmetricTrimChaserValidator,
-  "author-only-trim": AuthorOnlyTrimValidator,
-  "drift-track-trim": DriftTrackTrimValidator,
-  "hopping-trim": HoppingTrimValidator,
-};
+import { BLOCK_TIME_SECONDS, DEFAULT_VALIDATOR_PARAMS } from "../config.js";
+import { totalValidators, isCompatibleWithAggregator } from "../validators.js";
 
 export type BlockSink = (block: BlockMetrics) => void;
 
@@ -143,18 +83,17 @@ export function runSimulation(
   // Resolve aggregator + (if nudge) epsilon.
   const aggregatorCfg: AggregatorConfig = config.aggregator ?? DEFAULT_AGGREGATOR;
 
-  // Validate that every non-honest group's attack category is compatible
-  // with the configured aggregator. A nudge-only attacker (e.g. bump-pool
-  // poisoning) under a quote aggregator (or vice versa) is misconfigured —
-  // fail loudly rather than silently producing meaningless results.
+  // Validate that every group declares compatibility with the configured
+  // aggregator. A nudge-only attacker (e.g. bump-pool poisoning) under the
+  // median aggregator (or vice versa) is misconfigured — fail loudly rather
+  // than silently producing meaningless results.
   for (const g of config.validators) {
-    if (g.count === 0 || g.type === "honest") continue;
+    if (g.count === 0) continue;
     if (!isCompatibleWithAggregator(g.type, aggregatorCfg.kind)) {
-      const cat = VALIDATOR_METADATA[g.type].attackCategory;
+      const compat = VALIDATOR_REGISTRY[g.type].compatibleEngines.join(", ");
       throw new Error(
-        `Validator type "${g.type}" is targeted at the ${cat} aggregator family, ` +
-        `but the configured aggregator is "${aggregatorCfg.kind}". ` +
-        `Either change the aggregator or drop this group.`,
+        `Validator type "${g.type}" is not compatible with engine "${aggregatorCfg.kind}" ` +
+        `(compatible engines: [${compat}]). Either change the aggregator or drop this group.`,
       );
     }
   }
@@ -164,7 +103,7 @@ export function runSimulation(
   if (!quiet) console.log(`  Aggregator min inputs: ${resolvedMinInputs}/${validatorCount}`);
   let epsilon = 0;
   let epsilonMode: EpsilonMode = "abs";
-  if (aggregatorCfg.kind === "nudge" || aggregatorCfg.kind === "nudge-adaptive") {
+  if (aggregatorCfg.kind === "nudge") {
     const resolved = resolveEpsilon(aggregatorCfg.epsilon, pricePoints, validatorCount, !quiet);
     epsilon = resolved.epsilon;
     epsilonMode = resolved.mode;
@@ -216,16 +155,8 @@ export function runSimulation(
   }
 
   const progressInterval = Math.max(1, Math.floor(totalBlocks / 100));
-  // Sample the first block (i==0) and every CONFIDENCE_SAMPLE_INTERVAL after.
-  // The chain doesn't know about sampling — engine attaches the snapshot
-  // to BlockMetrics and the writer persists it.
-  const sampleConfidence = aggregator.tracksConfidence;
   for (let i = 0; i < totalBlocks; i++) {
     const m = chain.nextBlock();
-
-    if (sampleConfidence && (i % CONFIDENCE_SAMPLE_INTERVAL === 0 || i === totalBlocks - 1)) {
-      m.confidenceSnapshot = aggregator.confidenceSnapshot();
-    }
 
     if (prevBlock !== null) {
       const devEnd = m.realPrice !== 0
@@ -293,18 +224,10 @@ export function runSimulation(
   // minInputs) so .simdata and the UI never have to re-resolve "auto" or
   // the validator-count-dependent default.
   const resolvedEpsilon: EpsilonSpec = epsilonMode === "ratio" ? { ratio: epsilon } : epsilon;
-  let resolvedAggregator: AggregatorConfig;
-  if (aggregatorCfg.kind === "nudge") {
-    resolvedAggregator = { kind: "nudge", epsilon: resolvedEpsilon, minInputs: resolvedMinInputs };
-  } else if (aggregatorCfg.kind === "nudge-adaptive") {
-    resolvedAggregator = {
-      ...aggregatorCfg,
-      epsilon: resolvedEpsilon,
-      minInputs: resolvedMinInputs,
-    };
-  } else {
-    resolvedAggregator = { ...aggregatorCfg, minInputs: resolvedMinInputs };
-  }
+  const resolvedAggregator: AggregatorConfig =
+    aggregatorCfg.kind === "nudge"
+      ? { kind: "nudge", epsilon: resolvedEpsilon, minInputs: resolvedMinInputs }
+      : { ...aggregatorCfg, minInputs: resolvedMinInputs };
 
   return { config: { ...config, aggregator: resolvedAggregator }, summary };
 }
@@ -314,12 +237,6 @@ function printConfig(config: SimulationConfig, pricePoints?: PricePoint[]): void
   const agg = config.aggregator ?? DEFAULT_AGGREGATOR;
   const aggParts: string[] = [];
   if (agg.kind === "median" && agg.k && agg.k > 0) aggParts.push(`k=${agg.k}`);
-  if (agg.kind === "nudge-adaptive") {
-    if (agg.kappa !== undefined)    aggParts.push(`κ=${agg.kappa}`);
-    if (agg.vMaxUp !== undefined)   aggParts.push(`vUp=${agg.vMaxUp}`);
-    if (agg.vMaxDown !== undefined) aggParts.push(`vDn=${agg.vMaxDown}`);
-    if (agg.pMin !== undefined)     aggParts.push(`pMin=${agg.pMin}`);
-  }
   if (agg.minInputs !== undefined) aggParts.push(`minInputs=${agg.minInputs}`);
   const aggStr = aggParts.length > 0 ? `${agg.kind}(${aggParts.join(", ")})` : agg.kind;
 
@@ -334,9 +251,9 @@ function printConfig(config: SimulationConfig, pricePoints?: PricePoint[]): void
   const honestPct = ((honest / total) * 100).toFixed(1);
   const mixStr = `${honestPct}% honest` + (parts.length ? ", " + parts.join(", ") : "");
 
-  // Epsilon string only printed for nudge-family aggregators.
+  // Epsilon string only printed for nudge.
   let epsStr = "—";
-  if (agg.kind === "nudge" || agg.kind === "nudge-adaptive") {
+  if (agg.kind === "nudge") {
     if (agg.epsilon === "auto") epsStr = "auto";
     else if (typeof agg.epsilon === "object" && "ratio" in agg.epsilon) epsStr = `ratio=${(agg.epsilon.ratio * 100).toFixed(4)}%/bump`;
     else epsStr = agg.epsilon.toString();
@@ -375,7 +292,7 @@ function printConfig(config: SimulationConfig, pricePoints?: PricePoint[]): void
   console.log(`  │  aggregator   : ${aggStr}`);
   console.log(`  │  range        : ${config.startDate} → ${config.endDate}`);
   console.log(`  │  validators   : ${total} (${mixStr})`);
-  const epsApplies = agg.kind === "nudge" || agg.kind === "nudge-adaptive";
+  const epsApplies = agg.kind === "nudge";
   console.log(`  │  epsilon      : ${epsStr}${epsApplies ? "" : "  (n/a)"}`);
   if (rp.kind === "trades" && pricePoints && pricePoints.length > 1) {
     const md = maxBlockDelta(pricePoints);
