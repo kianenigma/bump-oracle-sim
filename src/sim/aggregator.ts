@@ -40,6 +40,31 @@ export interface Aggregator {
   apply(ctx: AggregatorContext): AggregateOutcome;
 }
 
+/**
+ * Strict input-kind check. Every aggregator only understands one `Submission`
+ * shape (nudge or quote) plus abstains. Encountering any other kind in `inputs`
+ * or `inherent` is a misconfiguration (typically: an attacker class compatible
+ * with one engine being run under the other), so we throw a standard error
+ * rather than silently dropping the rogue submission.
+ *
+ * Abstains are always allowed — they represent a validator that chose not
+ * to submit and contribute neither to `minInputs` nor to the price math.
+ */
+function assertSubmissionKind(
+  s: Submission,
+  expected: "nudge" | "quote",
+  where: "inputs" | "inherent",
+  mode: "nudge" | "median",
+): void {
+  if (s.kind === "abstain" || s.kind === expected) return;
+  throw new Error(
+    `${mode} aggregator: expected '${expected}' submissions in ${where} but got ` +
+    `'${s.kind}' from validator ${s.validatorIndex}. ` +
+    `This is almost always a (validator, engine) mismatch — check the validator ` +
+    `class's static compatibleEngines list.`,
+  );
+}
+
 // ── NudgeAggregator ─────────────────────────────────────────────────────────
 // price' = lastPrice + (Σ activated bumps) × ε.
 // `inputs` carries everyone's gossiped nudges (for the totalBumps metric);
@@ -47,7 +72,9 @@ export interface Aggregator {
 //
 // `minInputs` defaults to 0 — a sparse inherent already holds price naturally
 // (net = 0 → no bump). The knob is exposed for symmetry with the quote
-// aggregators, not because nudge needs it.
+// aggregator, not because nudge needs it. It is checked against the size of
+// the inherent (excluding abstains), NOT against `inputs` — gossip volume
+// must not influence the aggregator's decision.
 export class NudgeAggregator implements Aggregator {
   readonly mode = "nudge" as const;
   readonly inputKind = "nudge" as const;
@@ -57,12 +84,17 @@ export class NudgeAggregator implements Aggregator {
   }
 
   apply(ctx: AggregatorContext): AggregateOutcome {
+    for (const s of ctx.inputs)   assertSubmissionKind(s, "nudge", "inputs",   this.mode);
+    for (const s of ctx.inherent) assertSubmissionKind(s, "nudge", "inherent", this.mode);
+
+    // Gossip-volume metric (informational only; never gates minInputs).
     let totalBumps = 0;
     for (const s of ctx.inputs) if (s.kind === "nudge") totalBumps++;
 
-    let nudgeCount = 0;
-    for (const s of ctx.inherent) if (s.kind === "nudge") nudgeCount++;
-    if (nudgeCount < this.minInputs) {
+    // After the assertion above, every non-abstain inherent entry IS a nudge.
+    let inherentCount = 0;
+    for (const s of ctx.inherent) if (s.kind === "nudge") inherentCount++;
+    if (inherentCount < this.minInputs) {
       return { newPrice: ctx.lastPrice, totalBumps, activatedBumps: 0, netDirection: 0, priceUpdated: false };
     }
 
@@ -104,6 +136,9 @@ export class MedianAggregator implements Aggregator {
   }
 
   apply(ctx: AggregatorContext): AggregateOutcome {
+    for (const s of ctx.inputs)   assertSubmissionKind(s, "quote", "inputs",   this.mode);
+    for (const s of ctx.inherent) assertSubmissionKind(s, "quote", "inherent", this.mode);
+
     const totalQuotes = countQuotes(ctx.inputs);
     const quoteEntries = collectQuoteEntries(ctx.inherent);
     if (quoteEntries.length < this.minInputs || quoteEntries.length === 0) {
