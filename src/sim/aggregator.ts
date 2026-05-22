@@ -1,4 +1,5 @@
-import type { AggregatorConfig, Submission } from "../types.js";
+import type { AggregatorConfig, EpsilonMode, Submission } from "../types.js";
+import type { InputKind } from "./validator.js";
 
 /**
  * The block author has already trimmed `inputs` down to `inherent`.
@@ -9,12 +10,15 @@ import type { AggregatorConfig, Submission } from "../types.js";
  * `inputs` is also threaded through so we can report total-vs-activated
  * counts on BlockMetrics, but the aggregator's price math only ever
  * looks at `inherent`.
+ *
+ * Note: any per-block aggregator parameter (e.g. ε) lives on the aggregator
+ * instance itself, NOT on this context. The aggregator owns its state across
+ * the run and may mutate it block-to-block (e.g. an adaptive ε schedule).
  */
 export interface AggregatorContext {
   inputs: Submission[];      // all gossiped (for metrics only)
   inherent: Submission[];    // author's selection — drives price math
   lastPrice: number;
-  epsilon: number;           // 0 for non-nudge aggregators
 }
 
 export interface AggregateOutcome {
@@ -35,9 +39,15 @@ export interface AggregateOutcome {
 }
 
 export interface Aggregator {
+  /** Aggregator family. Determines what kind of submission validators must
+   *  produce and what shape of inherent the chain expects. */
   readonly mode: "nudge" | "median";
-  readonly inputKind: "nudge" | "quote";
   apply(ctx: AggregatorContext): AggregateOutcome;
+  /** Build the per-block `InputKind` variant for `ProduceCtx`. Carries any
+   *  aggregator-owned parameters validators need for THIS block — e.g.
+   *  nudge's effective ε — so per-block aggregator state stays inside the
+   *  aggregator instance. */
+  inputKindFor(lastPrice: number): InputKind;
 }
 
 /**
@@ -70,6 +80,12 @@ function assertSubmissionKind(
 // `inputs` carries everyone's gossiped nudges (for the totalBumps metric);
 // `inherent` is the author's selection — only those count toward the price.
 //
+// ε is owned by this class. It can be stored as either an absolute step
+// (`epsilonMode === "abs"`) or as a fraction of the current price
+// (`epsilonMode === "ratio"`, effective = lastPrice · ε). Both `epsilon` and
+// `epsilonMode` are mutable so future logic can evolve ε across the run
+// (e.g. tightening it as the chain converges).
+//
 // `minInputs` defaults to 0 — a sparse inherent already holds price naturally
 // (net = 0 → no bump). The knob is exposed for symmetry with the quote
 // aggregator, not because nudge needs it. It is checked against the size of
@@ -77,10 +93,28 @@ function assertSubmissionKind(
 // aggregator's decision.
 export class NudgeAggregator implements Aggregator {
   readonly mode = "nudge" as const;
-  readonly inputKind = "nudge" as const;
 
-  constructor(private minInputs: number = 0) {
+  private minInputs: number;
+  /** Mutable so future per-run ε schedules can update it (currently never written). */
+  protected epsilon: number;
+  protected epsilonMode: EpsilonMode;
+
+  constructor(minInputs: number, epsilon: number, epsilonMode: EpsilonMode) {
     if (minInputs < 0) throw new Error(`nudge minInputs must be ≥ 0, got ${minInputs}`);
+    if (epsilon < 0)   throw new Error(`nudge epsilon must be ≥ 0, got ${epsilon}`);
+    this.minInputs = minInputs;
+    this.epsilon = epsilon;
+    this.epsilonMode = epsilonMode;
+  }
+
+  /** Resolve the per-bump step size for a given `lastPrice`. In `"abs"`
+   *  mode it's just `epsilon`; in `"ratio"` mode it scales with the price. */
+  private effectiveEpsilon(lastPrice: number): number {
+    return this.epsilonMode === "ratio" ? lastPrice * this.epsilon : this.epsilon;
+  }
+
+  inputKindFor(lastPrice: number): InputKind {
+    return { kind: "nudge", epsilon: this.effectiveEpsilon(lastPrice) };
   }
 
   apply(ctx: AggregatorContext): AggregateOutcome {
@@ -99,8 +133,9 @@ export class NudgeAggregator implements Aggregator {
       if (s.kind !== "nudge") continue; // unreachable: assertion above threw
       net += s.bump; // Up=+1, Down=-1
     }
+    const eps = this.effectiveEpsilon(ctx.lastPrice);
     return {
-      newPrice: ctx.lastPrice + net * ctx.epsilon,
+      newPrice: ctx.lastPrice + net * eps,
       totalBumps,
       activatedBumps: ctx.inherent.length,
       netDirection: net,
@@ -119,10 +154,13 @@ export class NudgeAggregator implements Aggregator {
 // The gap surfaces author-side censorship in the block metrics.
 export class MedianAggregator implements Aggregator {
   readonly mode = "median" as const;
-  readonly inputKind = "quote" as const;
 
   constructor(private minInputs: number = 0) {
     if (minInputs < 0) throw new Error(`median minInputs must be ≥ 0, got ${minInputs}`);
+  }
+
+  inputKindFor(_lastPrice: number): InputKind {
+    return { kind: "quote" };
   }
 
   apply(ctx: AggregatorContext): AggregateOutcome {
@@ -159,11 +197,23 @@ export function defaultMinInputs(kind: AggregatorConfig["kind"], validatorCount:
   return Math.floor((2 / 3) * validatorCount) + 1;
 }
 
-export function makeAggregator(cfg: AggregatorConfig, validatorCount: number): Aggregator {
+/** Construct an `Aggregator` from its config. For nudge, the caller must
+ *  pre-resolve any `"auto"` / ratio epsilon into a numeric value plus mode —
+ *  the aggregator does not know about price data, so the engine resolves
+ *  `EpsilonSpec` before instantiation. */
+export function makeAggregator(
+  cfg: AggregatorConfig,
+  validatorCount: number,
+  resolvedNudgeEpsilon?: { value: number; mode: EpsilonMode },
+): Aggregator {
   const minInputs = cfg.minInputs ?? defaultMinInputs(cfg.kind, validatorCount);
   switch (cfg.kind) {
-    case "nudge":
-      return new NudgeAggregator(minInputs);
+    case "nudge": {
+      if (resolvedNudgeEpsilon === undefined) {
+        throw new Error("makeAggregator: nudge aggregator requires a resolved epsilon");
+      }
+      return new NudgeAggregator(minInputs, resolvedNudgeEpsilon.value, resolvedNudgeEpsilon.mode);
+    }
     case "median":
       return new MedianAggregator(minInputs);
   }

@@ -64,14 +64,14 @@ abstract class BaseValidator implements ValidatorAgent {
   // ── ValidatorAgent dispatch ──────────────────────────────────────────────
 
   produceInput(ctx: ProduceCtx): Submission | null {
-    return ctx.inputKind === "quote"
+    return ctx.inputKind.kind === "quote"
       ? this.produceQuoteInput(ctx)
       : this.produceNudgeInput(ctx);
   }
 
   produceInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
     if (inputs.length === 0) return [];
-    return ctx.inputKind === "quote"
+    return ctx.inputKind.kind === "quote"
       ? this.produceQuoteInherent(inputs, ctx)
       : this.produceNudgeInherent(inputs, ctx);
   }
@@ -138,10 +138,12 @@ export class MaliciousValidator extends BaseValidator {
   }
 
   protected produceNudgeInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
+    if (ctx.inputKind.kind !== "nudge") return []; // unreachable: dispatched by mode
+    const eps = ctx.inputKind.epsilon;
     const targetPrice = this.observe(ctx.blockIndex);
     const diff = targetPrice - ctx.lastPrice;
     const direction = diff >= 0 ? Bump.Down : Bump.Up; // wrong direction
-    const needed = Math.min(Math.round(Math.abs(diff) / ctx.epsilon), inputs.length);
+    const needed = Math.min(Math.round(Math.abs(diff) / eps), inputs.length);
     return pickInDirectionBumps(inputs, direction, needed);
   }
 }
@@ -227,6 +229,8 @@ export class MaximallyPushyNudgeValidator extends BaseValidator {
   // larger post-block divergence from the author's observation of real.
   // Ties go to UP arbitrarily (consistent, RNG-free).
   protected produceNudgeInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
+    if (ctx.inputKind.kind !== "nudge") return []; // unreachable: dispatched by mode
+    const eps = ctx.inputKind.epsilon;
     let upCount = 0, downCount = 0;
     for (const s of inputs) {
       if (s.kind !== "nudge") continue;
@@ -235,8 +239,8 @@ export class MaximallyPushyNudgeValidator extends BaseValidator {
     }
 
     const obs = this.observe(ctx.blockIndex);
-    const upPrice   = ctx.lastPrice + upCount   * ctx.epsilon;
-    const downPrice = ctx.lastPrice - downCount * ctx.epsilon;
+    const upPrice   = ctx.lastPrice + upCount   * eps;
+    const downPrice = ctx.lastPrice - downCount * eps;
     const upDiv   = Math.abs(upPrice   - obs);
     const downDiv = Math.abs(downPrice - obs);
     const direction = upDiv >= downDiv ? Bump.Up : Bump.Down;

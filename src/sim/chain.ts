@@ -1,4 +1,4 @@
-import type { BlockMetrics, EpsilonMode, Submission } from "../types.js";
+import type { BlockMetrics, Submission } from "../types.js";
 import type { ProduceCtx, ValidatorAgent } from "./validator.js";
 import type { PriceEndpoint } from "./price-endpoint.js";
 import type { Aggregator } from "./aggregator.js";
@@ -21,8 +21,6 @@ import type { Aggregator } from "./aggregator.js";
 export class Chain {
   block: number = 0;
   lastPrice: number;
-  epsilon: number;
-  epsilonMode: EpsilonMode;
 
   private validators: ValidatorAgent[];
   private endpoint: PriceEndpoint;
@@ -31,16 +29,12 @@ export class Chain {
 
   constructor(
     initialPrice: number,
-    epsilon: number,
-    epsilonMode: EpsilonMode,
     validators: ValidatorAgent[],
     endpoint: PriceEndpoint,
     rng: () => number,
     aggregator: Aggregator,
   ) {
     this.lastPrice = initialPrice;
-    this.epsilon = epsilon;
-    this.epsilonMode = epsilonMode;
     this.validators = validators;
     this.endpoint = endpoint;
     this.rng = rng;
@@ -52,15 +46,12 @@ export class Chain {
     const realPrice = this.endpoint.getRealPrice(blockIndex);
     const timestamp = this.endpoint.getTimestamp(blockIndex);
 
-    const effectiveEps = this.epsilonMode === "ratio"
-      ? this.lastPrice * this.epsilon
-      : this.epsilon;
-
+    // The aggregator owns per-block parameters (ε for nudge, nothing for
+    // median). Chain just asks for the variant and threads it through.
     const ctx: ProduceCtx = {
       lastPrice: this.lastPrice,
       blockIndex,
-      epsilon: effectiveEps,
-      inputKind: this.aggregator.inputKind,
+      inputKind: this.aggregator.inputKindFor(this.lastPrice),
       validatorCount: this.validators.length,
     };
 
@@ -83,7 +74,6 @@ export class Chain {
       inputs,
       inherent,
       lastPrice: this.lastPrice,
-      epsilon: effectiveEps,
     });
     this.lastPrice = out.newPrice;
 
@@ -93,10 +83,9 @@ export class Chain {
     // have to renormalize when comparing blocks with different inherent sizes.
     let inherentTotal = 0;
     let inherentNonHonest = 0;
-    // Build per-block inherentVotes only for median-mode (quote-input) runs;
-    // nudge inherents are bumps, not value quotes, so the list would be
-    // meaningless. The aggregator's inputKind tells us which mode we're in.
-    const trackInherentVotes = this.aggregator.inputKind === "quote";
+    // Per-block inherentVotes is only meaningful for median-mode runs (nudge
+    // inherents are bumps, not value quotes — the list would be empty).
+    const trackInherentVotes = this.aggregator.mode === "median";
     const inherentVotes: BlockMetrics["inherentVotes"] = trackInherentVotes ? [] : undefined;
     for (const s of inherent) {
       inherentTotal++;

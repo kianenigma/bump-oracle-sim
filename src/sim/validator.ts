@@ -2,18 +2,20 @@ import { Bump } from "../types.js";
 import type { AggregatorMode, Submission, ValidatorParams, ValidatorPriceSource, ValidatorType } from "../types.js";
 import type { PriceEndpoint } from "./price-endpoint.js";
 
-/** What kind of input an aggregator wants this block. Plain nudge submits
- *  Up/Down bumps; quote submits absolute prices. */
-export type InputKind = "nudge" | "quote";
+/** What kind of input the aggregator expects this block. A tagged variant —
+ *  `nudge` carries the effective ε for this block, `quote` carries nothing.
+ *  Validators discriminate on `.kind` and access `.epsilon` only in the
+ *  nudge branch, so there is no `epsilon` field floating around in
+ *  quote-mode contexts. */
+export type InputKind =
+  | { kind: "nudge"; epsilon: number }
+  | { kind: "quote" };
 
 /** Per-block context handed to every produceInput / produceInherent call. */
 export interface ProduceCtx {
   lastPrice: number;
   blockIndex: number;
-  /** Effective epsilon for this block (already accounts for ratio mode).
-   *  Only meaningful in nudge mode; quote-mode validators ignore it. */
-  epsilon: number;
-  /** What kind of input the aggregator expects this block. */
+  /** Engine-mode tag carrying any mode-specific knobs for this block. */
   inputKind: InputKind;
   /** Total validator count this block. Available for any per-block
    *  bump-count math. */
@@ -58,10 +60,12 @@ export interface ValidatorConstructor {
 /**
  * Picks the integer n ∈ [0, maxBumps] closest to absDiff/ε (the inverse of the
  * plain-nudge update rule price' = lastPrice + n·ε). Ties prefer fewer bumps
- * to avoid flapping under jitter noise.
+ * to avoid flapping under jitter noise. Only meaningful in nudge mode; quote
+ * contexts return 0 (no bumps to schedule).
  */
 export function optimalBumpCount(absDiff: number, ctx: ProduceCtx, maxBumps: number): number {
-  const epsilon = ctx.epsilon;
+  if (ctx.inputKind.kind !== "nudge") return 0;
+  const epsilon = ctx.inputKind.epsilon;
   if (epsilon <= 0 || maxBumps <= 0) return 0;
   const base = Math.floor(absDiff / epsilon);
   if (base >= maxBumps) return maxBumps;
@@ -122,7 +126,7 @@ export class HonestValidator implements ValidatorAgent {
 
   produceInput(ctx: ProduceCtx): Submission {
     const price = this.observe(ctx.blockIndex);
-    if (ctx.inputKind === "nudge") {
+    if (ctx.inputKind.kind === "nudge") {
       return { kind: "nudge", validatorIndex: this.index, bump: price >= ctx.lastPrice ? Bump.Up : Bump.Down };
     }
     return { kind: "quote", validatorIndex: this.index, price };
@@ -130,7 +134,7 @@ export class HonestValidator implements ValidatorAgent {
 
   produceInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
     if (inputs.length === 0) return [];
-    if (ctx.inputKind === "quote") {
+    if (ctx.inputKind.kind === "quote") {
       return passThroughQuotes(inputs);
     }
     // Nudge mode: target the local price, pick optimal in-direction bumps.

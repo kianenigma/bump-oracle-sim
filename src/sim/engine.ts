@@ -99,8 +99,6 @@ export function runSimulation(
   }
 
   const resolvedMinInputs = aggregatorCfg.minInputs ?? defaultMinInputs(aggregatorCfg.kind, validatorCount);
-  const aggregator = makeAggregator(aggregatorCfg, validatorCount);
-  if (!quiet) console.log(`  Aggregator min inputs: ${resolvedMinInputs}/${validatorCount}`);
   let epsilon = 0;
   let epsilonMode: EpsilonMode = "abs";
   if (aggregatorCfg.kind === "nudge") {
@@ -108,6 +106,12 @@ export function runSimulation(
     epsilon = resolved.epsilon;
     epsilonMode = resolved.mode;
   }
+  const aggregator = makeAggregator(
+    aggregatorCfg,
+    validatorCount,
+    aggregatorCfg.kind === "nudge" ? { value: epsilon, mode: epsilonMode } : undefined,
+  );
+  if (!quiet) console.log(`  Aggregator min inputs: ${resolvedMinInputs}/${validatorCount}`);
 
   // Instantiate validators in group order. Each gets a unique index and a
   // mulberry32 derived from `seed + index + 1`.
@@ -129,7 +133,7 @@ export function runSimulation(
   }
 
   const initialPrice = pricePoints[0].price;
-  const chain = new Chain(initialPrice, epsilon, epsilonMode, validators, endpoint, rng, aggregator);
+  const chain = new Chain(initialPrice, validators, endpoint, rng, aggregator);
 
   // Run simulation with incremental summary computation.
   const totalBlocks = endpoint.totalBlocks;
