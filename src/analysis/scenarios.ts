@@ -93,29 +93,52 @@ export type ScenarioFn = (
 ) => Promise<SimulationResult[]>;
 
 // ── Helpers used by every scenario ──────────────────────────────────────────
+//
+// `formatScenarioLabel` produces the canonical compact label every scenario
+// uses. Format: `<engine> | <mix> [suffix]`, where:
+//   <engine>   nudge:<ε>      or median[:min=<N>]
+//   <ε>        "auto" | "r=<pct>%" (ratio mode) | numeric (scientific when
+//              |ε| < 1e-3 for compactness, fixed otherwise)
+//   <mix>      "honest" (100% honest) | comma-joined "N% type" list
+//   [suffix]   optional free-form tag (e.g. "(2x)" for ε-sweep variants)
+// The function is exported so other code paths (CSV writers, summaries,
+// future analysis tools) can produce identical labels without duplication.
 
-/** One canonical label format every scenario uses: `[engine=<X>] [mix=<Y>]`. */
-function engineLabel(cfg: AggregatorConfig): string {
-  if (cfg.kind === "nudge") {
-    const eps = cfg.epsilon;
-    const epsStr =
-      eps === "auto"                                       ? "auto"
-    : typeof eps === "object" && "ratio" in eps            ? `ratio=${(eps.ratio * 100).toFixed(4)}%`
-    : (eps as number).toFixed(6);
-    return `nudge(ε=${epsStr})`;
-  }
-  const parts: string[] = [];
-  if (cfg.minInputs !== undefined) parts.push(`min=${cfg.minInputs}`);
-  return parts.length ? `median(${parts.join(",")})` : "median";
+function formatEpsilon(eps: EpsilonSpec): string {
+  if (eps === "auto") return "auto";
+  if (typeof eps === "object" && "ratio" in eps) return `r=${(eps.ratio * 100).toFixed(4)}%`;
+  const n = eps as number;
+  return Math.abs(n) >= 1e-3 ? n.toFixed(4) : n.toExponential(2);
 }
 
-function mixLabel(specs: GroupSpec[], validatorCount: number, priceSource: ValidatorPriceSource): string {
+function formatEngine(cfg: AggregatorConfig): string {
+  if (cfg.kind === "nudge") return `nudge:${formatEpsilon(cfg.epsilon)}`;
+  return cfg.minInputs !== undefined ? `median:min=${cfg.minInputs}` : "median";
+}
+
+function formatMix(
+  specs: GroupSpec[],
+  validatorCount: number,
+  priceSource: ValidatorPriceSource,
+): string {
   return specs.length === 0
-    ? "100% honest"
+    ? "honest"
     : formatValidators(buildValidators(validatorCount, specs, priceSource));
 }
 
-/** Build a SimulationConfig with the canonical `[engine=…] [mix=…]` label. */
+/** Single source of truth for scenario labels. Compact, reuseable. */
+export function formatScenarioLabel(
+  aggregator: AggregatorConfig,
+  specs: GroupSpec[],
+  validatorCount: number,
+  priceSource: ValidatorPriceSource,
+  suffix?: string,
+): string {
+  const base = `${formatEngine(aggregator)} | ${formatMix(specs, validatorCount, priceSource)}`;
+  return suffix ? `${base} ${suffix}` : base;
+}
+
+/** Build a SimulationConfig with the canonical label. */
 function makeConfig(
   ctx: ScenarioCtx,
   specs: GroupSpec[],
@@ -127,7 +150,6 @@ function makeConfig(
 ): SimulationConfig {
   const validators = buildValidators(ctx.validatorCount, specs, ctx.priceSource);
   const aggregator = aggregatorOverride ?? ctx.aggregator;
-  const baseLabel = `[engine=${engineLabel(aggregator)}] [mix=${mixLabel(specs, ctx.validatorCount, ctx.priceSource)}]`;
   return {
     startDate: dateRange?.startDate ?? ctx.startDate,
     endDate:   dateRange?.endDate   ?? ctx.endDate,
@@ -135,7 +157,7 @@ function makeConfig(
     convergenceThreshold: ctx.convergenceThreshold,
     realPrice: ctx.realPrice,
     aggregator,
-    label: labelSuffix ? `${baseLabel} ${labelSuffix}` : baseLabel,
+    label: formatScenarioLabel(aggregator, specs, ctx.validatorCount, ctx.priceSource, labelSuffix),
     validators,
   };
 }
@@ -457,12 +479,6 @@ export const scenarios: Record<string, ScenarioFn> = {
     console.log(`\n[Scenario: nudge-velocity]`);
     const baseAgg: AggregatorConfig = { kind: "nudge", epsilon: ctx.defaultEpsilon };
 
-    const upOnly: VelocityConfig = {
-      up:   { nextEpsilonCoefficient: (r) => r >= 1.0 ? 2.0 : 1.0,
-              agreementGate:          (r) => r >= 0.8 },
-      down: { nextEpsilonCoefficient: ()  => 1.0,
-              agreementGate:          ()  => false },
-    };
     const bidirectional: VelocityConfig = {
       up:   { nextEpsilonCoefficient: (r) => r >= 1.0 ? 2.0 : 1.0,
               agreementGate:          (r) => r >= 0.8 },
@@ -472,7 +488,6 @@ export const scenarios: Record<string, ScenarioFn> = {
 
     const configs: SimulationConfig[] = [
       makeConfig(ctx, [], baseAgg, "(baseline, no velocity)"),
-      makeConfig(ctx, [], { ...baseAgg, velocity: upOnly },        "(velocity up-only)"),
       makeConfig(ctx, [], { ...baseAgg, velocity: bidirectional }, "(velocity bidirectional)"),
     ];
     return runBatch(configs, priceSource, outputDir, threadCount);
