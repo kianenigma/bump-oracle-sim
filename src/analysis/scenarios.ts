@@ -152,7 +152,7 @@ function makeConfig(
   const aggregator = aggregatorOverride ?? ctx.aggregator;
   return {
     startDate: dateRange?.startDate ?? ctx.startDate,
-    endDate:   dateRange?.endDate   ?? ctx.endDate,
+    endDate: dateRange?.endDate ?? ctx.endDate,
     seed: ctx.seed,
     convergenceThreshold: ctx.convergenceThreshold,
     realPrice: ctx.realPrice,
@@ -433,7 +433,7 @@ const RESEARCH_MIXES: Record<string, number>[] = [
  */
 const ENTIRE_VENUES_HISTORY = {
   startDate: "2022-11-10",
-  endDate:   "2025-10-30",
+  endDate: "2025-10-30",
 };
 
 // ── Scenarios ───────────────────────────────────────────────────────────────
@@ -463,33 +463,60 @@ export const scenarios: Record<string, ScenarioFn> = {
     const range = ENTIRE_VENUES_HISTORY;
     console.log(`  Date range (intersection across all venues): ${range.startDate} → ${range.endDate}`);
     const configs: SimulationConfig[] = [
-      makeConfig(ctx, [], { kind: "nudge",  epsilon: ctx.defaultEpsilon }, undefined, range),
-      makeConfig(ctx, [], { kind: "median" },                                undefined, range),
+      makeConfig(ctx, [], { kind: "nudge", epsilon: ctx.defaultEpsilon }, undefined, range),
+      makeConfig(ctx, [], { kind: "median" }, undefined, range),
     ];
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  /** Demonstrates the nudge `velocity` ε-schedule. Three runs side-by-side:
-   *    1. baseline nudge (no velocity)
-   *    2. up-only velocity: 100% agreement → ×2 ε, confirmed at ≥ 80%
-   *    3. bidirectional: also ×0.5 ε when agreement collapses (≤ 30% → propose,
-   *       ≤ 50% → confirm)
-   *  All against 100% honest validators so the agreement signal is clean. */
   async "nudge-velocity"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: nudge-velocity]`);
     const baseAgg: AggregatorConfig = { kind: "nudge", epsilon: ctx.defaultEpsilon };
 
+    const baseEps =
+      ctx.defaultEpsilon === "auto" ? 0
+        : (typeof ctx.defaultEpsilon === "object" && "ratio" in ctx.defaultEpsilon)
+          ? ctx.defaultEpsilon.ratio
+          : (ctx.defaultEpsilon as number);
+    const maxMultiplier = 4
     const bidirectional: VelocityConfig = {
-      up:   { nextEpsilonCoefficient: (r) => r >= 1.0 ? 2.0 : 1.0,
-              agreementGate:          (r) => r >= 0.8 },
-      down: { nextEpsilonCoefficient: (r) => r <= 0.3 ? 0.5 : 1.0,
-              agreementGate:          (r) => r <= 0.5 },
+      up: {
+        nextEpsilonCoefficient: (r, prevEps) => {
+          if (r === 1.0) {
+            return prevEps / baseEps < maxMultiplier ? 2.0 : 1.0
+          } else {
+            return 1
+          }
+        },
+        agreementGate: (r) => r >= 1.0,
+      },
+      down: {
+        nextEpsilonCoefficient: (r, prevEps) => {
+          if (r === 1.0) {
+            return prevEps / baseEps < maxMultiplier ? 2.0 : 1.0
+          } else {
+            return 1
+          }
+        },
+        agreementGate: (r) => r >= 1.0,
+      },
     };
 
-    const configs: SimulationConfig[] = [
-      makeConfig(ctx, [], baseAgg, "(baseline, no velocity)"),
-      makeConfig(ctx, [], { ...baseAgg, velocity: bidirectional }, "(velocity bidirectional)"),
+    // Validator mixes swept against both baseline-nudge and velocity-nudge:
+    // 100% honest plus 10/33/49% pushy. Each mix gives a (baseline, velocity)
+    // pair so the velocity ε-schedule can be compared head-to-head with the
+    // fixed-ε aggregator under the same attacker pressure.
+    const mixes: GroupSpec[][] = [
+      [],
+      [{ type: "pushy-max", fraction: 0.10 }],
+      [{ type: "pushy-max", fraction: 0.33 }],
+      [{ type: "pushy-max", fraction: 0.49 }],
     ];
+    const configs: SimulationConfig[] = [];
+    for (const specs of mixes) {
+      configs.push(makeConfig(ctx, specs, baseAgg,                                    "(baseline)"));
+      configs.push(makeConfig(ctx, specs, { ...baseAgg, velocity: bidirectional },    "(velocity)"));
+    }
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 

@@ -172,7 +172,7 @@ export class NudgeAggregator implements Aggregator {
       ctx.newPrice > ctx.oldPrice ? "up" :
       ctx.newPrice < ctx.oldPrice ? "down" : null;
     if (direction === null) return; // flat block — no proposal
-    const coeff = this.velocity[direction].nextEpsilonCoefficient(agreementRate);
+    const coeff = this.velocity[direction].nextEpsilonCoefficient(agreementRate, this.epsilon);
     if (coeff !== 1) {
       this.pendingChange = { direction, coefficient: coeff };
     }

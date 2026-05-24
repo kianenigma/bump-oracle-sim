@@ -59,9 +59,16 @@ export type EpsilonMode = "abs" | "ratio";
 // JSON-cloned, so velocity-enabled scenarios run on the main thread (the
 // worker pool drops them silently).
 export interface VelocityPolicy {
-  /** End-of-block-N hook. Agreement rate ∈ [0, 1] = |Σ bumps| / inherentSize.
-   *  Return value is a multiplier on the current ε; 1.0 = no proposed change. */
-  nextEpsilonCoefficient: (agreementRate: number) => number;
+  /** End-of-block-N hook. Inputs:
+   *    - `agreementRate` ∈ [0, 1] = |Σ bumps| / inherentSize for the block
+   *      that just ended.
+   *    - `previousEpsilon` — ε currently in effect (the value the returned
+   *      coefficient will multiply). Same units as the aggregator's stored
+   *      ε: an absolute step when `epsilonMode === "abs"`, a per-bump
+   *      fraction of price when `epsilonMode === "ratio"`. Lets the policy
+   *      cap growth, taper near a floor, scale jumps by current ε, etc.
+   *  Returns a multiplier; 1.0 = no proposed change. */
+  nextEpsilonCoefficient: (agreementRate: number, previousEpsilon: number) => number;
   /** End-of-block-(N+1) confirmation. True activates the candidate from N. */
   agreementGate: (agreementRate: number) => boolean;
 }
