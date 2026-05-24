@@ -30,7 +30,7 @@ import { loadPriceSource } from "./data/source.js";
 import { runSimulation } from "./sim/engine.js";
 import { ChunkWriter, CsvWriter, combineSinks, writeIndex, loadIndex, scenarioDirName } from "./viz/writer.js";
 import { startServer } from "./viz/server.js";
-import { scenarios, listScenarios, type ScenarioCtx } from "./analysis/scenarios.js";
+import { scenarios, listScenarios, SCENARIO_DATE_RANGES, type ScenarioCtx } from "./analysis/scenarios.js";
 import { loadCriteria } from "./analysis/research-criteria.js";
 import { generateReport } from "./analysis/research-report.js";
 
@@ -419,6 +419,19 @@ if (realPrice.kind === "synthetic") {
 let startDate = args["start-date"]!;
 let endDate = args["end-date"]!;
 const seedForSource = parseInt(args.seed!);
+
+// Some scenarios pin a specific date range (e.g. the all-venues intersection
+// window). Honor that pin BEFORE loading price data, otherwise the price
+// source is fetched for the wrong window and the scenario's date-range
+// override on each SimulationConfig only changes labels — not block counts.
+if (args.scenario && SCENARIO_DATE_RANGES[args.scenario]) {
+  const pinned = SCENARIO_DATE_RANGES[args.scenario];
+  if (startDate !== pinned.startDate || endDate !== pinned.endDate) {
+    console.log(`\nScenario "${args.scenario}" pins date range to ${pinned.startDate} → ${pinned.endDate} (ignoring CLI --start-date/--end-date)`);
+  }
+  startDate = pinned.startDate;
+  endDate   = pinned.endDate;
+}
 
 if (realPrice.kind === "candles") {
   console.log(`\nFetching DOT/USDT data (candles): ${startDate} to ${endDate}`);

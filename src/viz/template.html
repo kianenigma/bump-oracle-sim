@@ -66,7 +66,36 @@
     #chart-tab { display: flex; flex-direction: column; min-height: 0; }
     #chart-tab.hidden, #stats-tab.hidden { display: none !important; }
     #price-chart { flex: 3; position: relative; min-height: 0; }
+
+    /* Footer bar: cross-venue dispersion readout. Only visible when the
+       loaded .simdata exposes 2+ venue lines. */
+    #venue-divergence-footer {
+      flex-shrink: 0;
+      display: none;
+      align-items: center;
+      gap: 12px;
+      padding: 6px 12px;
+      border-top: 1px solid var(--border);
+      background: var(--bg-surface);
+      font-size: 11px;
+      color: var(--text-muted);
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    #venue-divergence-footer.visible { display: flex; }
+    #venue-divergence-footer .vd-label { color: var(--text-dim); font-weight: 500; }
+    #venue-divergence-footer .vd-value { color: var(--text); font-weight: 600; }
+    #venue-divergence-footer .vd-hint  { color: var(--text-dim); margin-left: auto; font-size: 10px; }
     #deviation-chart { flex: 1; border-top: 1px solid var(--border); position: relative; min-height: 0; }
+    /* Cross-venue divergence time series. Only rendered when ≥ 2 venue lines
+       are loaded; toggles its `visible` class together with the footer. */
+    #venue-divergence-chart {
+      flex: 1;
+      border-top: 1px solid var(--border);
+      position: relative;
+      min-height: 0;
+      display: none;
+    }
+    #venue-divergence-chart.visible { display: block; }
     .chart-label { position: absolute; top: 8px; left: 12px; font-size: 11px; color: var(--text-muted); z-index: 2; pointer-events: none; font-weight: 500; letter-spacing: 0.3px; }
 
     .drag-select { position: fixed; background: rgba(128,128,128,0.12); border-left: 2px solid rgba(128,128,128,0.6); border-right: 2px solid rgba(128,128,128,0.6); pointer-events: none; z-index: 50; }
@@ -267,6 +296,12 @@
     <div id="chart-tab" style="flex:1;min-width:0;">
       <div id="price-chart"><span class="chart-label">Price</span></div>
       <div id="deviation-chart"><span class="chart-label">Deviation %</span></div>
+      <div id="venue-divergence-chart"><span class="chart-label">Cross-venue CoV %</span></div>
+      <div id="venue-divergence-footer">
+        <span class="vd-label">Cross-venue divergence (CoV%):</span>
+        <span class="vd-value" id="vd-value">—</span>
+        <span class="vd-hint" id="vd-hint">averaged over visible window</span>
+      </div>
     </div>
 
     <div id="stats-tab" class="hidden" style="flex:1;min-width:0;">
@@ -368,6 +403,7 @@
       };
       priceChart.applyOptions(opts);
       devChart.applyOptions(opts);
+      vdChart.applyOptions(opts);
     }
 
     document.getElementById('theme-toggle').addEventListener('click', () => {
@@ -394,6 +430,7 @@
         if (currentTab === 'chart') {
           priceChart.applyOptions({ width: priceChartEl.clientWidth, height: priceChartEl.clientHeight });
           devChart.applyOptions({ width: devChartEl.clientWidth, height: devChartEl.clientHeight });
+          vdChart.applyOptions({ width: vdChartEl.clientWidth, height: vdChartEl.clientHeight });
         }
         if (currentTab === 'research' && cachedResearchData && cachedResearchData.interpolated) {
           drawFitChart(cachedResearchData.ranking, cachedResearchData.interpolated);
@@ -1167,6 +1204,17 @@
       timeScale: { borderColor: t.border, timeVisible: true, secondsVisible: false },
     });
 
+    // Cross-venue divergence chart: one line series, per-block CoV %.
+    const vdChartEl = document.getElementById('venue-divergence-chart');
+    const vdChart = LightweightCharts.createChart(vdChartEl, {
+      layout: { background: { color: t.bg }, textColor: t.text },
+      grid: { vertLines: { color: t.grid }, horzLines: { color: t.grid } },
+      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      rightPriceScale: { borderColor: t.border },
+      timeScale: { borderColor: t.border, timeVisible: true, secondsVisible: false },
+    });
+    let vdSeries = null; // single line series, recreated on each rebuild
+
     // ── Series management ──
     let activePriceSeries = [];
     let activeDevSeries = [];
@@ -1361,10 +1409,13 @@
         if (fitContent) {
           priceChart.timeScale().fitContent();
           devChart.timeScale().fitContent();
+          vdChart.timeScale().fitContent();
         } else if (savedTimeRange) {
           priceChart.timeScale().setVisibleRange(savedTimeRange);
           devChart.timeScale().setVisibleRange(savedTimeRange);
+          vdChart.timeScale().setVisibleRange(savedTimeRange);
         }
+        refreshVenueDivergence();
 
         transitionLock = false;
 
@@ -1618,18 +1669,123 @@
     // ── Sync charts ──
     let syncing = false;
     let transitionLock = false;
+    function syncTo(target, range) {
+      if (!range) return;
+      if (target === priceChart) priceChart.timeScale().setVisibleLogicalRange(range);
+      if (target === devChart)   devChart.timeScale().setVisibleLogicalRange(range);
+      if (target === vdChart)    vdChart.timeScale().setVisibleLogicalRange(range);
+    }
     priceChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
       if (syncing || transitionLock || !range) return;
       syncing = true;
-      devChart.timeScale().setVisibleLogicalRange(range);
+      syncTo(devChart, range);
+      syncTo(vdChart, range);
       syncing = false;
+      recomputeVenueDivergence();
     });
     devChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
       if (syncing || transitionLock || !range) return;
       syncing = true;
-      priceChart.timeScale().setVisibleLogicalRange(range);
+      syncTo(priceChart, range);
+      syncTo(vdChart, range);
       syncing = false;
+      recomputeVenueDivergence();
     });
+    vdChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
+      if (syncing || transitionLock || !range) return;
+      syncing = true;
+      syncTo(priceChart, range);
+      syncTo(devChart, range);
+      syncing = false;
+      recomputeVenueDivergence();
+    });
+
+    // ── Cross-venue divergence: per-block series cache ──
+    // Computed once per data refresh from lastServerData.venues. Drives both
+    // the time-series chart (full series, fixed) and the footer single number
+    // (re-averaged over the visible window on every pan/zoom).
+    let vdSeriesData = []; // { time, value }[] across the entire loaded dataset
+
+    function buildVenueDivergenceSeries() {
+      vdSeriesData = [];
+      if (!lastServerData || !lastServerData.venues) return;
+      const venues = Object.keys(lastServerData.venues);
+      if (venues.length < 2) return;
+      // All venue lines share the server's downsampled x-grid, so we can
+      // align them by array index. Each entry is { time, value }.
+      const refLine = lastServerData.venues[venues[0]];
+      if (!refLine) return;
+      for (let i = 0; i < refLine.length; i++) {
+        const t = refLine[i].time;
+        let sum = 0, n = 0;
+        const vals = [];
+        for (const v of venues) {
+          const ln = lastServerData.venues[v];
+          const p = ln && ln[i];
+          if (!p || typeof p.value !== 'number') continue;
+          sum += p.value; n++; vals.push(p.value);
+        }
+        if (n < 2) continue;
+        const mean = sum / n;
+        if (mean === 0) continue;
+        let sumSq = 0;
+        for (const x of vals) sumSq += (x - mean) * (x - mean);
+        const std = Math.sqrt(sumSq / n);
+        vdSeriesData.push({ time: t, value: (std / mean) * 100 });
+      }
+    }
+
+    function renderVenueDivergenceChart() {
+      const chartEl = document.getElementById('venue-divergence-chart');
+      // Hide the chart entirely when there's no multi-venue data to show.
+      if (vdSeriesData.length === 0) {
+        chartEl.classList.remove('visible');
+        if (vdSeries) { vdChart.removeSeries(vdSeries); vdSeries = null; }
+        return;
+      }
+      chartEl.classList.add('visible');
+      vdChart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight });
+      if (vdSeries) { vdChart.removeSeries(vdSeries); vdSeries = null; }
+      vdSeries = vdChart.addLineSeries({
+        color: t.devColor || '#e6a05e',
+        lineWidth: 1,
+        priceLineVisible: false,
+        lastValueVisible: true,
+      });
+      vdSeries.setData(vdSeriesData);
+    }
+
+    // ── Footer (visible-window average) ──
+    // Coefficient of variation = stddev / mean × 100%, computed per-block
+    // across all venue lines, then averaged over the visible window. Hidden
+    // when the dataset has < 2 venues.
+    function recomputeVenueDivergence() {
+      const footer = document.getElementById('venue-divergence-footer');
+      const valueEl = document.getElementById('vd-value');
+      if (vdSeriesData.length === 0) {
+        footer.classList.remove('visible');
+        return;
+      }
+      footer.classList.add('visible');
+      const vr = priceChart.timeScale().getVisibleRange();
+      const from = vr ? vr.from : -Infinity;
+      const to   = vr ? vr.to   : Infinity;
+      let sum = 0, count = 0;
+      for (const p of vdSeriesData) {
+        if (p.time < from || p.time > to) continue;
+        sum += p.value;
+        count++;
+      }
+      valueEl.textContent = count > 0 ? `${(sum / count).toFixed(4)}%` : '—';
+    }
+
+    /** Called after a fresh data fetch — rebuilds the per-block series and
+     *  redraws both the chart and the footer. */
+    function refreshVenueDivergence() {
+      buildVenueDivergenceSeries();
+      renderVenueDivergenceChart();
+      recomputeVenueDivergence();
+    }
 
     function setVisibleRangeBoth(range) {
       transitionLock = true;
@@ -1879,10 +2035,12 @@
       if (currentTab === 'chart') {
         priceChart.applyOptions({ width: priceChartEl.clientWidth, height: priceChartEl.clientHeight });
         devChart.applyOptions({ width: devChartEl.clientWidth, height: devChartEl.clientHeight });
+        vdChart.applyOptions({ width: vdChartEl.clientWidth, height: vdChartEl.clientHeight });
       }
     });
     ro.observe(priceChartEl);
     ro.observe(devChartEl);
+    ro.observe(vdChartEl);
 
     // ── Drag-to-zoom ──
     function setupDragZoom(containerEl, chart) {

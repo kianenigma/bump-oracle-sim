@@ -12,7 +12,9 @@ import type { Aggregator } from "./aggregator.js";
  *      Author returns the block-inherent (subset selected to include).
  *   4. Chain hands the inherent to its aggregator (the runtime).
  *      Aggregator computes the new price.
- *   5. Deviation vs. real price (mean of venues by default) is recorded.
+ *   5. Chain notifies the aggregator via `onBlockEnd` so it can update any
+ *      per-run state (e.g. nudge's velocity-driven ε schedule).
+ *   6. Deviation vs. real price (mean of venues by default) is recorded.
  *
  * No carve-outs. Behaviors like "noop author freezes the chain" fall out
  * naturally because NoopValidator.produceInherent returns [] and the
@@ -70,12 +72,21 @@ export class Chain {
     const inherent = author.produceInherent(inputs, ctx);
 
     // 4. Aggregator (runtime) consumes the inherent → new price.
+    const oldPrice = this.lastPrice;
     const out = this.aggregator.apply({
       inputs,
       inherent,
-      lastPrice: this.lastPrice,
+      lastPrice: oldPrice,
     });
     this.lastPrice = out.newPrice;
+
+    // 5. End-of-block hook: aggregator updates any internal per-run state
+    // (e.g. nudge's velocity-based ε schedule).
+    this.aggregator.onBlockEnd({
+      oldPrice,
+      newPrice: out.newPrice,
+      inherent,
+    });
 
     // Inherent composition. Non-honest = any validator with isHonest === false
     // (malicious, pushy, pushy-max, noop, delayed, drift, withholder). The

@@ -12,6 +12,7 @@ import type {
   ValidatorParams,
   ValidatorPriceSource,
   ValidatorType,
+  VelocityConfig,
 } from "../types.js";
 import { DEFAULT_CONFIG, DEFAULT_PRICE_SOURCE, DEFAULT_VALIDATOR_COUNT } from "../config.js";
 import { runSimulation, type BlockSink } from "../sim/engine.js";
@@ -121,13 +122,15 @@ function makeConfig(
   aggregatorOverride?: AggregatorConfig,
   /** Optional extra label suffix (e.g. for sweep variant tagging). */
   labelSuffix?: string,
+  /** Optional date-range override; defaults to ctx.{start,end}Date. */
+  dateRange?: { startDate: string; endDate: string },
 ): SimulationConfig {
   const validators = buildValidators(ctx.validatorCount, specs, ctx.priceSource);
   const aggregator = aggregatorOverride ?? ctx.aggregator;
   const baseLabel = `[engine=${engineLabel(aggregator)}] [mix=${mixLabel(specs, ctx.validatorCount, ctx.priceSource)}]`;
   return {
-    startDate: ctx.startDate,
-    endDate: ctx.endDate,
+    startDate: dateRange?.startDate ?? ctx.startDate,
+    endDate:   dateRange?.endDate   ?? ctx.endDate,
     seed: ctx.seed,
     convergenceThreshold: ctx.convergenceThreshold,
     realPrice: ctx.realPrice,
@@ -204,6 +207,18 @@ async function runBatch(
   threadCount = 1,
 ): Promise<SimulationResult[]> {
   if (outputDir) mkdirSync(outputDir, { recursive: true });
+
+  // Velocity policies live as functions on the aggregator config; structured-
+  // clone (the worker postMessage codec) silently drops them. Force the run
+  // single-threaded when any config opts into velocity so the policies actually
+  // make it into the simulation.
+  const hasVelocity = configs.some(
+    (c) => c.aggregator?.kind === "nudge" && c.aggregator.velocity !== undefined,
+  );
+  if (hasVelocity && threadCount > 1) {
+    console.log(`  Velocity-enabled configs detected — forcing single-threaded run.`);
+    threadCount = 1;
+  }
 
   let results: SimulationResult[];
   let metas: (ScenarioMeta | undefined)[];
@@ -374,6 +389,31 @@ const RESEARCH_MIXES: Record<string, number>[] = [
   { drift: 0.33 },
 ];
 
+/**
+ * The intersection of per-venue trade-data availability — i.e. the window
+ * within which every one of the 6 venues (binance, bybit, coinbase, gate,
+ * kraken, okx) has at least 10% of daily 6s buckets populated with real
+ * trades. Re-derive with `bun run scripts/find-data-start.ts` after any
+ * fresh backfill. Consumed by `all-venues-honest`.
+ *
+ * Last updated: 2026-05-24 backfill run. Per-venue real-data ranges:
+ *   binance:   2020-08-19 → 2026-05-23
+ *   bybit:     2022-11-10 → 2026-05-23  (binds the intersection start)
+ *   coinbase:  2021-06-16 → 2026-05-23
+ *   gate:      2020-07-16 → 2026-04-30
+ *   kraken:    2020-08-18 → 2026-05-22
+ *   okx:       2021-09-01 → 2025-10-30  (binds the intersection end)
+ *
+ * NOTE: dates further back than the venue's listing day were cached as
+ * empty 14400-bucket placeholders by the backfill script — those are
+ * skipped by the "first-real-data" walker. The cache directory carries
+ * them but the simulator would see all-null venue prices on those days.
+ */
+const ENTIRE_VENUES_HISTORY = {
+  startDate: "2022-11-10",
+  endDate:   "2025-10-30",
+};
+
 // ── Scenarios ───────────────────────────────────────────────────────────────
 //
 // Every scenario emits configs labelled `[engine=<X>] [mix=<Y>]`. Pick a
@@ -389,6 +429,53 @@ export const scenarios: Record<string, ScenarioFn> = {
   async honest(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: honest]`);
     return runBatch([makeConfig(ctx, [])], priceSource, outputDir, threadCount);
+  },
+
+  /** 100% honest baseline across both aggregators (nudge + median), running
+   *  over the FULL window for which every venue has trade data. Date range
+   *  is the intersection of per-venue cached date ranges (see
+   *  `ENTIRE_VENUES_HISTORY` below). Pulls trade data from all 6 venues
+   *  with the cross-venue mean as the real price. */
+  async "entire-venue-history"(ctx, priceSource, outputDir, threadCount) {
+    console.log(`\n[Scenario: all-venues-honest]`);
+    const range = ENTIRE_VENUES_HISTORY;
+    console.log(`  Date range (intersection across all venues): ${range.startDate} → ${range.endDate}`);
+    const configs: SimulationConfig[] = [
+      makeConfig(ctx, [], { kind: "nudge",  epsilon: ctx.defaultEpsilon }, undefined, range),
+      makeConfig(ctx, [], { kind: "median" },                                undefined, range),
+    ];
+    return runBatch(configs, priceSource, outputDir, threadCount);
+  },
+
+  /** Demonstrates the nudge `velocity` ε-schedule. Three runs side-by-side:
+   *    1. baseline nudge (no velocity)
+   *    2. up-only velocity: 100% agreement → ×2 ε, confirmed at ≥ 80%
+   *    3. bidirectional: also ×0.5 ε when agreement collapses (≤ 30% → propose,
+   *       ≤ 50% → confirm)
+   *  All against 100% honest validators so the agreement signal is clean. */
+  async "nudge-velocity"(ctx, priceSource, outputDir, threadCount) {
+    console.log(`\n[Scenario: nudge-velocity]`);
+    const baseAgg: AggregatorConfig = { kind: "nudge", epsilon: ctx.defaultEpsilon };
+
+    const upOnly: VelocityConfig = {
+      up:   { nextEpsilonCoefficient: (r) => r >= 1.0 ? 2.0 : 1.0,
+              agreementGate:          (r) => r >= 0.8 },
+      down: { nextEpsilonCoefficient: ()  => 1.0,
+              agreementGate:          ()  => false },
+    };
+    const bidirectional: VelocityConfig = {
+      up:   { nextEpsilonCoefficient: (r) => r >= 1.0 ? 2.0 : 1.0,
+              agreementGate:          (r) => r >= 0.8 },
+      down: { nextEpsilonCoefficient: (r) => r <= 0.3 ? 0.5 : 1.0,
+              agreementGate:          (r) => r <= 0.5 },
+    };
+
+    const configs: SimulationConfig[] = [
+      makeConfig(ctx, [], baseAgg, "(baseline, no velocity)"),
+      makeConfig(ctx, [], { ...baseAgg, velocity: upOnly },        "(velocity up-only)"),
+      makeConfig(ctx, [], { ...baseAgg, velocity: bidirectional }, "(velocity bidirectional)"),
+    ];
+    return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
   /** engine=ctx.aggregator × {0, 10, 20, 30, 40, 49, 50}% malicious. */
@@ -580,6 +667,15 @@ export const scenarios: Record<string, ScenarioFn> = {
 export function listScenarios(): string[] {
   return Object.keys(scenarios);
 }
+
+/** Scenarios whose simulation logic is tied to a specific date range, e.g.
+ *  the all-venues intersection window. `main.ts` consults this map BEFORE
+ *  calling `loadPriceSource` and overrides the CLI `--start-date`/`--end-date`
+ *  flags so the loaded price data matches what the scenario will actually
+ *  use. */
+export const SCENARIO_DATE_RANGES: Record<string, { startDate: string; endDate: string }> = {
+  "all-venues-honest": ENTIRE_VENUES_HISTORY,
+};
 
 // Re-export for callers (main.ts) that need to spell the default ctx.
 export { DEFAULT_CONFIG, DEFAULT_PRICE_SOURCE, DEFAULT_VALIDATOR_COUNT };

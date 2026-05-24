@@ -45,8 +45,36 @@ export type EpsilonMode = "abs" | "ratio";
 //                                          Polkadot's 2/3-honest assumption,
 //                                          so the median is protected)
 // Defaults are resolved by the engine once it knows N.
+//
+// `velocity` (nudge only, scenario-file feature; not wired through the CLI):
+// optional pair of "ε-schedule" policies — one for blocks that pushed the
+// oracle UP, one for blocks that pushed it DOWN. Each policy declares:
+//   - `nextEpsilonCoefficient(agreementRate)` — at end of block N, returns a
+//     multiplier that becomes the *candidate* ε for the next change.
+//   - `agreementGate(agreementRate)` — at end of block N+1, returns whether
+//     to activate the candidate computed in N. If true, ε is multiplied by
+//     the stored coefficient and the change takes effect from N+2 onward.
+// Two-block confirmation: the rate that *proposes* a change is from one
+// block, the rate that *confirms* it is from the next. Functions can't be
+// JSON-cloned, so velocity-enabled scenarios run on the main thread (the
+// worker pool drops them silently).
+export interface VelocityPolicy {
+  /** End-of-block-N hook. Agreement rate ∈ [0, 1] = |Σ bumps| / inherentSize.
+   *  Return value is a multiplier on the current ε; 1.0 = no proposed change. */
+  nextEpsilonCoefficient: (agreementRate: number) => number;
+  /** End-of-block-(N+1) confirmation. True activates the candidate from N. */
+  agreementGate: (agreementRate: number) => boolean;
+}
+
+export interface VelocityConfig {
+  /** Policy applied when the block pushed the oracle price upward. */
+  up: VelocityPolicy;
+  /** Policy applied when the block pushed the oracle price downward. */
+  down: VelocityPolicy;
+}
+
 export type AggregatorConfig =
-  | { kind: "nudge"; epsilon: EpsilonSpec; minInputs?: number }
+  | { kind: "nudge"; epsilon: EpsilonSpec; minInputs?: number; velocity?: VelocityConfig }
   | { kind: "median"; minInputs?: number };
 
 export function aggregatorMode(cfg: AggregatorConfig): AggregatorMode {
