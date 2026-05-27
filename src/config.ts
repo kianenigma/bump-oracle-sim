@@ -14,7 +14,7 @@ export const ALL_VENUES: VenueId[] = ["binance", "kraken", "bybit", "gate", "okx
 // `priceSource` overrides it.
 export const DEFAULT_PRICE_SOURCE: ValidatorPriceSource = {
   kind: "random-venue",
-  jitterStdDev: 0.001,
+  jitterStdDev: 0,
 };
 
 // Defaults for the type-specific param keys. Engine fills these in when a

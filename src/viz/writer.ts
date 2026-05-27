@@ -243,12 +243,17 @@ export class CsvWriter {
       // medianValidatorType is only set when the aggregator is median-mode AND
       // priceUpdated; nudge mode and freeze blocks emit "-".
       const medType = m.medianValidatorType ?? "-";
-      // inherentVotes is only populated for median-mode runs (chain.ts skips
-      // it for nudge to keep memory bounded). Format `[(type, price), ...]`.
-      // Empty bracket "[]" for nudge mode and for blocks with no quotes.
+      // inherentVotes is populated for both aggregator modes. Median entries
+      // format as `(type, price)`; nudge entries as `(type, +1)` or `(type, -1)`.
+      // Empty bracket `[]` when the inherent had no submissions (e.g. a noop
+      // author dropped everything).
       let votes = "[]";
       if (m.inherentVotes && m.inherentVotes.length > 0) {
-        const parts = m.inherentVotes.map(v => `(${v.type}, ${v.price})`);
+        const parts = m.inherentVotes.map(v =>
+          v.kind === "quote"
+            ? `(${v.type}, ${v.price})`
+            : `(${v.type}, ${v.bump > 0 ? "+1" : "-1"})`,
+        );
         votes = `[${parts.join("; ")}]`;
       }
       // Wrap inherentVotes in double-quotes (escaping any internal quotes) so

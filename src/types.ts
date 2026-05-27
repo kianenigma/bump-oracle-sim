@@ -256,11 +256,16 @@ export interface BlockMetrics {
   /** Type of the validator at `medianValidatorIndex`. Only set under the same
    *  conditions. Used by the CSV and the chart tooltip. */
   medianValidatorType?: ValidatorType;
-  /** Per-block list of every quote in the inherent (only populated for
-   *  median-mode blocks; nudge mode leaves this undefined to avoid the
-   *  per-block memory cost). Used exclusively by the CSV writer; not
-   *  persisted to the chunked .simdata format. */
-  inherentVotes?: Array<{ type: ValidatorType; price: number }>;
+  /** Per-block list of every submission in the inherent — populated for both
+   *  median (quote) and nudge (bump) modes. Each entry is a discriminated
+   *  union: `{ kind: "quote", type, price }` or `{ kind: "nudge", type, bump }`,
+   *  where `bump` is the signed integer (Bump.Up = +1, Bump.Down = -1). Used
+   *  exclusively by the CSV writer; not persisted to the chunked .simdata
+   *  format. */
+  inherentVotes?: Array<
+    | { kind: "quote"; type: ValidatorType; price: number }
+    | { kind: "nudge"; type: ValidatorType; bump: Bump }
+  >;
   deviation: number; // absolute difference real - oracle
   deviationPct: number; // percentage deviation
 }

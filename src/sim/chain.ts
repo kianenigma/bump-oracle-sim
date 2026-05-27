@@ -94,16 +94,20 @@ export class Chain {
     // have to renormalize when comparing blocks with different inherent sizes.
     let inherentTotal = 0;
     let inherentNonHonest = 0;
-    // Per-block inherentVotes is only meaningful for median-mode runs (nudge
-    // inherents are bumps, not value quotes — the list would be empty).
-    const trackInherentVotes = this.aggregator.mode === "median";
-    const inherentVotes: BlockMetrics["inherentVotes"] = trackInherentVotes ? [] : undefined;
+    // Per-block inherentVotes is populated for BOTH aggregator modes so the
+    // CSV always carries the full per-block author selection. Median-mode
+    // entries carry `price`; nudge-mode entries carry `bump` (±1). Cost is
+    // O(inherentSize) per block, which is the same scan we're already doing
+    // for the count totals.
+    const inherentVotes: BlockMetrics["inherentVotes"] = [];
     for (const s of inherent) {
       inherentTotal++;
       const v = this.validators[s.validatorIndex];
       if (!v.isHonest) inherentNonHonest++;
-      if (inherentVotes && s.kind === "quote") {
-        inherentVotes.push({ type: v.type, price: s.price });
+      if (s.kind === "quote") {
+        inherentVotes.push({ kind: "quote", type: v.type, price: s.price });
+      } else if (s.kind === "nudge") {
+        inherentVotes.push({ kind: "nudge", type: v.type, bump: s.bump });
       }
     }
     const inherentNonHonestPct = inherentTotal === 0 ? 0 : (inherentNonHonest / inherentTotal) * 100;

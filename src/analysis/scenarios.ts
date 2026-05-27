@@ -681,10 +681,9 @@ export const scenarios: Record<string, ScenarioFn> = {
     console.log(`\n[Scenario: aggregator-comparison]`);
     const aggregators: AggregatorConfig[] = [
       nudgeAgg(ctx),
-      { kind: "median", minInputs: 0 },
       { kind: "median", minInputs: Math.floor(2 * ctx.validatorCount / 3) },
     ];
-    const adversaryTypes: Exclude<ValidatorType, "honest">[] = ["malicious", "pushy", "noop", "drift"];
+    const adversaryTypes: Exclude<ValidatorType, "honest">[] = ["malicious", "pushy", "pushy-max", "noop", "drift"];
     const fractions = [0.10, 0.33, 0.49, 0.5];
 
     const configs: SimulationConfig[] = [];

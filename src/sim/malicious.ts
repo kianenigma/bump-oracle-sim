@@ -130,7 +130,7 @@ export class MaliciousValidator extends BaseValidator {
     // Keep quotes on the wrong side of lastPrice.
     const out: Submission[] = [];
     for (const s of inputs) {
-      if (s.kind !== "quote") continue;
+      if (s.kind !== "quote") { throw new Error("Expected quote submissions in produceQuoteInherent"); };
       const wrongSide = realDir === 1 ? s.price < ctx.lastPrice : s.price > ctx.lastPrice;
       if (wrongSide) out.push(s);
     }
@@ -138,13 +138,13 @@ export class MaliciousValidator extends BaseValidator {
   }
 
   protected produceNudgeInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
-    if (ctx.inputKind.kind !== "nudge") return []; // unreachable: dispatched by mode
+    if (ctx.inputKind.kind !== "nudge") throw new Error("Expected nudge submissions in produceNudgeInherent");
     const eps = ctx.inputKind.epsilon;
     const targetPrice = this.observe(ctx.blockIndex);
     const diff = targetPrice - ctx.lastPrice;
     const direction = diff >= 0 ? Bump.Down : Bump.Up; // wrong direction
-    const needed = Math.min(Math.round(Math.abs(diff) / eps), inputs.length);
-    return pickInDirectionBumps(inputs, direction, needed);
+    // put all the bumps that are in the wrong direction
+    return inputs.filter(s => s.kind === "nudge" && s.bump === direction);
   }
 }
 
@@ -229,11 +229,11 @@ export class MaximallyPushyNudgeValidator extends BaseValidator {
   // larger post-block divergence from the author's observation of real.
   // Ties go to UP arbitrarily (consistent, RNG-free).
   protected produceNudgeInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
-    if (ctx.inputKind.kind !== "nudge") return []; // unreachable: dispatched by mode
+    if (ctx.inputKind.kind !== "nudge") throw new Error("Expected nudge submissions in produceNudgeInherent");
     const eps = ctx.inputKind.epsilon;
     let upCount = 0, downCount = 0;
     for (const s of inputs) {
-      if (s.kind !== "nudge") continue;
+      if (s.kind !== "nudge") throw new Error("Expected nudge submissions in produceNudgeInherent");
       if (s.bump === Bump.Up) upCount++;
       else if (s.bump === Bump.Down) downCount++;
     }
