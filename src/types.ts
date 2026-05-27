@@ -224,9 +224,15 @@ export interface ValidatorGroup {
 // A validator that wants to abstain returns `null` from `produceInput` (or
 // omits the entry from its `produceInherent` output) — there is no explicit
 // abstain submission kind in the protocol.
+//
+// Every submission carries its producer's `type` so the block author can
+// reason about who sent what — e.g. a cabal author can identify its fellow
+// cabal members in the gossip pool and override their votes when selecting
+// the inherent. The type is purely informational from the protocol's point
+// of view; the aggregator's price math ignores it.
 export type Submission =
-  | { kind: "nudge"; validatorIndex: number; bump: Bump }
-  | { kind: "quote"; validatorIndex: number; price: number };
+  | { kind: "nudge"; validatorIndex: number; type: ValidatorType; bump: Bump }
+  | { kind: "quote"; validatorIndex: number; type: ValidatorType; price: number };
 
 export interface BlockMetrics {
   block: number;

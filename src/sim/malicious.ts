@@ -79,11 +79,11 @@ abstract class BaseValidator implements ValidatorAgent {
 
 // ── Shared helpers ──────────────────────────────────────────────────────────
 
-const quote = (validatorIndex: number, price: number): Submission =>
-  ({ kind: "quote", validatorIndex, price });
+const quote = (validatorIndex: number, type: ValidatorType, price: number): Submission =>
+  ({ kind: "quote", validatorIndex, type, price });
 
-const nudge = (validatorIndex: number, bump: Bump): Submission =>
-  ({ kind: "nudge", validatorIndex, bump });
+const nudge = (validatorIndex: number, type: ValidatorType, bump: Bump): Submission =>
+  ({ kind: "nudge", validatorIndex, type, bump });
 
 /** Sign of real motion this block: +1 if observed ≥ lastPrice, else -1. */
 const realDirSign = (observed: number, lastPrice: number): 1 | -1 =>
@@ -103,6 +103,17 @@ function pickAllInDirectionBumps(inputs: Submission[], direction: Bump): Submiss
   return out;
 }
 
+function priceFromNudges(inputs: Submission[], eps: number, prevPrice: number): number {
+  let upUps = 0;
+  let upDowns = 0;
+  for (const s of inputs) {
+    if (s.kind !== "nudge") throw new Error("Expected nudge submissions in priceFromNudges");
+    if (s.bump === Bump.Up) upUps++;
+    else if (s.bump === Bump.Down) upDowns++;
+  }
+  return prevPrice + upUps * eps - upDowns * eps;
+}
+
 // ── MaliciousValidator ──────────────────────────────────────────────────────
 // Inverse strategy. Pushes price *away* from real.
 //   Nudge: emit the wrong direction; as author activate same-direction
@@ -116,12 +127,12 @@ export class MaliciousValidator extends BaseValidator {
   protected produceQuoteInput(ctx: ProduceCtx): Submission {
     const honest = this.observe(ctx.blockIndex);
     const dir = realDirSign(honest, ctx.lastPrice);
-    return quote(this.index, ctx.lastPrice - dir * ctx.lastPrice * this.params.maliciousQuoteBias);
+    return quote(this.index, this.type, ctx.lastPrice - dir * ctx.lastPrice * this.params.maliciousQuoteBias);
   }
 
   protected produceNudgeInput(ctx: ProduceCtx): Submission {
     const honest = this.observe(ctx.blockIndex);
-    return nudge(this.index, honest >= ctx.lastPrice ? Bump.Down : Bump.Up);
+    return nudge(this.index, this.type, honest >= ctx.lastPrice ? Bump.Down : Bump.Up);
   }
 
   protected produceQuoteInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
@@ -160,12 +171,12 @@ export class PushyMaliciousValidator extends BaseValidator {
   protected produceQuoteInput(ctx: ProduceCtx): Submission {
     const honest = this.observe(ctx.blockIndex);
     const dir = realDirSign(honest, ctx.lastPrice);
-    return quote(this.index, honest + dir * this.params.pushyQuoteBias * honest);
+    return quote(this.index, this.type, honest + dir * this.params.pushyQuoteBias * honest);
   }
 
   protected produceNudgeInput(ctx: ProduceCtx): Submission {
     const honest = this.observe(ctx.blockIndex);
-    return nudge(this.index, honest >= ctx.lastPrice ? Bump.Up : Bump.Down);
+    return nudge(this.index, this.type, honest >= ctx.lastPrice ? Bump.Up : Bump.Down);
   }
 
   protected produceQuoteInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
@@ -220,31 +231,40 @@ export class MaximallyPushyNudgeValidator extends BaseValidator {
   }
 
   protected produceNudgeInput(ctx: ProduceCtx): Submission {
+    // This is basically not relevant if we are the final author as well, we will override it based
+    // on the final inherent producer. For the sake of being maximally bad, we will move in the
+    // wrong direction, from our perspective.
     const honest = this.observe(ctx.blockIndex);
-    return nudge(this.index, honest >= ctx.lastPrice ? Bump.Up : Bump.Down);
+    return nudge(this.index, this.type, honest >= ctx.lastPrice ? Bump.Down : Bump.Up);
   }
 
-  // Author-side: count the Up and Down bumps available in gossip; simulate
-  // both "activate all Up" and "activate all Down"; pick whichever yields the
-  // larger post-block divergence from the author's observation of real.
-  // Ties go to UP arbitrarily (consistent, RNG-free).
   protected produceNudgeInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
     if (ctx.inputKind.kind !== "nudge") throw new Error("Expected nudge submissions in produceNudgeInherent");
     const eps = ctx.inputKind.epsilon;
-    let upCount = 0, downCount = 0;
-    for (const s of inputs) {
-      if (s.kind !== "nudge") throw new Error("Expected nudge submissions in produceNudgeInherent");
-      if (s.bump === Bump.Up) upCount++;
-      else if (s.bump === Bump.Down) downCount++;
-    }
 
+    // find the cluster count of validators that are of our type.
+    const ourCabal = inputs.filter(s => s.kind === "nudge" && s.type === this.type);
+    const cabalAllUp = ourCabal.map(s => nudge(s.validatorIndex, s.type, Bump.Up));
+    const cabalAllDown = ourCabal.map(s => nudge(s.validatorIndex, s.type, Bump.Down));
+
+    // extract the honest cluster submissions
+    const honestAllUp = inputs.filter(s => s.kind === "nudge" && s.type === "honest" && s.bump === Bump.Up);
+    const honestAllDown = inputs.filter(s => s.kind === "nudge" && s.type === "honest" && s.bump === Bump.Down);
+
+    // Calculate final price, if our entire cluster changes to Up, combined with honest cluster.
+    const upFinal = priceFromNudges(honestAllUp.concat(cabalAllUp), eps, ctx.lastPrice);
+    const downFinal = priceFromNudges(honestAllDown.concat(cabalAllDown), eps, ctx.lastPrice);
+
+    // See which one produces more deviation from the real price.
     const obs = this.observe(ctx.blockIndex);
-    const upPrice   = ctx.lastPrice + upCount   * eps;
-    const downPrice = ctx.lastPrice - downCount * eps;
-    const upDiv   = Math.abs(upPrice   - obs);
-    const downDiv = Math.abs(downPrice - obs);
-    const direction = upDiv >= downDiv ? Bump.Up : Bump.Down;
-    return pickAllInDirectionBumps(inputs, direction);
+    const upDiv = Math.abs(upFinal - obs);
+    const downDiv = Math.abs(downFinal - obs);
+
+    if (upDiv >= downDiv) {
+      return honestAllUp.concat(cabalAllUp);
+    } else {
+      return honestAllDown.concat(cabalAllDown);
+    }
   }
 }
 
@@ -262,7 +282,7 @@ export class NoopValidator extends BaseValidator {
 
   protected produceNudgeInput(ctx: ProduceCtx): Submission {
     const honest = this.observe(ctx.blockIndex);
-    return nudge(this.index, honest >= ctx.lastPrice ? Bump.Up : Bump.Down);
+    return nudge(this.index, this.type, honest >= ctx.lastPrice ? Bump.Up : Bump.Down);
   }
 
   protected produceQuoteInherent(_inputs: Submission[], _ctx: ProduceCtx): Submission[] {
@@ -288,12 +308,12 @@ export class DelayedValidator extends BaseValidator {
   }
 
   protected produceQuoteInput(ctx: ProduceCtx): Submission {
-    return quote(this.index, this.observeStale(ctx.blockIndex));
+    return quote(this.index, this.type, this.observeStale(ctx.blockIndex));
   }
 
   protected produceNudgeInput(ctx: ProduceCtx): Submission {
     const stale = this.observeStale(ctx.blockIndex);
-    return nudge(this.index, stale >= ctx.lastPrice ? Bump.Up : Bump.Down);
+    return nudge(this.index, this.type, stale >= ctx.lastPrice ? Bump.Up : Bump.Down);
   }
 
   protected produceQuoteInherent(inputs: Submission[], _ctx: ProduceCtx): Submission[] {
@@ -318,11 +338,11 @@ export class DriftValidator extends BaseValidator {
   readonly type: ValidatorType = "drift";
 
   protected produceQuoteInput(ctx: ProduceCtx): Submission {
-    return quote(this.index, ctx.lastPrice * (1 + this.params.driftQuoteStep));
+    return quote(this.index, this.type, ctx.lastPrice * (1 + this.params.driftQuoteStep));
   }
 
   protected produceNudgeInput(_ctx: ProduceCtx): Submission {
-    return nudge(this.index, Bump.Up);
+    return nudge(this.index, this.type, Bump.Up);
   }
 
   protected produceQuoteInherent(inputs: Submission[], _ctx: ProduceCtx): Submission[] {
@@ -368,7 +388,7 @@ export class WithholderValidator extends BaseValidator {
   protected produceNudgeInput(ctx: ProduceCtx): Submission | null {
     const observed = this.observe(ctx.blockIndex);
     if (this.suppressing(observed, ctx.lastPrice)) return null;
-    return nudge(this.index, observed >= ctx.lastPrice ? Bump.Up : Bump.Down);
+    return nudge(this.index, this.type, observed >= ctx.lastPrice ? Bump.Up : Bump.Down);
   }
 
   protected produceNudgeInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {

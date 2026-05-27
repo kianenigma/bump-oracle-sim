@@ -127,9 +127,9 @@ export class HonestValidator implements ValidatorAgent {
   produceInput(ctx: ProduceCtx): Submission {
     const price = this.observe(ctx.blockIndex);
     if (ctx.inputKind.kind === "nudge") {
-      return { kind: "nudge", validatorIndex: this.index, bump: price >= ctx.lastPrice ? Bump.Up : Bump.Down };
+      return { kind: "nudge", validatorIndex: this.index, type: this.type, bump: price >= ctx.lastPrice ? Bump.Up : Bump.Down };
     }
-    return { kind: "quote", validatorIndex: this.index, price };
+    return { kind: "quote", validatorIndex: this.index, type: this.type, price };
   }
 
   produceInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
