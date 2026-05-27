@@ -1,14 +1,33 @@
 import { Bump } from "../types.js";
-import type { AggregatorMode, Submission, ValidatorParams, ValidatorPriceSource, ValidatorType } from "../types.js";
+import type { AggregatorMode, Submission, ValidatorParams, ValidatorPriceSource, ValidatorType, VelocityConfig } from "../types.js";
 import type { PriceEndpoint } from "./price-endpoint.js";
 
 /** What kind of input the aggregator expects this block. A tagged variant —
- *  `nudge` carries the effective ε for this block, `quote` carries nothing.
- *  Validators discriminate on `.kind` and access `.epsilon` only in the
- *  nudge branch, so there is no `epsilon` field floating around in
- *  quote-mode contexts. */
+ *  `nudge` carries the effective ε for this block (and, optionally, the
+ *  velocity-schedule snapshot for authors that want to plan around future ε
+ *  changes); `quote` carries nothing. Validators discriminate on `.kind` and
+ *  access `.epsilon` only in the nudge branch, so there is no `epsilon`
+ *  field floating around in quote-mode contexts. */
 export type InputKind =
-  | { kind: "nudge"; epsilon: number }
+  | {
+      kind: "nudge";
+      epsilon: number;
+      /** Present iff the aggregator is running a velocity schedule. Read-only
+       *  snapshot of the schedule's per-block state. Authors that don't care
+       *  ignore this field; sophisticated authors can read `pendingChange` and
+       *  call `config.<dir>.agreementGate(rate)` to predict whether the
+       *  inherent they're about to build will fire or block the candidate. */
+      velocity?: {
+        /** Candidate coefficient proposed at end of the previous block,
+         *  awaiting this block's `agreementGate(rate)` check. `null` when no
+         *  candidate is pending. */
+        pendingChange: { direction: "up" | "down"; coefficient: number } | null;
+        /** The active velocity policy — gate predicates plus next-coefficient
+         *  proposers for up and down. Authors can simulate "what if I push
+         *  agreement to r?" by calling these directly. */
+        config: VelocityConfig;
+      };
+    }
   | { kind: "quote" };
 
 /** Per-block context handed to every produceInput / produceInherent call. */
@@ -17,8 +36,7 @@ export interface ProduceCtx {
   blockIndex: number;
   /** Engine-mode tag carrying any mode-specific knobs for this block. */
   inputKind: InputKind;
-  /** Total validator count this block. Available for any per-block
-   *  bump-count math. */
+  /** Total validator count this block. Available for any per-block */
   validatorCount: number;
 }
 

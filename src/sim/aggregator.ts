@@ -1,4 +1,4 @@
-import type { AggregatorConfig, EpsilonMode, Submission, VelocityConfig } from "../types.js";
+import { Bump, type AggregatorConfig, type EpsilonMode, type Submission, type VelocityConfig } from "../types.js";
 import type { InputKind } from "./validator.js";
 
 /**
@@ -120,7 +120,7 @@ export class NudgeAggregator implements Aggregator {
 
   constructor(minInputs: number, epsilon: number, epsilonMode: EpsilonMode, velocity?: VelocityConfig) {
     if (minInputs < 0) throw new Error(`nudge minInputs must be ≥ 0, got ${minInputs}`);
-    if (epsilon < 0)   throw new Error(`nudge epsilon must be ≥ 0, got ${epsilon}`);
+    if (epsilon < 0) throw new Error(`nudge epsilon must be ≥ 0, got ${epsilon}`);
     this.minInputs = minInputs;
     this.epsilon = epsilon;
     this.epsilonMode = epsilonMode;
@@ -134,7 +134,19 @@ export class NudgeAggregator implements Aggregator {
   }
 
   inputKindFor(lastPrice: number): InputKind {
-    return { kind: "nudge", epsilon: this.effectiveEpsilon(lastPrice) };
+    const eps = this.effectiveEpsilon(lastPrice);
+    // Only attach the velocity snapshot when a schedule is configured —
+    // keeps the cheap path cheap and the type's optional field meaningful
+    // for downstream `if (ctx.inputKind.velocity)` discrimination.
+    if (!this.velocity) return { kind: "nudge", epsilon: eps };
+    return {
+      kind: "nudge",
+      epsilon: eps,
+      velocity: {
+        pendingChange: this.pendingChange,
+        config: this.velocity,
+      },
+    };
   }
 
   /** Velocity schedule: two-block-confirmation ε update.
@@ -157,12 +169,16 @@ export class NudgeAggregator implements Aggregator {
       net += s.bump;
     }
     const agreementRate = Math.abs(net) / ctx.inherent.length;
+    const agreementDirection = net >= 0 ? "up" : "down";
 
     // Step 1: confirm/discard the previous block's candidate.
     if (this.pendingChange !== null) {
+      // there was a pending change, with `direction`. Only if the current agreement gate was also fulfilled with the same direction, then update epislon.
       const policy = this.velocity[this.pendingChange.direction];
-      if (policy.agreementGate(agreementRate)) {
+      if (policy.agreementGate(agreementRate) && this.pendingChange.direction === agreementDirection) {
         this.epsilon *= this.pendingChange.coefficient;
+      } else {
+        // TODO: replace with base-epsilon. The agreement gate was not fulfilled.
       }
       this.pendingChange = null;
     }
@@ -170,7 +186,7 @@ export class NudgeAggregator implements Aggregator {
     // Step 2: propose a new candidate from THIS block's direction.
     const direction: "up" | "down" | null =
       ctx.newPrice > ctx.oldPrice ? "up" :
-      ctx.newPrice < ctx.oldPrice ? "down" : null;
+        ctx.newPrice < ctx.oldPrice ? "down" : null;
     if (direction === null) return; // flat block — no proposal
     const coeff = this.velocity[direction].nextEpsilonCoefficient(agreementRate, this.epsilon);
     if (coeff !== 1) {
@@ -179,7 +195,7 @@ export class NudgeAggregator implements Aggregator {
   }
 
   apply(ctx: AggregatorContext): AggregateOutcome {
-    for (const s of ctx.inputs)   assertSubmissionKind(s, "nudge", "inputs",   this.mode);
+    for (const s of ctx.inputs) assertSubmissionKind(s, "nudge", "inputs", this.mode);
     for (const s of ctx.inherent) assertSubmissionKind(s, "nudge", "inherent", this.mode);
 
     // Gossip-volume metric (informational only; never gates minInputs).
@@ -228,7 +244,7 @@ export class MedianAggregator implements Aggregator {
   onBlockEnd(_ctx: BlockEndContext): void { /* deliberately empty */ }
 
   apply(ctx: AggregatorContext): AggregateOutcome {
-    for (const s of ctx.inputs)   assertSubmissionKind(s, "quote", "inputs",   this.mode);
+    for (const s of ctx.inputs) assertSubmissionKind(s, "quote", "inputs", this.mode);
     for (const s of ctx.inherent) assertSubmissionKind(s, "quote", "inherent", this.mode);
 
     const totalQuotes = ctx.inputs.length;
