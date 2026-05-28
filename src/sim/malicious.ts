@@ -34,6 +34,13 @@ abstract class BaseValidator implements ValidatorAgent {
   protected rng: () => number;
   protected priceSource: ValidatorPriceSource;
   protected params: Required<ValidatorParams>;
+  /** Set by velocity-aware subclasses inside `produceNudgeInherent` when
+   *  they decide the boost helps their objective. Read back through the
+   *  default `wantVelocityBoost` implementation below. Resets to `false`
+   *  at the start of every `produceNudgeInherent` so a stale value can't
+   *  leak across blocks. Subclasses that don't reason about velocity
+   *  leave this at its default `false`. */
+  protected wantedBoost = false;
 
   constructor(
     index: number,
@@ -74,6 +81,14 @@ abstract class BaseValidator implements ValidatorAgent {
     return ctx.inputKind.kind === "quote"
       ? this.produceQuoteInherent(inputs, ctx)
       : this.produceNudgeInherent(inputs, ctx);
+  }
+
+  /** Default `wantVelocityBoost` reads the `wantedBoost` stash. Subclasses
+   *  that opt in (`malicious`, `pushy`, `pushy-max`) set `this.wantedBoost`
+   *  to `true` inside their `produceNudgeInherent`. Subclasses that never
+   *  reason about velocity leave it `false` — they never trigger the boost. */
+  wantVelocityBoost(_inherent: Submission[], _ctx: ProduceCtx): boolean {
+    return this.wantedBoost;
   }
 }
 
@@ -150,12 +165,32 @@ export class MaliciousValidator extends BaseValidator {
 
   protected produceNudgeInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
     if (ctx.inputKind.kind !== "nudge") throw new Error("Expected nudge submissions in produceNudgeInherent");
-    const eps = ctx.inputKind.epsilon;
+    this.wantedBoost = false;
+
     const targetPrice = this.observe(ctx.blockIndex);
     const diff = targetPrice - ctx.lastPrice;
-    const direction = diff >= 0 ? Bump.Down : Bump.Up; // wrong direction
+    const wrongDir = diff >= 0 ? Bump.Down : Bump.Up;
+    const wrongDirStr: "up" | "down" = wrongDir === Bump.Up ? "up" : "down";
     // put all the bumps that are in the wrong direction
-    return inputs.filter(s => s.kind === "nudge" && s.bump === direction);
+    const wrongBumps = inputs.filter(s => s.kind === "nudge" && s.bump === wrongDir);
+
+    // Velocity opt-in: the boost amplifies the wrong-direction push, but
+    // only when proposal direction == wrong direction. Most
+    // of the time this blocks malicious because the proposal direction
+    // tracks recent consensus (which moves WITH real, while malicious
+    // moves AGAINST real). Opt in only when the with-boost outcome is
+    // strictly more divergent than without-boost.
+    const vel = ctx.inputKind.velocity;
+    if (vel?.pendingProposal && vel.pendingProposal.direction === wrongDirStr) {
+      const n = wrongBumps.length;
+      const wrongSign = wrongDir === Bump.Up ? 1 : -1;
+      const withoutPrice = ctx.lastPrice + wrongSign * n * vel.baseEpsilon;
+      const withPrice    = ctx.lastPrice + wrongSign * n * vel.baseEpsilon * vel.pendingProposal.coefficient;
+      if (Math.abs(withPrice - targetPrice) > Math.abs(withoutPrice - targetPrice)) {
+        this.wantedBoost = true;
+      }
+    }
+    return wrongBumps;
   }
 }
 
@@ -193,9 +228,31 @@ export class PushyMaliciousValidator extends BaseValidator {
   }
 
   protected produceNudgeInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
+    if (ctx.inputKind.kind !== "nudge") throw new Error("Expected nudge ctx in produceNudgeInherent");
+    this.wantedBoost = false;
+
     const targetPrice = this.observe(ctx.blockIndex);
     const direction = targetPrice >= ctx.lastPrice ? Bump.Up : Bump.Down;
-    return pickAllInDirectionBumps(inputs, direction);
+    const dirStr: "up" | "down" = direction === Bump.Up ? "up" : "down";
+    const bumps = pickAllInDirectionBumps(inputs, direction);
+
+    // Velocity opt-in: the boost amplifies pushy's overshoot. Pushy pushes
+    // in real's direction, which is also what `pendingProposal.direction`
+    // tends to be (the proposal tracks recent consensus). So M3 typically
+    // lets pushy through — this IS the tail attack the design
+    // acknowledges. Opt in iff the with-boost outcome is strictly farther
+    // from the observed real price.
+    const vel = ctx.inputKind.velocity;
+    if (vel?.pendingProposal && vel.pendingProposal.direction === dirStr) {
+      const n = bumps.length;
+      const sign = direction === Bump.Up ? 1 : -1;
+      const withoutPrice = ctx.lastPrice + sign * n * vel.baseEpsilon;
+      const withPrice    = ctx.lastPrice + sign * n * vel.baseEpsilon * vel.pendingProposal.coefficient;
+      if (Math.abs(withPrice - targetPrice) > Math.abs(withoutPrice - targetPrice)) {
+        this.wantedBoost = true;
+      }
+    }
+    return bumps;
   }
 }
 
@@ -240,7 +297,7 @@ export class MaximallyPushyNudgeValidator extends BaseValidator {
 
   protected produceNudgeInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
     if (ctx.inputKind.kind !== "nudge") throw new Error("Expected nudge submissions in produceNudgeInherent");
-    const eps = ctx.inputKind.epsilon;
+    this.wantedBoost = false;
 
     // find the cluster count of validators that are of our type.
     const ourCabal = inputs.filter(s => s.kind === "nudge" && s.type === this.type);
@@ -251,20 +308,49 @@ export class MaximallyPushyNudgeValidator extends BaseValidator {
     const honestAllUp = inputs.filter(s => s.kind === "nudge" && s.type === "honest" && s.bump === Bump.Up);
     const honestAllDown = inputs.filter(s => s.kind === "nudge" && s.type === "honest" && s.bump === Bump.Down);
 
-    // Calculate final price, if our entire cluster changes to Up, combined with honest cluster.
-    const upFinal = priceFromNudges(honestAllUp.concat(cabalAllUp), eps, ctx.lastPrice);
-    const downFinal = priceFromNudges(honestAllDown.concat(cabalAllDown), eps, ctx.lastPrice);
-
-    // See which one produces more deviation from the real price.
     const obs = this.observe(ctx.blockIndex);
-    const upDiv = Math.abs(upFinal - obs);
-    const downDiv = Math.abs(downFinal - obs);
+    const baseEps = ctx.inputKind.velocity?.baseEpsilon ?? ctx.inputKind.epsilon;
+    const vel = ctx.inputKind.velocity;
 
-    if (upDiv >= downDiv) {
-      return honestAllUp.concat(cabalAllUp);
-    } else {
-      return honestAllDown.concat(cabalAllDown);
+    // Enumerate up to 4 candidate (inherent, useBoost) configurations.
+    //   1. Up direction, no boost
+    //   2. Down direction, no boost
+    //   3. Up direction, with boost   (only if proposal.direction === "up")
+    //   4. Down direction, with boost (only if proposal.direction === "down")
+    type Candidate = { inherent: Submission[]; finalPrice: number; useBoost: boolean };
+    const upInherent = honestAllUp.concat(cabalAllUp);
+    const downInherent = honestAllDown.concat(cabalAllDown);
+    const candidates: Candidate[] = [
+      { inherent: upInherent,   finalPrice: priceFromNudges(upInherent,   baseEps, ctx.lastPrice), useBoost: false },
+      { inherent: downInherent, finalPrice: priceFromNudges(downInherent, baseEps, ctx.lastPrice), useBoost: false },
+    ];
+    if (vel?.pendingProposal) {
+      const boostedEps = baseEps * vel.pendingProposal.coefficient;
+      if (vel.pendingProposal.direction === "up") {
+        candidates.push({
+          inherent: upInherent,
+          finalPrice: priceFromNudges(upInherent, boostedEps, ctx.lastPrice),
+          useBoost: true,
+        });
+      } else {
+        candidates.push({
+          inherent: downInherent,
+          finalPrice: priceFromNudges(downInherent, boostedEps, ctx.lastPrice),
+          useBoost: true,
+        });
+      }
     }
+
+    // Pick the candidate with the largest |finalPrice - obs|. Ties go to
+    // earlier candidates (preferring no-boost on tie — conservative).
+    let best = candidates[0];
+    let bestDiv = Math.abs(best.finalPrice - obs);
+    for (let i = 1; i < candidates.length; i++) {
+      const div = Math.abs(candidates[i].finalPrice - obs);
+      if (div > bestDiv) { best = candidates[i]; bestDiv = div; }
+    }
+    this.wantedBoost = best.useBoost;
+    return best.inherent;
   }
 }
 

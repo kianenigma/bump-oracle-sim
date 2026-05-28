@@ -226,11 +226,16 @@ export function runSimulation(
 
   // Persist the resolved aggregator (concrete numeric epsilon, concrete
   // minInputs) so .simdata and the UI never have to re-resolve "auto" or
-  // the validator-count-dependent default.
+  // the validator-count-dependent default. The `epsilon` here is the
+  // configured base ε (resolveEpsilon happens before any block runs), not
+  // a transient currentEpsilon — so velocity-driven boosts don't leak
+  // into the persisted summary. Preserve `velocity` via spread so
+  // downstream consumers (in-memory only — functions don't survive JSON)
+  // can still inspect the policy.
   const resolvedEpsilon: EpsilonSpec = epsilonMode === "ratio" ? { ratio: epsilon } : epsilon;
   const resolvedAggregator: AggregatorConfig =
     aggregatorCfg.kind === "nudge"
-      ? { kind: "nudge", epsilon: resolvedEpsilon, minInputs: resolvedMinInputs }
+      ? { ...aggregatorCfg, epsilon: resolvedEpsilon, minInputs: resolvedMinInputs }
       : { ...aggregatorCfg, minInputs: resolvedMinInputs };
 
   return { config: { ...config, aggregator: resolvedAggregator }, summary };

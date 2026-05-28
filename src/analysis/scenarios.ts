@@ -473,33 +473,18 @@ export const scenarios: Record<string, ScenarioFn> = {
     console.log(`\n[Scenario: nudge-velocity]`);
     const baseAgg: AggregatorConfig = { kind: "nudge", epsilon: ctx.defaultEpsilon };
 
-    const baseEps =
-      ctx.defaultEpsilon === "auto" ? 0
-        : (typeof ctx.defaultEpsilon === "object" && "ratio" in ctx.defaultEpsilon)
-          ? ctx.defaultEpsilon.ratio
-          : (ctx.defaultEpsilon as number);
-    const maxMultiplier = 4
+    // Non-compounding: each block's ε lands on either `baseEpsilon` (no
+    // boost) or `baseEpsilon × maxMultiplier` (gate fired). The
+    // `baseEpsilon` arg to nextEpsilonCoefficient is unused here — the
+    // coefficient is a constant by-design, and any cap is implicit in
+    // that constant value.
+    const maxMultiplier = 4;
+    const proposeMaxOnFullConsensus = (r: number, _baseEps: number) =>
+      r === 1.0 ? maxMultiplier : 1.0;
+    const gateOnFullConsensus = (r: number) => r >= 1.0;
     const bidirectional: VelocityConfig = {
-      up: {
-        nextEpsilonCoefficient: (r, prevEps) => {
-          if (r === 1.0) {
-            return prevEps / baseEps < maxMultiplier ? 2.0 : 1.0
-          } else {
-            return 1
-          }
-        },
-        agreementGate: (r) => r >= 1.0,
-      },
-      down: {
-        nextEpsilonCoefficient: (r, prevEps) => {
-          if (r === 1.0) {
-            return prevEps / baseEps < maxMultiplier ? 2.0 : 1.0
-          } else {
-            return 1
-          }
-        },
-        agreementGate: (r) => r >= 1.0,
-      },
+      up:   { nextEpsilonCoefficient: proposeMaxOnFullConsensus, agreementGate: gateOnFullConsensus },
+      down: { nextEpsilonCoefficient: proposeMaxOnFullConsensus, agreementGate: gateOnFullConsensus },
     };
 
     // Validator mixes swept against both baseline-nudge and velocity-nudge:

@@ -3,28 +3,37 @@ import type { AggregatorMode, Submission, ValidatorParams, ValidatorPriceSource,
 import type { PriceEndpoint } from "./price-endpoint.js";
 
 /** What kind of input the aggregator expects this block. A tagged variant —
- *  `nudge` carries the effective ε for this block (and, optionally, the
- *  velocity-schedule snapshot for authors that want to plan around future ε
- *  changes); `quote` carries nothing. Validators discriminate on `.kind` and
- *  access `.epsilon` only in the nudge branch, so there is no `epsilon`
- *  field floating around in quote-mode contexts. */
+ *  `nudge` carries the effective ε for THIS block (always = base ε at
+ *  this point; the velocity boost, if any, is decided later in
+ *  `onBeforeApply` based on the author's inherent and opt-in choice).
+ *  `quote` carries nothing. Validators discriminate on `.kind` and access
+ *  `.epsilon` only in the nudge branch. */
 export type InputKind =
   | {
       kind: "nudge";
+      /** Per-bump step size advertised to all validators for this block.
+       *  Equal to `velocity.baseEpsilon` when a schedule is configured —
+       *  we hand validators the conservative pre-boost value. Authors
+       *  that opt into the boost reason via `velocity` directly and
+       *  compute bump counts using `baseEpsilon × coefficient`. */
       epsilon: number;
-      /** Present iff the aggregator is running a velocity schedule. Read-only
-       *  snapshot of the schedule's per-block state. Authors that don't care
-       *  ignore this field; sophisticated authors can read `pendingChange` and
-       *  call `config.<dir>.agreementGate(rate)` to predict whether the
-       *  inherent they're about to build will fire or block the candidate. */
+      /** Present iff the aggregator is running a velocity schedule.
+       *  Snapshot of the schedule's per-block state so the AUTHOR can
+       *  weigh the boost: predict the agreement rate their inherent will
+       *  produce, run `config[dir].agreementGate(rate)` to know if the
+       *  gate would fire, and pick the bump count + opt-in accordingly. */
       velocity?: {
-        /** Candidate coefficient proposed at end of the previous block,
-         *  awaiting this block's `agreementGate(rate)` check. `null` when no
-         *  candidate is pending. */
-        pendingChange: { direction: "up" | "down"; coefficient: number } | null;
-        /** The active velocity policy — gate predicates plus next-coefficient
-         *  proposers for up and down. Authors can simulate "what if I push
-         *  agreement to r?" by calling these directly. */
+        /** Immutable base ε for this run, scaled identically to the
+         *  top-level `epsilon` field above (i.e. `lastPrice × ratio` in
+         *  ratio mode, raw value in abs mode). Equal to `epsilon`. */
+        baseEpsilon: number;
+        /** Coefficient proposed at end of the previous block, awaiting
+         *  this block's gate decision. `null` when no proposal is
+         *  pending — the boost can't fire. */
+        pendingProposal: { direction: "up" | "down"; coefficient: number } | null;
+        /** Active velocity policy — gate predicates plus next-coefficient
+         *  proposers for up and down. Authors call these directly to
+         *  simulate "what if I push agreement to r?". */
         config: VelocityConfig;
       };
     }
@@ -59,6 +68,15 @@ export interface ValidatorAgent {
    *             selectively include — see TASKS.md §C.
    */
   produceInherent(inputs: Submission[], ctx: ProduceCtx): Submission[];
+
+  /** Optional. Invoked ONLY on the block author, after `produceInherent`
+   *  and before the aggregator's `apply`. Returns whether the author opts
+   *  to consume the pending velocity proposal this block. Validators that
+   *  don't implement this default to `false` — i.e. they never trigger
+   *  the velocity boost. The aggregator additionally enforces an M3
+   *  direction-match check and runs the gate predicate; opting in is a
+   *  necessary-but-not-sufficient condition. */
+  wantVelocityBoost?(inherent: Submission[], ctx: ProduceCtx): boolean;
 }
 
 /** Constructor contract every validator class satisfies. The static
@@ -78,18 +96,22 @@ export interface ValidatorConstructor {
 /**
  * Picks the integer n ∈ [0, maxBumps] closest to absDiff/ε (the inverse of the
  * plain-nudge update rule price' = lastPrice + n·ε). Ties prefer fewer bumps
- * to avoid flapping under jitter noise. Only meaningful in nudge mode; quote
- * contexts return 0 (no bumps to schedule).
+ * to avoid flapping under jitter noise.
  */
-export function optimalBumpCount(absDiff: number, ctx: ProduceCtx, maxBumps: number): number {
-  if (ctx.inputKind.kind !== "nudge") return 0;
-  const epsilon = ctx.inputKind.epsilon;
+export function optimalBumpCountFor(absDiff: number, epsilon: number, maxBumps: number): number {
   if (epsilon <= 0 || maxBumps <= 0) return 0;
   const base = Math.floor(absDiff / epsilon);
   if (base >= maxBumps) return maxBumps;
   const baseDev = absDiff - base * epsilon;
   const nextDev = (base + 1) * epsilon - absDiff;
   return nextDev < baseDev ? Math.min(base + 1, maxBumps) : base;
+}
+
+/** Convenience: pulls ε out of ctx.inputKind for the nudge branch and
+ *  delegates to `optimalBumpCountFor`. Returns 0 in quote contexts. */
+export function optimalBumpCount(absDiff: number, ctx: ProduceCtx, maxBumps: number): number {
+  if (ctx.inputKind.kind !== "nudge") return 0;
+  return optimalBumpCountFor(absDiff, ctx.inputKind.epsilon, maxBumps);
 }
 
 /** Default quote-mode author selection: pass every gossiped submission
@@ -124,6 +146,12 @@ export class HonestValidator implements ValidatorAgent {
   protected rng: () => number;
   protected priceSource: ValidatorPriceSource;
 
+  /** Set in `produceInherent` when honest picks the with-boost scenario as
+   *  the closer fit to its target diff. Read back in `wantVelocityBoost`.
+   *  Chain calls these two methods back-to-back on the same author, so the
+   *  cross-method stash is safe. */
+  private wantedBoost = false;
+
   constructor(
     index: number,
     endpoint: PriceEndpoint,
@@ -151,15 +179,44 @@ export class HonestValidator implements ValidatorAgent {
   }
 
   produceInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
+    // Clear stash for this block — honest defaults to "no boost".
+    this.wantedBoost = false;
+
     if (inputs.length === 0) return [];
     if (ctx.inputKind.kind === "quote") {
       return passThroughQuotes(inputs);
     }
-    // Nudge mode: target the local price, pick optimal in-direction bumps.
+    // Nudge mode: target the local price.
     const targetPrice = this.observe(ctx.blockIndex);
     const diff = targetPrice - ctx.lastPrice;
+    const absDiff = Math.abs(diff);
     const direction = diff >= 0 ? Bump.Up : Bump.Down;
-    const needed = optimalBumpCount(Math.abs(diff), ctx, inputs.length);
-    return pickInDirectionBumps(inputs, direction, needed);
+    const intentDir: "up" | "down" = direction === Bump.Up ? "up" : "down";
+
+    // Always compute the no-boost scenario.
+    const baseEps = ctx.inputKind.epsilon;
+    const nNoBoost = optimalBumpCountFor(absDiff, baseEps, inputs.length);
+    const errNoBoost = Math.abs(absDiff - nNoBoost * baseEps);
+
+    // Consider the with-boost scenario only if a proposal is pending AND
+    // its direction matches honest's intent (M3 — the aggregator will deny
+    // the boost otherwise, so opting in would be wasted).
+    const vel = ctx.inputKind.velocity;
+    let chosenBumps = nNoBoost;
+    if (vel?.pendingProposal && vel.pendingProposal.direction === intentDir) {
+      const boostedEps = vel.baseEpsilon * vel.pendingProposal.coefficient;
+      const nBoost = optimalBumpCountFor(absDiff, boostedEps, inputs.length);
+      const errBoost = Math.abs(absDiff - nBoost * boostedEps);
+      // Tie-break: prefer no-boost (smaller error wins; equal → no boost).
+      if (errBoost < errNoBoost) {
+        chosenBumps = nBoost;
+        this.wantedBoost = true;
+      }
+    }
+    return pickInDirectionBumps(inputs, direction, chosenBumps);
+  }
+
+  wantVelocityBoost(_inherent: Submission[], _ctx: ProduceCtx): boolean {
+    return this.wantedBoost;
   }
 }

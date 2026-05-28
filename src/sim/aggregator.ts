@@ -48,10 +48,26 @@ export interface Aggregator {
    *  nudge's effective ε — so per-block aggregator state stays inside the
    *  aggregator instance. */
   inputKindFor(lastPrice: number): InputKind;
-  /** End-of-block hook. Chain calls this after the aggregator's `apply` and
-   *  before metric collection, so aggregators can update internal state
-   *  (e.g. nudge's velocity schedule) from the block's outcome. */
+  /** Runs AFTER the author builds the inherent and BEFORE `apply`. Lets
+   *  the aggregator finalize any per-block state that depends on the
+   *  inherent's shape (e.g. nudge's velocity gate check uses the current
+   *  block's agreement rate). Median's implementation is a no-op. */
+  onBeforeApply(ctx: BeforeApplyContext): void;
+  /** End-of-block hook. Chain calls this after `apply` and before metric
+   *  collection, so aggregators can update internal state (e.g. nudge's
+   *  velocity schedule — proposing the next-block coefficient) from the
+   *  block's outcome. */
   onBlockEnd(ctx: BlockEndContext): void;
+}
+
+/** Context passed to `Aggregator.onBeforeApply`. */
+export interface BeforeApplyContext {
+  /** Author-selected inherent. */
+  inherent: Submission[];
+  /** True iff the block author opted in to consume any pending velocity
+   *  proposal this block (via the optional `wantVelocityBoost` method).
+   *  Default `false` — most validators don't implement the method. */
+  wantBoost: boolean;
 }
 
 /** Context passed to `Aggregator.onBlockEnd` at the end of every block. */
@@ -109,57 +125,111 @@ export class NudgeAggregator implements Aggregator {
   readonly mode = "nudge" as const;
 
   private minInputs: number;
-  /** Mutable so the velocity schedule can update it across blocks. */
-  protected epsilon: number;
+  /** Configured base ε. Never written after construction. `currentEpsilon`
+   *  resets to this value at the start of every block (in `onBeforeApply`)
+   *  unless the velocity boost fires. */
+  protected readonly baseEpsilon: number;
+  /** ε used for THIS block's price math. Set per-block in `onBeforeApply`:
+   *  either equals `baseEpsilon` (no boost) or `baseEpsilon × coefficient`
+   *  (gate fired). Never compounds past one coefficient — every block
+   *  starts the gate decision fresh from `baseEpsilon`. */
+  protected currentEpsilon: number;
   protected epsilonMode: EpsilonMode;
   /** Optional ε-schedule. When unset, ε stays constant across the run. */
   private velocity?: VelocityConfig;
-  /** Candidate coefficient proposed at end of the previous block. Activated
-   *  this block iff the corresponding direction's `agreementGate` passes. */
-  private pendingChange: { direction: "up" | "down"; coefficient: number } | null = null;
+  /** Coefficient proposed at end of the previous block, awaiting THIS
+   *  block's gate decision in `onBeforeApply`. */
+  private pendingProposal: { direction: "up" | "down"; coefficient: number } | null = null;
 
   constructor(minInputs: number, epsilon: number, epsilonMode: EpsilonMode, velocity?: VelocityConfig) {
     if (minInputs < 0) throw new Error(`nudge minInputs must be ≥ 0, got ${minInputs}`);
     if (epsilon < 0) throw new Error(`nudge epsilon must be ≥ 0, got ${epsilon}`);
     this.minInputs = minInputs;
-    this.epsilon = epsilon;
+    this.baseEpsilon = epsilon;
+    this.currentEpsilon = epsilon;
     this.epsilonMode = epsilonMode;
     this.velocity = velocity;
   }
 
-  /** Resolve the per-bump step size for a given `lastPrice`. In `"abs"`
-   *  mode it's just `epsilon`; in `"ratio"` mode it scales with the price. */
-  private effectiveEpsilon(lastPrice: number): number {
-    return this.epsilonMode === "ratio" ? lastPrice * this.epsilon : this.epsilon;
+  /** Read the immutable base ε. Used by engine-level summary persistence
+   *  so the recorded `epsilon` is the configured base, not a transient
+   *  boosted currentEpsilon. */
+  getBaseEpsilon(): number {
+    return this.baseEpsilon;
+  }
+
+  /** Scale `currentEpsilon` for ratio mode — used by `apply`. */
+  private effectiveCurrentEpsilon(lastPrice: number): number {
+    return this.epsilonMode === "ratio" ? lastPrice * this.currentEpsilon : this.currentEpsilon;
+  }
+
+  /** Scale `baseEpsilon` for ratio mode — used by `inputKindFor` so the
+   *  ε we advertise to validators is in the same unit as the rest of the
+   *  block-time numbers. */
+  private effectiveBaseEpsilon(lastPrice: number): number {
+    return this.epsilonMode === "ratio" ? lastPrice * this.baseEpsilon : this.baseEpsilon;
   }
 
   inputKindFor(lastPrice: number): InputKind {
-    const eps = this.effectiveEpsilon(lastPrice);
-    // Only attach the velocity snapshot when a schedule is configured —
-    // keeps the cheap path cheap and the type's optional field meaningful
-    // for downstream `if (ctx.inputKind.velocity)` discrimination.
-    if (!this.velocity) return { kind: "nudge", epsilon: eps };
+    // Always advertise BASE ε to validators (the conservative, pre-boost
+    // value). Authors that want to plan for the boost read `velocity` and
+    // compute scenarios themselves.
+    const baseEps = this.effectiveBaseEpsilon(lastPrice);
+    if (!this.velocity) return { kind: "nudge", epsilon: baseEps };
     return {
       kind: "nudge",
-      epsilon: eps,
+      epsilon: baseEps,
       velocity: {
-        pendingChange: this.pendingChange,
+        baseEpsilon: baseEps,
+        pendingProposal: this.pendingProposal,
         config: this.velocity,
       },
     };
   }
 
-  /** Velocity schedule: two-block-confirmation ε update.
-   *  1. If a candidate from the previous block is pending, gate-check it
-   *     against THIS block's agreement rate. If the gate passes, multiply
-   *     ε by the stored coefficient; either way, clear the candidate.
-   *  2. Propose a fresh candidate from THIS block's direction-of-motion +
-   *     agreement rate, to be confirmed at end of the next block.
-   *  No-op when `velocity` is unset or the inherent is empty (no signal). */
+  /** Velocity gate: evaluates against the just-built inherent. The boost
+   *  fires iff ALL of:
+   *    1. A pending proposal exists (from previous block's `onBlockEnd`).
+   *    2. The block author opted in via `wantVelocityBoost`.
+   *    3. M3: the inherent's net direction matches `proposal.direction`.
+   *    4. `policy.agreementGate(rate)` returns true.
+   *  Otherwise `currentEpsilon` resets to `baseEpsilon`. The pending
+   *  proposal is always consumed (cleared) at the end. */
+  onBeforeApply(ctx: BeforeApplyContext): void {
+    if (!this.velocity) return; // no schedule → currentEpsilon stays at base
+    const proposal = this.pendingProposal;
+    this.pendingProposal = null;
+    this.currentEpsilon = this.baseEpsilon; // default outcome: reset
+
+    if (proposal === null || !ctx.wantBoost) return;
+    if (ctx.inherent.length === 0) return;
+
+    let net = 0;
+    for (const s of ctx.inherent) {
+      if (s.kind !== "nudge") return; // unreachable: enforced by apply()
+      net += s.bump;
+    }
+    const rate = Math.abs(net) / ctx.inherent.length;
+    // M3: a flat block (net = 0) can never confirm an up/down proposal.
+    const currentDir: "up" | "down" | null =
+      net > 0 ? "up" :
+        net < 0 ? "down" : null;
+    if (currentDir === null || currentDir !== proposal.direction) return;
+
+    const policy = this.velocity[proposal.direction];
+    if (policy.agreementGate(rate)) {
+      this.currentEpsilon = this.baseEpsilon * proposal.coefficient;
+    }
+  }
+
+  /** End-of-block: propose a coefficient for the NEXT block based on this
+   *  block's direction-of-motion and agreement rate. The proposal will be
+   *  gate-checked in the next block's `onBeforeApply`. The coefficient
+   *  multiplies BASE ε (non-compounding). */
   onBlockEnd(ctx: BlockEndContext): void {
     if (!this.velocity) return;
     if (ctx.inherent.length === 0) {
-      this.pendingChange = null;
+      this.pendingProposal = null;
       return;
     }
 
@@ -169,29 +239,15 @@ export class NudgeAggregator implements Aggregator {
       net += s.bump;
     }
     const agreementRate = Math.abs(net) / ctx.inherent.length;
-    const agreementDirection = net >= 0 ? "up" : "down";
-
-    // Step 1: confirm/discard the previous block's candidate.
-    if (this.pendingChange !== null) {
-      // there was a pending change, with `direction`. Only if the current agreement gate was also fulfilled with the same direction, then update epislon.
-      const policy = this.velocity[this.pendingChange.direction];
-      if (policy.agreementGate(agreementRate) && this.pendingChange.direction === agreementDirection) {
-        this.epsilon *= this.pendingChange.coefficient;
-      } else {
-        // TODO: replace with base-epsilon. The agreement gate was not fulfilled.
-      }
-      this.pendingChange = null;
-    }
-
-    // Step 2: propose a new candidate from THIS block's direction.
     const direction: "up" | "down" | null =
       ctx.newPrice > ctx.oldPrice ? "up" :
         ctx.newPrice < ctx.oldPrice ? "down" : null;
-    if (direction === null) return; // flat block — no proposal
-    const coeff = this.velocity[direction].nextEpsilonCoefficient(agreementRate, this.epsilon);
-    if (coeff !== 1) {
-      this.pendingChange = { direction, coefficient: coeff };
+    if (direction === null) {
+      this.pendingProposal = null;
+      return;
     }
+    const coeff = this.velocity[direction].nextEpsilonCoefficient(agreementRate, this.baseEpsilon);
+    this.pendingProposal = coeff !== 1 ? { direction, coefficient: coeff } : null;
   }
 
   apply(ctx: AggregatorContext): AggregateOutcome {
@@ -210,7 +266,9 @@ export class NudgeAggregator implements Aggregator {
       if (s.kind !== "nudge") continue; // unreachable: assertion above threw
       net += s.bump; // Up=+1, Down=-1
     }
-    const eps = this.effectiveEpsilon(ctx.lastPrice);
+    // Apply uses currentEpsilon, which `onBeforeApply` just set to either
+    // baseEpsilon or baseEpsilon × coefficient depending on the gate.
+    const eps = this.effectiveCurrentEpsilon(ctx.lastPrice);
     return {
       newPrice: ctx.lastPrice + net * eps,
       totalBumps,
@@ -240,7 +298,8 @@ export class MedianAggregator implements Aggregator {
     return { kind: "quote" };
   }
 
-  /** Median has no per-block schedule; the hook is a no-op. */
+  /** Median has no per-block schedule; both hooks are no-ops. */
+  onBeforeApply(_ctx: BeforeApplyContext): void { /* deliberately empty */ }
   onBlockEnd(_ctx: BlockEndContext): void { /* deliberately empty */ }
 
   apply(ctx: AggregatorContext): AggregateOutcome {

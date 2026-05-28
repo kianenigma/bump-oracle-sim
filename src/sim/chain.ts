@@ -10,11 +10,15 @@ import type { Aggregator } from "./aggregator.js";
  *   2. Chain selects one random validator as block author.
  *   3. Chain hands all gossiped inputs to the author.
  *      Author returns the block-inherent (subset selected to include).
- *   4. Chain hands the inherent to its aggregator (the runtime).
+ *   3b. Chain asks the author whether to opt into the pending velocity
+ *      boost (optional `wantVelocityBoost`; defaults to false).
+ *   4. Chain calls `onBeforeApply` so the aggregator can finalize per-block
+ *      state from the just-built inherent (e.g. nudge's velocity gate).
+ *   5. Chain hands the inherent to its aggregator (the runtime).
  *      Aggregator computes the new price.
- *   5. Chain notifies the aggregator via `onBlockEnd` so it can update any
- *      per-run state (e.g. nudge's velocity-driven ε schedule).
- *   6. Deviation vs. real price (mean of venues by default) is recorded.
+ *   6. Chain notifies the aggregator via `onBlockEnd` so it can propose any
+ *      next-block state changes (e.g. nudge's velocity proposal).
+ *   7. Deviation vs. real price (mean of venues by default) is recorded.
  *
  * No carve-outs. Behaviors like "noop author freezes the chain" fall out
  * naturally because NoopValidator.produceInherent returns [] and the
@@ -71,7 +75,16 @@ export class Chain {
     // 3. Author selects which inputs go into the block inherent.
     const inherent = author.produceInherent(inputs, ctx);
 
-    // 4. Aggregator (runtime) consumes the inherent → new price.
+    // 3b. Ask the author whether they want to consume any pending velocity
+    // boost this block. Optional method — validators that don't implement
+    // it default to `false` (no boost).
+    const wantBoost = author.wantVelocityBoost?.(inherent, ctx) ?? false;
+
+    // 4. Aggregator decides per-block ε based on the just-built inherent
+    // (velocity gate-check happens here for nudge; no-op for median).
+    this.aggregator.onBeforeApply({ inherent, wantBoost });
+
+    // 5. Aggregator (runtime) consumes the inherent → new price.
     const oldPrice = this.lastPrice;
     const out = this.aggregator.apply({
       inputs,
@@ -80,8 +93,9 @@ export class Chain {
     });
     this.lastPrice = out.newPrice;
 
-    // 5. End-of-block hook: aggregator updates any internal per-run state
-    // (e.g. nudge's velocity-based ε schedule).
+    // 6. End-of-block hook: aggregator updates any internal per-run state
+    // (e.g. nudge's velocity-based ε schedule — proposes the next-block
+    // coefficient).
     this.aggregator.onBlockEnd({
       oldPrice,
       newPrice: out.newPrice,

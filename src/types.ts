@@ -47,29 +47,38 @@ export type EpsilonMode = "abs" | "ratio";
 // Defaults are resolved by the engine once it knows N.
 //
 // `velocity` (nudge only, scenario-file feature; not wired through the CLI):
-// optional pair of "ε-schedule" policies — one for blocks that pushed the
-// oracle UP, one for blocks that pushed it DOWN. Each policy declares:
-//   - `nextEpsilonCoefficient(agreementRate)` — at end of block N, returns a
-//     multiplier that becomes the *candidate* ε for the next change.
-//   - `agreementGate(agreementRate)` — at end of block N+1, returns whether
-//     to activate the candidate computed in N. If true, ε is multiplied by
-//     the stored coefficient and the change takes effect from N+2 onward.
-// Two-block confirmation: the rate that *proposes* a change is from one
-// block, the rate that *confirms* it is from the next. Functions can't be
-// JSON-cloned, so velocity-enabled scenarios run on the main thread (the
-// worker pool drops them silently).
+// optional pair of "ε-schedule" policies — one for blocks where the proposal
+// is UP, one for DOWN. The aggregator stores an immutable `baseEpsilon` and a
+// per-block `currentEpsilon`. Each policy declares:
+//   - `nextEpsilonCoefficient(agreementRate, baseEpsilon)` — at end of block
+//     N, returns a multiplier on baseEpsilon. Stored as the pending proposal.
+//   - `agreementGate(agreementRate)` — evaluated in N+1's `onBeforeApply`,
+//     against N+1's OWN agreement rate (computed from the block's inherent).
+//     True ⇒ N+1's currentEpsilon = baseEpsilon × coefficient.
+//     False ⇒ N+1's currentEpsilon = baseEpsilon (reset to base).
+// Non-compounding: every block lands on either baseEpsilon or
+// baseEpsilon × coefficient — never on previousEpsilon × coefficient. The
+// boost is also gated by the block author opting in via `wantVelocityBoost`
+// AND by a direction-match check (current block's net direction must
+// equal the pending proposal's direction).
+//
+// Functions can't be JSON-cloned, so velocity-enabled scenarios run on the
+// main thread (the worker pool drops them silently).
 export interface VelocityPolicy {
   /** End-of-block-N hook. Inputs:
    *    - `agreementRate` ∈ [0, 1] = |Σ bumps| / inherentSize for the block
    *      that just ended.
-   *    - `previousEpsilon` — ε currently in effect (the value the returned
-   *      coefficient will multiply). Same units as the aggregator's stored
-   *      ε: an absolute step when `epsilonMode === "abs"`, a per-bump
-   *      fraction of price when `epsilonMode === "ratio"`. Lets the policy
-   *      cap growth, taper near a floor, scale jumps by current ε, etc.
+   *    - `baseEpsilon` — the aggregator's immutable base ε (in the same
+   *      unit as `epsilonMode`: absolute step in `"abs"`, per-bump fraction
+   *      of price in `"ratio"`). The returned coefficient multiplies THIS
+   *      base, not the previous block's possibly-boosted ε — the schedule
+   *      is non-compounding.
    *  Returns a multiplier; 1.0 = no proposed change. */
-  nextEpsilonCoefficient: (agreementRate: number, previousEpsilon: number) => number;
-  /** End-of-block-(N+1) confirmation. True activates the candidate from N. */
+  nextEpsilonCoefficient: (agreementRate: number, baseEpsilon: number) => number;
+  /** Evaluated in the NEXT block's `onBeforeApply` against THAT block's own
+   *  agreement rate (after the author has built the inherent). True =
+   *  consume the proposal: currentEpsilon = baseEpsilon × coefficient.
+   *  False = reset: currentEpsilon = baseEpsilon. */
   agreementGate: (agreementRate: number) => boolean;
 }
 
