@@ -66,8 +66,11 @@ export type EpsilonMode = "abs" | "ratio";
 // main thread (the worker pool drops them silently).
 export interface VelocityPolicy {
   /** End-of-block-N hook. Inputs:
-   *    - `agreementRate` ∈ [0, 1] = |Σ bumps| / inherentSize for the block
-   *      that just ended.
+   *    - `agreementRate` ∈ [0, 1] = |Σ bumps| / validatorCount for the block
+   *      that just ended. The denominator is the FULL validator set (not
+   *      the inherent), so abstentions and author-side trimming dilute the
+   *      rate — the policy sees true network consensus, not the author's
+   *      editorial view.
    *    - `baseEpsilon` — the aggregator's immutable base ε (in the same
    *      unit as `epsilonMode`: absolute step in `"abs"`, per-bump fraction
    *      of price in `"ratio"`). The returned coefficient multiplies THIS
@@ -76,7 +79,7 @@ export interface VelocityPolicy {
    *  Returns a multiplier; 1.0 = no proposed change. */
   nextEpsilonCoefficient: (agreementRate: number, baseEpsilon: number) => number;
   /** Evaluated in the NEXT block's `onBeforeApply` against THAT block's own
-   *  agreement rate (after the author has built the inherent). True =
+   *  agreement rate (same |Σ bumps| / validatorCount semantics). True =
    *  consume the proposal: currentEpsilon = baseEpsilon × coefficient.
    *  False = reset: currentEpsilon = baseEpsilon. */
   agreementGate: (agreementRate: number) => boolean;
@@ -271,6 +274,19 @@ export interface BlockMetrics {
   /** Type of the validator at `medianValidatorIndex`. Only set under the same
    *  conditions. Used by the CSV and the chart tooltip. */
   medianValidatorType?: ValidatorType;
+  /** |Σ bumps| / validatorCount, ∈ [0, 1]. Denominator is the full validator
+   *  set (NOT the inherent) — abstentions and author trimming dilute the
+   *  rate so the value reflects network consensus rather than the author's
+   *  editorial view. Always set by the nudge aggregator (0 when the inherent
+   *  is empty or perfectly balanced). Undefined for median. Surfaces in the
+   *  hover tooltip when the scenario uses a velocity-enabled nudge
+   *  aggregator (otherwise it doesn't drive anything). */
+  agreementRate?: number;
+  /** currentEpsilon / baseEpsilon for THIS block. Only set when the nudge
+   *  aggregator has a velocity schedule configured — without one, the value
+   *  would always be 1.0. The tooltip uses this to expose when the velocity
+   *  gate fired (coefficient ≠ 1) on a hovered block. */
+  epsilonCoefficient?: number;
   /** Per-block list of every submission in the inherent — populated for both
    *  median (quote) and nudge (bump) modes. Each entry is a discriminated
    *  union: `{ kind: "quote", type, price }` or `{ kind: "nudge", type, bump }`,
@@ -367,6 +383,15 @@ export interface BlockChunk {
   /** Validator index whose quote was the median, per block. -1 means "not
    *  applicable" (nudge mode or freeze block). Optional for backward compat. */
   medianValidatorIndices?: number[];
+  /** Per-block agreement rate (|net|/inherent.length) for the nudge
+   *  aggregator. -1 means "not applicable" (median mode or empty inherent).
+   *  Optional for backward compat. */
+  agreementRates?: number[];
+  /** Per-block epsilon coefficient (currentEpsilon/baseEpsilon) for the
+   *  nudge aggregator when a velocity schedule is configured. -1 means "not
+   *  applicable" (median mode, or nudge without velocity). Optional for
+   *  backward compat. */
+  epsilonCoefficients?: number[];
 }
 
 export interface ScenarioMeta {

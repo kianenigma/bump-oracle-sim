@@ -82,7 +82,8 @@ export class Chain {
 
     // 4. Aggregator decides per-block ε based on the just-built inherent
     // (velocity gate-check happens here for nudge; no-op for median).
-    this.aggregator.onBeforeApply({ inherent, wantBoost });
+    const validatorCount = this.validators.length;
+    this.aggregator.onBeforeApply({ inherent, wantBoost, validatorCount });
 
     // 5. Aggregator (runtime) consumes the inherent → new price.
     const oldPrice = this.lastPrice;
@@ -90,6 +91,7 @@ export class Chain {
       inputs,
       inherent,
       lastPrice: oldPrice,
+      validatorCount,
     });
     this.lastPrice = out.newPrice;
 
@@ -100,6 +102,7 @@ export class Chain {
       oldPrice,
       newPrice: out.newPrice,
       inherent,
+      validatorCount,
     });
 
     // Inherent composition. Non-honest = any validator with isHonest === false
@@ -153,6 +156,8 @@ export class Chain {
       priceUpdated: out.priceUpdated,
       medianValidatorIndex,
       medianValidatorType,
+      agreementRate: out.agreementRate,
+      epsilonCoefficient: out.epsilonCoefficient,
       inherentVotes,
       deviation,
       deviationPct,

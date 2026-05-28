@@ -368,6 +368,8 @@ export async function startServer(
           let priceUpdated: boolean | null = null;
           let inherentTotal: number | null = null;
           let medianValidatorType: string | null = null;
+          let agreementRate: number | null = null;
+          let epsilonCoefficient: number | null = null;
           try {
             const chunkIdx = Math.floor(safeBlock / BLOCKS_PER_CHUNK);
             const dir = scenarioDir(meta, idx);
@@ -383,6 +385,15 @@ export async function startServer(
               const mvi = chunk.medianValidatorIndices[tickInChunk];
               if (mvi >= 0) medianValidatorType = validatorTypeAt(meta.config.validators, mvi);
             }
+            // -1 sentinel means "not applicable" (median agg, or freeze block).
+            if (chunk.agreementRates && tickInChunk >= 0 && tickInChunk < chunk.agreementRates.length) {
+              const ar = chunk.agreementRates[tickInChunk];
+              if (ar >= 0) agreementRate = ar;
+            }
+            if (chunk.epsilonCoefficients && tickInChunk >= 0 && tickInChunk < chunk.epsilonCoefficients.length) {
+              const ec = chunk.epsilonCoefficients[tickInChunk];
+              if (ec >= 0) epsilonCoefficient = ec;
+            }
           } catch {
             // Older simdata directories without the per-block arrays — fall through.
           }
@@ -390,6 +401,7 @@ export async function startServer(
           return {
             scenario: idx, label: meta.config.label, index: authorIdx, type,
             priceUpdated, inherentTotal, medianValidatorType,
+            agreementRate, epsilonCoefficient,
           };
         }));
 

@@ -21,6 +21,18 @@ export class ChunkWriter {
   private priceUpdated: number[] = [];
   private inherentTotals: number[] = [];
   private medianValidatorIndices: number[] = [];
+  /** Per-block arrays for nudge-aggregator diagnostics. Allocated lazily on
+   *  the first block that carries each field — see `tracksAgreementRate` /
+   *  `tracksEpsilonCoefficient`. Both arrays are written to the chunk only
+   *  when the corresponding tracking flag is true. */
+  private agreementRates: number[] = [];
+  private epsilonCoefficients: number[] = [];
+  /** Set on the FIRST block of the run and never reset. The aggregator type
+   *  (and velocity presence) is fixed for the lifetime of a scenario, so we
+   *  decide once whether to persist these per-block arrays. Avoids writing
+   *  meaningless `-1`-filled arrays for median or velocity-less runs. */
+  private tracksAgreementRate?: boolean;
+  private tracksEpsilonCoefficient?: boolean;
   private firstTimestamp = 0;
   private lastTimestamp = 0;
   private chunkTimeRanges: Array<{ from: number; to: number }> = [];
@@ -35,7 +47,15 @@ export class ChunkWriter {
   }
 
   addBlock(m: BlockMetrics): void {
-    if (this.totalBlocks === 0) this.firstTimestamp = m.timestamp;
+    if (this.totalBlocks === 0) {
+      this.firstTimestamp = m.timestamp;
+      // Lock the tracking decision on the first block. Median emits neither
+      // field. Nudge always emits agreementRate (except on freeze blocks
+      // with empty inherent — those use -1 sentinel). Nudge emits
+      // epsilonCoefficient only when a velocity schedule is configured.
+      this.tracksAgreementRate = m.agreementRate !== undefined;
+      this.tracksEpsilonCoefficient = m.epsilonCoefficient !== undefined;
+    }
     this.lastTimestamp = m.timestamp;
 
     this.timestamps.push(m.timestamp);
@@ -45,6 +65,8 @@ export class ChunkWriter {
     this.priceUpdated.push(m.priceUpdated ? 1 : 0);
     this.inherentTotals.push(m.inherentTotal);
     this.medianValidatorIndices.push(m.medianValidatorIndex ?? -1);
+    if (this.tracksAgreementRate) this.agreementRates.push(m.agreementRate ?? -1);
+    if (this.tracksEpsilonCoefficient) this.epsilonCoefficients.push(m.epsilonCoefficient ?? -1);
     this.totalBlocks++;
 
     if (this.timestamps.length >= BLOCKS_PER_CHUNK) {
@@ -77,6 +99,8 @@ export class ChunkWriter {
       inherentTotals: this.inherentTotals,
       medianValidatorIndices: this.medianValidatorIndices,
     };
+    if (this.tracksAgreementRate) chunk.agreementRates = this.agreementRates;
+    if (this.tracksEpsilonCoefficient) chunk.epsilonCoefficients = this.epsilonCoefficients;
 
     this.chunkTimeRanges.push({
       from: this.timestamps[0],
@@ -95,6 +119,8 @@ export class ChunkWriter {
     this.priceUpdated = [];
     this.inherentTotals = [];
     this.medianValidatorIndices = [];
+    this.agreementRates = [];
+    this.epsilonCoefficients = [];
   }
 }
 
@@ -114,6 +140,8 @@ function writeChunkStreaming(path: string, chunk: BlockChunk): void {
   if (chunk.priceUpdated) arrays.push(["priceUpdated", chunk.priceUpdated]);
   if (chunk.inherentTotals) arrays.push(["inherentTotals", chunk.inherentTotals]);
   if (chunk.medianValidatorIndices) arrays.push(["medianValidatorIndices", chunk.medianValidatorIndices]);
+  if (chunk.agreementRates) arrays.push(["agreementRates", chunk.agreementRates]);
+  if (chunk.epsilonCoefficients) arrays.push(["epsilonCoefficients", chunk.epsilonCoefficients]);
 
   for (let a = 0; a < arrays.length; a++) {
     const [name, arr] = arrays[a];

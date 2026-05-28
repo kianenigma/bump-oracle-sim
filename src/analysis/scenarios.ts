@@ -167,6 +167,25 @@ function nudgeAgg(ctx: ScenarioCtx, epsilon?: EpsilonSpec): AggregatorConfig {
   return { kind: "nudge", epsilon: epsilon ?? ctx.defaultEpsilon };
 }
 
+/** Scale an `EpsilonSpec` by a numeric factor, preserving its kind so a
+ *  `{ratio}` spec stays a ratio and an absolute step stays absolute. Used by
+ *  the velocity sweep to derive a `baseEpsilon / maxMultiplier` from the
+ *  same `--epsilon` flag the baseline scenario consumes — so the two
+ *  scenarios stay coupled when the CLI value changes.
+ *
+ *  Throws on `"auto"`: that needs price-data to resolve, which scenarios
+ *  don't have here. Callers that want to scale should pre-resolve auto or
+ *  pass a concrete value via `--epsilon`. */
+function scaleEpsilon(spec: EpsilonSpec, factor: number): EpsilonSpec {
+  if (spec === "auto") {
+    throw new Error(
+      "scaleEpsilon: cannot scale 'auto' — pass a numeric or ratio epsilon",
+    );
+  }
+  if (typeof spec === "object" && "ratio" in spec) return { ratio: spec.ratio * factor };
+  return spec * factor;
+}
+
 /** Convert the legacy "ValidatorMix"-style record into GroupSpec[]. */
 function specsFromMix(mix: Record<string, number>): GroupSpec[] {
   const out: GroupSpec[] = [];
@@ -471,7 +490,6 @@ export const scenarios: Record<string, ScenarioFn> = {
 
   async "nudge-velocity"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: nudge-velocity]`);
-    const baseAgg: AggregatorConfig = { kind: "nudge", epsilon: ctx.defaultEpsilon };
 
     // Non-compounding: each block's ε lands on either `baseEpsilon` (no
     // boost) or `baseEpsilon × maxMultiplier` (gate fired). The
@@ -479,12 +497,26 @@ export const scenarios: Record<string, ScenarioFn> = {
     // coefficient is a constant by-design, and any cap is implicit in
     // that constant value.
     const maxMultiplier = 4;
-    const proposeMaxOnFullConsensus = (r: number, _baseEps: number) =>
-      r === 1.0 ? maxMultiplier : 1.0;
-    const gateOnFullConsensus = (r: number) => r >= 1.0;
+    const proposeNext = (r: number, _baseEps: number) =>
+      r >= 0.51 ? maxMultiplier : 1.0;
+    const gateNext = (r: number) => r >= 0.51;
     const bidirectional: VelocityConfig = {
-      up:   { nextEpsilonCoefficient: proposeMaxOnFullConsensus, agreementGate: gateOnFullConsensus },
-      down: { nextEpsilonCoefficient: proposeMaxOnFullConsensus, agreementGate: gateOnFullConsensus },
+      up:   { nextEpsilonCoefficient: proposeNext, agreementGate: gateNext },
+      down: { nextEpsilonCoefficient: proposeNext, agreementGate: gateNext },
+    };
+
+    // The baseline scenario walks at ε = ctx.defaultEpsilon every block.
+    // The velocity scenario starts from baseEpsilon = ctx.defaultEpsilon /
+    // maxMultiplier so a fully-boosted block (gate fired, coefficient ×
+    // maxMultiplier) lands on the same effective ε as the baseline. With no
+    // boost it walks 1/maxMultiplier as fast — the cost of needing full
+    // consensus to match the baseline's step. Head-to-head, both scenarios
+    // share the same upper bound on per-block oracle movement.
+    const baselineAgg: AggregatorConfig = { kind: "nudge", epsilon: ctx.defaultEpsilon };
+    const velocityAgg: AggregatorConfig = {
+      kind: "nudge",
+      epsilon: scaleEpsilon(ctx.defaultEpsilon, 1 / maxMultiplier),
+      velocity: bidirectional,
     };
 
     // Validator mixes swept against both baseline-nudge and velocity-nudge:
@@ -499,8 +531,8 @@ export const scenarios: Record<string, ScenarioFn> = {
     ];
     const configs: SimulationConfig[] = [];
     for (const specs of mixes) {
-      configs.push(makeConfig(ctx, specs, baseAgg,                                    "(baseline)"));
-      configs.push(makeConfig(ctx, specs, { ...baseAgg, velocity: bidirectional },    "(velocity)"));
+      configs.push(makeConfig(ctx, specs, baselineAgg, "(baseline)"));
+      configs.push(makeConfig(ctx, specs, velocityAgg, "(velocity)"));
     }
     return runBatch(configs, priceSource, outputDir, threadCount);
   },

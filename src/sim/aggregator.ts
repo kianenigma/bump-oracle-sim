@@ -19,6 +19,12 @@ export interface AggregatorContext {
   inputs: Submission[];      // all gossiped (for metrics only)
   inherent: Submission[];    // author's selection — drives price math
   lastPrice: number;
+  /** Total validator count for THIS run — the denominator used by the nudge
+   *  aggregator when computing agreement rate. Using the full validator set
+   *  (rather than the inherent size) means abstentions and author-side
+   *  trimming dilute the rate, which is the consensus signal we actually
+   *  care about: how much of the network agreed on a direction this block. */
+  validatorCount: number;
 }
 
 export interface AggregateOutcome {
@@ -36,6 +42,21 @@ export interface AggregateOutcome {
    *  inherent the median is the average of two adjacent quotes; we report
    *  the *upper* of the two. Undefined for nudge or freeze blocks. */
   medianValidatorIndex?: number;
+  /** |Σ bumps| / validatorCount, ∈ [0, 1]. 1 = every validator agreed on a
+   *  direction AND the author kept them all; lower values reflect any mix of
+   *  abstentions, opposing votes, or author-side trimming. The denominator is
+   *  the FULL validator set (not the inherent), so the rate measures network
+   *  consensus rather than the author's editorial view. 0 either means
+   *  "perfectly balanced" or "no contribution this block" — consumers
+   *  disambiguate via `activatedBumps` / `inherentTotal`. Always set by the
+   *  nudge aggregator; undefined for median. */
+  agreementRate?: number;
+  /** currentEpsilon / baseEpsilon for THIS block. 1.0 when no velocity boost
+   *  fired (or when no velocity schedule is configured), > 1.0 (or whatever
+   *  the schedule returned) when the gate fired this block. Only emitted by
+   *  the nudge aggregator and only when a velocity config is present —
+   *  otherwise the value would always be 1.0 and just adds noise. */
+  epsilonCoefficient?: number;
 }
 
 export interface Aggregator {
@@ -68,6 +89,9 @@ export interface BeforeApplyContext {
    *  proposal this block (via the optional `wantVelocityBoost` method).
    *  Default `false` — most validators don't implement the method. */
   wantBoost: boolean;
+  /** Total validator count — agreement-rate denominator. See the same field
+   *  on `AggregatorContext` for the rationale. */
+  validatorCount: number;
 }
 
 /** Context passed to `Aggregator.onBlockEnd` at the end of every block. */
@@ -78,6 +102,9 @@ export interface BlockEndContext {
   newPrice: number;
   /** The author-selected inherent that drove this block's price math. */
   inherent: Submission[];
+  /** Total validator count — agreement-rate denominator for the next-block
+   *  proposal. See the same field on `AggregatorContext`. */
+  validatorCount: number;
 }
 
 /**
@@ -203,13 +230,17 @@ export class NudgeAggregator implements Aggregator {
 
     if (proposal === null || !ctx.wantBoost) return;
     if (ctx.inherent.length === 0) return;
+    if (ctx.validatorCount === 0) return;
 
     let net = 0;
     for (const s of ctx.inherent) {
       if (s.kind !== "nudge") return; // unreachable: enforced by apply()
       net += s.bump;
     }
-    const rate = Math.abs(net) / ctx.inherent.length;
+    // Denominator is total validators, NOT inherent size: abstentions and
+    // author-side trimming must dilute the rate so the gate reflects true
+    // network consensus, not the author's editorial choice.
+    const rate = Math.abs(net) / ctx.validatorCount;
     // M3: a flat block (net = 0) can never confirm an up/down proposal.
     const currentDir: "up" | "down" | null =
       net > 0 ? "up" :
@@ -228,7 +259,7 @@ export class NudgeAggregator implements Aggregator {
    *  multiplies BASE ε (non-compounding). */
   onBlockEnd(ctx: BlockEndContext): void {
     if (!this.velocity) return;
-    if (ctx.inherent.length === 0) {
+    if (ctx.inherent.length === 0 || ctx.validatorCount === 0) {
       this.pendingProposal = null;
       return;
     }
@@ -238,7 +269,8 @@ export class NudgeAggregator implements Aggregator {
       if (s.kind !== "nudge") return; // unreachable: enforced by apply()
       net += s.bump;
     }
-    const agreementRate = Math.abs(net) / ctx.inherent.length;
+    // Same denominator change as `onBeforeApply` — see comment there.
+    const agreementRate = Math.abs(net) / ctx.validatorCount;
     const direction: "up" | "down" | null =
       ctx.newPrice > ctx.oldPrice ? "up" :
         ctx.newPrice < ctx.oldPrice ? "down" : null;
@@ -257,15 +289,33 @@ export class NudgeAggregator implements Aggregator {
     // Gossip-volume metric (informational only; never gates minInputs).
     const totalBumps = ctx.inputs.length;
 
-    if (ctx.inherent.length < this.minInputs) {
-      return { newPrice: ctx.lastPrice, totalBumps, activatedBumps: 0, netDirection: 0, priceUpdated: false };
-    }
-
+    // Compute net + agreementRate up-front so both the freeze path and the
+    // update path emit the same diagnostics. Denominator is total validators
+    // (not inherent size) so abstentions and author trimming dilute the rate
+    // — matches the gate's view of network-wide consensus. Empty inherent
+    // (with non-zero validatorCount) → 0; UI hides when inherentTotal === 0.
     let net = 0;
     for (const s of ctx.inherent) {
       if (s.kind !== "nudge") continue; // unreachable: assertion above threw
       net += s.bump; // Up=+1, Down=-1
     }
+    const agreementRate = ctx.validatorCount > 0 ? Math.abs(net) / ctx.validatorCount : 0;
+
+    // Coefficient is emitted only when a velocity schedule exists — otherwise
+    // it's constant 1.0 and would just clutter the per-block tooltip / chunk.
+    // Guard against baseEpsilon === 0 (degenerate but legal): coefficient is
+    // undefined in that case rather than NaN.
+    const coefficient = this.velocity !== undefined && this.baseEpsilon !== 0
+      ? this.currentEpsilon / this.baseEpsilon
+      : undefined;
+
+    if (ctx.inherent.length < this.minInputs) {
+      return {
+        newPrice: ctx.lastPrice, totalBumps, activatedBumps: 0, netDirection: 0, priceUpdated: false,
+        agreementRate, epsilonCoefficient: coefficient,
+      };
+    }
+
     // Apply uses currentEpsilon, which `onBeforeApply` just set to either
     // baseEpsilon or baseEpsilon × coefficient depending on the gate.
     const eps = this.effectiveCurrentEpsilon(ctx.lastPrice);
@@ -275,6 +325,8 @@ export class NudgeAggregator implements Aggregator {
       activatedBumps: ctx.inherent.length,
       netDirection: net,
       priceUpdated: true,
+      agreementRate,
+      epsilonCoefficient: coefficient,
     };
   }
 }

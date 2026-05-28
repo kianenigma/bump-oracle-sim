@@ -422,6 +422,12 @@
         btn.classList.add('active');
         currentTab = btn.dataset.tab;
 
+        // The author-tooltip is chart-attached — hide it on any tab change
+        // so it doesn't linger as a floating overlay on Stats / Research.
+        // The crosshair-move handler also hides it, but that only fires when
+        // the chart is the active tab, so it can't clean up on tab-switch.
+        hideAuthorTooltip();
+
         document.getElementById('chart-tab').classList.toggle('hidden', currentTab !== 'chart');
         document.getElementById('stats-tab').classList.toggle('hidden', currentTab !== 'stats');
         document.getElementById('research-tab').classList.toggle('hidden', currentTab !== 'research');
@@ -1119,17 +1125,31 @@
     /** Toggle handler called from any sidebar checkbox. Updates state and chart.
      *  Series are never destroyed by visibility toggles — we set visible=false
      *  so the data sticks around and "None → enable one" works without a
-     *  refetch (and definitely without losing the source-row series). */
+     *  full chart rebuild (and definitely without losing the source-row series).
+     *  Note: "data sticks around" does NOT mean "data is current". After a
+     *  viewport change while a scenario was hidden, that scenario's data is
+     *  stale relative to the active TF / window — so re-enabling MUST trigger
+     *  a refetch, not just a visibility flip. */
     function onSeriesToggle(entry, enabled) {
       seriesVisibility[entry.label] = enabled;
 
       if (entry.kind === 'oracle') {
+        const wasActive = activeScenarios.has(entry.scenarioIndex);
         if (enabled) activeScenarios.add(entry.scenarioIndex);
         else activeScenarios.delete(entry.scenarioIndex);
 
-        // Re-enabling an oracle whose data we never fetched: refetch.
-        const haveSeries = activePriceSeries.some(p => p.label === entry.label);
-        if (enabled && !haveSeries) {
+        // Newly-enabled scenario: its series may still exist with stale data
+        // from a fetch that excluded it (e.g. user zoomed in while this
+        // scenario was hidden, so subsequent fetches only refreshed the
+        // visible scenarios). Flip visibility immediately so the existing
+        // series shows up at all, then refetch to refresh the data.
+        if (enabled && !wasActive) {
+          for (const s of activePriceSeries) {
+            if (s.label === entry.label) applyVisibilityToSeries(s);
+          }
+          for (const s of activeDevSeries) {
+            if (s.label === `Dev: ${entry.label.replace(/^Oracle: /, '')}`) applyVisibilityToSeries(s);
+          }
           bufferedTF = 0;
           const range = getVisibleTimeRange();
           const from = range ? range.from : totalTimeRange.from;
@@ -1139,7 +1159,7 @@
         }
       }
 
-      // Existing series: flip visibility in place.
+      // Disable path (or non-oracle row): just flip visibility in place.
       for (const s of activePriceSeries) {
         if (s.label === entry.label) applyVisibilityToSeries(s);
       }
@@ -1154,15 +1174,18 @@
       const targetable = allSeriesEntries.filter(e => e.el.style.display !== 'none');
       const targets = targetable.length > 0 && targetable.length < allSeriesEntries.length ? targetable : allSeriesEntries;
 
-      // Update visibility state + checkboxes; track which scenarios newly need data.
-      const oracleIndicesNeedingFetch = new Set();
+      // Update visibility state + checkboxes; track whether any oracle is
+      // being newly enabled. Triggering a refetch on `!activeScenarios.has(idx)`
+      // (rather than the older `!hasSeries` check) is necessary because a
+      // hidden scenario can still have a lingering series object whose data
+      // is stale relative to the current TF/window — see onSeriesToggle.
+      let anyOracleNewlyEnabled = false;
       for (const entry of targets) {
         seriesVisibility[entry.label] = visible;
         entry.cb.checked = visible;
         if (entry.kind === 'oracle') {
           if (visible) {
-            const have = activePriceSeries.some(p => p.label === entry.label);
-            if (!have) oracleIndicesNeedingFetch.add(entry.scenarioIndex);
+            if (!activeScenarios.has(entry.scenarioIndex)) anyOracleNewlyEnabled = true;
             activeScenarios.add(entry.scenarioIndex);
           } else {
             activeScenarios.delete(entry.scenarioIndex);
@@ -1170,12 +1193,12 @@
         }
       }
 
-      // Just flip visibility on existing series. Never clear — that loses
+      // Flip visibility on existing series. Never clear — that loses
       // source-row data and silently breaks the next "enable one" click.
       for (const s of activePriceSeries) applyVisibilityToSeries(s);
       for (const s of activeDevSeries) applyVisibilityToSeries(s);
 
-      if (oracleIndicesNeedingFetch.size > 0) {
+      if (anyOracleNewlyEnabled) {
         bufferedTF = 0;
         const range = getVisibleTimeRange();
         const from = range ? range.from : totalTimeRange.from;
@@ -1400,11 +1423,17 @@
 
         transitionLock = true;
 
+        // Apply ALL data updates first (price/dev series + venue-divergence
+        // series), THEN set the final visible range. Doing it in the other
+        // order let `refreshVenueDivergence`'s setData re-trigger auto-fit on
+        // vdChart, which clobbered the just-restored saved range and showed
+        // up as a one-frame jump on every pan/zoom — the "flicker".
         if (canUpdateInPlace(data)) {
           updateSeriesData(data);
         } else {
           rebuildServerSeries(data);
         }
+        refreshVenueDivergence();
 
         if (fitContent) {
           priceChart.timeScale().fitContent();
@@ -1415,7 +1444,6 @@
           devChart.timeScale().setVisibleRange(savedTimeRange);
           vdChart.timeScale().setVisibleRange(savedTimeRange);
         }
-        refreshVenueDivergence();
 
         transitionLock = false;
 
@@ -1609,6 +1637,7 @@
           if (savedRange) {
             priceChart.timeScale().setVisibleRange(savedRange);
             devChart.timeScale().setVisibleRange(savedRange);
+            vdChart.timeScale().setVisibleRange(savedRange);
           }
           transitionLock = false;
         }
@@ -1638,18 +1667,70 @@
     document.getElementById('btn-right').addEventListener('click', () => panBy(0.25));
     document.getElementById('btn-zoom-in').addEventListener('click', () => zoomBy(0.5));
     document.getElementById('btn-zoom-out').addEventListener('click', () => zoomBy(2));
-    document.getElementById('btn-reset').addEventListener('click', () => {
-      if (totalTimeRange) {
-        const fullSpan = totalTimeRange.to - totalTimeRange.from;
-        currentTF = smallestValidTF(fullSpan);
-        document.querySelectorAll('.tf-btn').forEach(b => {
-          b.classList.toggle('active', parseInt(b.dataset.tf) === currentTF);
-        });
-        updateTFButtonStates();
-        bufferedTF = 0;
-        fetchData(totalTimeRange.from, totalTimeRange.to, currentTF, true);
+    /** Full reset to first-page-load defaults. Touches every piece of
+     *  session-mutable UI state so the user can scrub the view back to a
+     *  known-good starting point without reloading the tab. Keeps user
+     *  *preferences* (theme) untouched — those aren't part of "the page just
+     *  loaded" state, they were already user-applied before. */
+    function resetToDefaults() {
+      if (!serverMeta || !totalTimeRange) return;
+
+      // 1. Kill in-flight pending work + floating UI so we don't race with
+      // a stale fetch or leave a tooltip overlapping the reset chart.
+      hideAuthorTooltip();
+      if (fetchDebounceTimer) {
+        clearTimeout(fetchDebounceTimer);
+        fetchDebounceTimer = null;
       }
-    });
+
+      // 2. Switch back to the chart tab (matches initial page state).
+      if (currentTab !== 'chart') {
+        document.querySelector('.tab-btn[data-tab="chart"]').click();
+      }
+
+      // 3. Reset chart view mode to "line" (page-load default).
+      currentView = 'line';
+      document.querySelectorAll('.view-btn').forEach(b => {
+        b.classList.toggle('active', b.dataset.view === currentView);
+      });
+
+      // 4. Clear sidebar filter so the full series list is visible again.
+      sidebarSearchEl.value = '';
+
+      // 5. Reset stats-tab filter + sort to first-load state. Even though
+      // it's a different tab, the user asked for "everything" to reset.
+      const statsSearchEl = document.getElementById('stats-search');
+      if (statsSearchEl) statsSearchEl.value = '';
+      statsSortKey = null;
+      statsSortAsc = true;
+      document.querySelectorAll('#stats-header .sort-arrow').forEach(a => {
+        a.textContent = '';
+        a.classList.remove('active');
+      });
+      renderStatsRows();
+
+      // 6. Wipe series-visibility decisions so `buildSeriesPanel` re-applies
+      // its defaults (all-on for small sweeps, first-only for ≥10 scenarios).
+      seriesVisibility = {};
+      activeScenarios.clear();
+      buildSeriesPanel(serverMeta);
+
+      // 7. Reset timeframe to the initial-page-load default (900s / 15m).
+      // fetchData will auto-upgrade if 900s yields too many candles for the
+      // full range — same behavior as the initial load.
+      currentTF = 900;
+      document.querySelectorAll('.tf-btn').forEach(b => {
+        b.classList.toggle('active', parseInt(b.dataset.tf) === currentTF);
+      });
+      updateTFButtonStates();
+
+      // 8. Force a fresh fetch (invalidate buffer) of the full range,
+      // fitContent=true so the chart re-zooms to the entire dataset.
+      bufferedTF = 0;
+      fetchData(totalTimeRange.from, totalTimeRange.to, currentTF, true);
+    }
+
+    document.getElementById('btn-reset').addEventListener('click', resetToDefaults);
 
     // Keyboard shortcuts
     document.addEventListener('keydown', (e) => {
@@ -1745,13 +1826,18 @@
       }
       chartEl.classList.add('visible');
       vdChart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight });
-      if (vdSeries) { vdChart.removeSeries(vdSeries); vdSeries = null; }
-      vdSeries = vdChart.addLineSeries({
-        color: t.devColor || '#e6a05e',
-        lineWidth: 1,
-        priceLineVisible: false,
-        lastValueVisible: true,
-      });
+      // Keep the series object alive across refreshes — re-creating it on
+      // every fetch caused vdChart to auto-fit to the new series' data and
+      // briefly snap out of the saved visible range (the "flicker"). Only
+      // create on the first non-empty render; only destroy when going empty.
+      if (!vdSeries) {
+        vdSeries = vdChart.addLineSeries({
+          color: t.devColor || '#e6a05e',
+          lineWidth: 1,
+          priceLineVisible: false,
+          lastValueVisible: true,
+        });
+      }
       vdSeries.setData(vdSeriesData);
     }
 
@@ -1785,13 +1871,6 @@
       buildVenueDivergenceSeries();
       renderVenueDivergenceChart();
       recomputeVenueDivergence();
-    }
-
-    function setVisibleRangeBoth(range) {
-      transitionLock = true;
-      priceChart.timeScale().setVisibleRange(range);
-      devChart.timeScale().setVisibleRange(range);
-      transitionLock = false;
     }
 
     // ── Crosshair-tracking price scale markers ──
@@ -1977,6 +2056,29 @@
               detail += ` <span style="opacity:0.85">→ median: <b>${mglyph} ${a.medianValidatorType}</b></span>`;
             }
           }
+          // Velocity-only diagnostics: agreement rate + epsilon coefficient.
+          // Skipped entirely when the scenario isn't nudge-with-velocity —
+          // without a velocity schedule the coefficient is constant 1.0 and
+          // the agreement rate doesn't drive anything.
+          const scMeta = serverMeta?.scenarios.find(s => s.index === a.scenario);
+          const agg = scMeta?.config?.aggregator;
+          const hasVelocity = agg?.kind === 'nudge' && agg.velocity != null;
+          if (hasVelocity) {
+            // Agreement rate is reported as 0 by the aggregator for empty
+            // inherents (no data to disagree over) — suppress display in that
+            // case so "agree=0%" doesn't masquerade as "perfectly balanced".
+            const hasInherent = a.inherentTotal !== null && a.inherentTotal !== undefined && a.inherentTotal > 0;
+            if (hasInherent && a.agreementRate !== null && a.agreementRate !== undefined) {
+              detail += ` <span style="opacity:0.85">agree=${(a.agreementRate * 100).toFixed(0)}%</span>`;
+            }
+            if (a.epsilonCoefficient !== null && a.epsilonCoefficient !== undefined) {
+              // Boost fired this block iff coefficient ≠ 1; highlight in that
+              // case so the moment the velocity gate triggered jumps out.
+              const boosted = Math.abs(a.epsilonCoefficient - 1) > 1e-9;
+              const style = boosted ? 'color:#fc6;font-weight:600' : 'opacity:0.7';
+              detail += ` <span style="${style}">ε×${a.epsilonCoefficient.toFixed(2)}</span>`;
+            }
+          }
           lines.push(
             `<div><span style="color:${dot}">●</span> ${labelEsc}: ` +
             `<b>${glyph} ${a.type}</b> <span style="opacity:0.7">(validator #${a.index})</span>${detail}</div>`,
@@ -2103,8 +2205,11 @@
       });
 
       containerEl.addEventListener('dblclick', () => {
+        transitionLock = true;
         priceChart.timeScale().fitContent();
         devChart.timeScale().fitContent();
+        vdChart.timeScale().fitContent();
+        transitionLock = false;
       });
     }
 
