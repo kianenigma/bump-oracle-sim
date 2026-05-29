@@ -11,7 +11,7 @@ import type {
   LinePoint,
 } from "../types.js";
 import { BLOCKS_PER_CHUNK } from "../types.js";
-import { aggregateOHLC, aggregateLine, aggregateDeviation } from "./aggregation.js";
+import { aggregateOHLC, aggregateLine, aggregateDeviation, aggregateVolume } from "./aggregation.js";
 import { loadIndex, loadChunk, loadVenues, loadEvents, type VenuesFile, type EventsFile } from "./writer.js";
 import { mulberry32 } from "../rng.js";
 import { BLOCK_TIME_SECONDS } from "../config.js";
@@ -259,10 +259,20 @@ async function buildDataResponse(
   }));
 
   let venuesResp: Record<string, LinePoint[]> | undefined;
+  let venueVolumesResp: Record<string, LinePoint[]> | undefined;
   if (venues) {
     venuesResp = {};
     for (const [vid, prices] of Object.entries(venues.venues)) {
       venuesResp[vid] = aggregateLine(venues.timestamps, prices, paddedFrom, paddedTo, tf);
+    }
+    // Volumes use SUM aggregation (additive across the bucket), not the
+    // last-value behavior `aggregateLine` would give. Optional: legacy
+    // .simdata dirs without `volumes` simply skip this branch.
+    if (venues.volumes) {
+      venueVolumesResp = {};
+      for (const [vid, vols] of Object.entries(venues.volumes)) {
+        venueVolumesResp[vid] = aggregateVolume(venues.timestamps, vols, paddedFrom, paddedTo, tf);
+      }
     }
   }
 
@@ -274,6 +284,7 @@ async function buildDataResponse(
     realPrice: { ohlc: realOhlc, line: realLine },
     oracles,
     venues: venuesResp,
+    venueVolumes: venueVolumesResp,
   };
 }
 

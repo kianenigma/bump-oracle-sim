@@ -86,19 +86,55 @@
     #venue-divergence-footer .vd-value { color: var(--text); font-weight: 600; }
     #venue-divergence-footer .vd-hint  { color: var(--text-dim); margin-left: auto; font-size: 10px; }
     #deviation-chart { flex: 1; border-top: 1px solid var(--border); position: relative; min-height: 0; }
-    /* Cross-venue divergence time series. Only rendered when ≥ 2 venue lines
-       are loaded; toggles its `visible` class together with the footer. */
-    #venue-divergence-chart {
+
+    /* Collapsible auxiliary chart panel. Header is always visible (acts as
+       the click target); body collapses to 0 height when `.collapsed`. Both
+       per-venue volume and cross-venue divergence use this pattern so the
+       user can keep the main price chart spacious. The whole panel is also
+       toggleable as a unit via `.visible` (hidden when the underlying data
+       doesn't apply — e.g. synthetic mode for volume, single-venue runs for
+       divergence). */
+    .aux-panel {
+      display: none;
+      flex-direction: column;
       flex: 1;
+      min-height: 0;
       border-top: 1px solid var(--border);
+    }
+    .aux-panel.visible { display: flex; }
+    .aux-panel.collapsed { flex: 0 0 auto; }
+    .aux-panel-header {
+      flex: 0 0 auto;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      background: var(--bg-surface);
+      border-bottom: 1px solid var(--border);
+      font-size: 11px;
+      color: var(--text-muted);
+      font-weight: 500;
+      letter-spacing: 0.3px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .aux-panel-header:hover { color: var(--text); }
+    .aux-panel-arrow {
+      display: inline-block;
+      width: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 10px;
+      transition: transform 0.12s;
+    }
+    .aux-panel.collapsed .aux-panel-arrow { transform: rotate(-90deg); }
+    .aux-panel-body {
+      flex: 1;
       position: relative;
       min-height: 0;
-      display: none;
     }
-    #venue-divergence-chart.visible { display: block; }
-    .chart-label { position: absolute; top: 8px; left: 12px; font-size: 11px; color: var(--text-muted); z-index: 2; pointer-events: none; font-weight: 500; letter-spacing: 0.3px; }
+    .aux-panel.collapsed .aux-panel-body { display: none; }
 
-    .drag-select { position: fixed; background: rgba(128,128,128,0.12); border-left: 2px solid rgba(128,128,128,0.6); border-right: 2px solid rgba(128,128,128,0.6); pointer-events: none; z-index: 50; }
+    .chart-label { position: absolute; top: 8px; left: 12px; font-size: 11px; color: var(--text-muted); z-index: 2; pointer-events: none; font-weight: 500; letter-spacing: 0.3px; }
 
     #loading-overlay {
       position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -273,9 +309,36 @@
       <button class="tb" id="btn-zoom-in" title="Zoom in (+)">+</button>
       <button class="tb" id="btn-zoom-out" title="Zoom out (-)">&#8722;</button>
       <button class="tb" id="btn-reset" title="Reset to full view (R)">Reset</button>
+      <button class="tb" id="btn-jump" title="Jump to date/time — keeps zoom and granularity">&#128197;</button>
+    </div>
+
+    <!-- Jump-to-date popover. Anchored under #btn-jump via JS positioning so
+         it floats over the chart area. Closes on outside click, Escape, or
+         after a successful jump. Date/time inputs are browser-native; the
+         jump preserves the current zoom span and granularity, only the
+         viewport center changes. -->
+    <div id="jump-popover" style="display:none; position:absolute; z-index:200;
+         background: var(--bg-elevated); border: 1px solid var(--border);
+         border-radius: 6px; padding: 10px; box-shadow: 0 4px 16px rgba(0,0,0,0.3);
+         font-size: 12px; color: var(--text); min-width: 220px;">
+      <div style="display:flex; flex-direction:column; gap:6px;">
+        <label style="display:flex; flex-direction:column; gap:2px;">
+          <span style="color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;">Date</span>
+          <input type="date" id="jump-date" style="background: var(--input-bg); color: var(--text); border: 1px solid var(--input-border); border-radius: 4px; padding: 4px 6px; font-size: 12px; font-family: inherit;">
+        </label>
+        <label style="display:flex; flex-direction:column; gap:2px;">
+          <span style="color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;">Time (optional, UTC)</span>
+          <input type="time" id="jump-time" step="1" placeholder="00:00:00" style="background: var(--input-bg); color: var(--text); border: 1px solid var(--input-border); border-radius: 4px; padding: 4px 6px; font-size: 12px; font-family: inherit;">
+        </label>
+        <div style="display:flex; gap:6px; justify-content:flex-end; margin-top: 4px;">
+          <button class="tb" id="jump-cancel">Cancel</button>
+          <button class="tb" id="jump-go" style="background: var(--active-bg); color: var(--active-text); border-color: var(--active-bg);">Jump</button>
+        </div>
+        <div id="jump-error" style="display:none; color: #e88; font-size: 11px; margin-top: 2px;"></div>
+      </div>
     </div>
     <span class="toolbar-hint">
-      <kbd>Click+Drag</kbd> select range &nbsp; <kbd>Dbl-click</kbd> reset &nbsp; <kbd>Scroll</kbd> zoom &nbsp; <kbd>&#8592;&#8594;</kbd> pan &nbsp; <kbd>+/-</kbd> zoom &nbsp; <kbd>R</kbd> reset
+      <kbd>Dbl-click</kbd> fit &nbsp; <kbd>2-finger scroll</kbd> pan/zoom &nbsp; <kbd>&#8592;&#8594;</kbd> pan &nbsp; <kbd>+/-</kbd> zoom &nbsp; <kbd>R</kbd> reset
     </span>
   </div>
 
@@ -296,7 +359,23 @@
     <div id="chart-tab" style="flex:1;min-width:0;">
       <div id="price-chart"><span class="chart-label">Price</span></div>
       <div id="deviation-chart"><span class="chart-label">Deviation %</span></div>
-      <div id="venue-divergence-chart"><span class="chart-label">Cross-venue CoV %</span></div>
+
+      <div id="venue-volume-panel" class="aux-panel" data-panel-id="venue-volume">
+        <div class="aux-panel-header" data-target="venue-volume-panel">
+          <span class="aux-panel-arrow">▾</span>
+          <span class="aux-panel-title">Per-venue volume (base asset)</span>
+        </div>
+        <div class="aux-panel-body" id="venue-volume-chart"></div>
+      </div>
+
+      <div id="venue-divergence-panel" class="aux-panel" data-panel-id="venue-divergence">
+        <div class="aux-panel-header" data-target="venue-divergence-panel">
+          <span class="aux-panel-arrow">▾</span>
+          <span class="aux-panel-title">Cross-venue CoV %</span>
+        </div>
+        <div class="aux-panel-body" id="venue-divergence-chart"></div>
+      </div>
+
       <div id="venue-divergence-footer">
         <span class="vd-label">Cross-venue divergence (CoV%):</span>
         <span class="vd-value" id="vd-value">—</span>
@@ -404,6 +483,7 @@
       priceChart.applyOptions(opts);
       devChart.applyOptions(opts);
       vdChart.applyOptions(opts);
+      volumeChart.applyOptions(opts);
     }
 
     document.getElementById('theme-toggle').addEventListener('click', () => {
@@ -437,6 +517,7 @@
           priceChart.applyOptions({ width: priceChartEl.clientWidth, height: priceChartEl.clientHeight });
           devChart.applyOptions({ width: devChartEl.clientWidth, height: devChartEl.clientHeight });
           vdChart.applyOptions({ width: vdChartEl.clientWidth, height: vdChartEl.clientHeight });
+          volumeChart.applyOptions({ width: volumeChartEl.clientWidth, height: volumeChartEl.clientHeight });
         }
         if (currentTab === 'research' && cachedResearchData && cachedResearchData.interpolated) {
           drawFitChart(cachedResearchData.ranking, cachedResearchData.interpolated);
@@ -1210,33 +1291,125 @@
     // ── Charts ──
     const priceChartEl = document.getElementById('price-chart');
     const t = getThemeChartOptions();
-    const priceChart = LightweightCharts.createChart(priceChartEl, {
-      layout: { background: { color: t.bg }, textColor: t.text },
-      grid: { vertLines: { color: t.grid }, horzLines: { color: t.grid } },
-      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-      rightPriceScale: { borderColor: t.border },
-      timeScale: { borderColor: t.border, timeVisible: true, secondsVisible: true },
-    });
+    // Shared chart options. We disable BOTH wheel paths in Lightweight Charts
+    // (handleScale.mouseWheel + handleScroll.mouseWheel) and replace them
+    // with a custom handler below. Why: LWC's default treats deltaX (pan)
+    // and deltaY (zoom) independently in the same wheel event, but a Mac
+    // trackpad horizontal swipe carries a small deltaY component, so the
+    // chart would pan AND zoom simultaneously — the "zoom changes while I
+    // scroll sideways" bug. Our custom handler picks one action per event
+    // based on which axis dominates. Pinch (synthesized ctrl+wheel on Mac
+    // trackpads) is left to LWC's separate pinch path via handleScale.pinch.
+    function chartOpts(extraTimeScale = {}) {
+      return {
+        layout: { background: { color: t.bg }, textColor: t.text },
+        grid: { vertLines: { color: t.grid }, horzLines: { color: t.grid } },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+        rightPriceScale: { borderColor: t.border },
+        timeScale: { borderColor: t.border, timeVisible: true, secondsVisible: false, ...extraTimeScale },
+        handleScroll: {
+          mouseWheel: false,        // custom handler below
+          pressedMouseMove: true,
+          horzTouchDrag: true,
+          vertTouchDrag: true,
+        },
+        handleScale: {
+          mouseWheel: false,        // custom handler below
+          pinch: true,              // Mac trackpad pinch still zooms via LWC
+          axisPressedMouseMove: true,
+          axisDoubleClickReset: true,
+        },
+      };
+    }
+    const priceChart = LightweightCharts.createChart(priceChartEl, chartOpts({ secondsVisible: true }));
 
     const devChartEl = document.getElementById('deviation-chart');
-    const devChart = LightweightCharts.createChart(devChartEl, {
-      layout: { background: { color: t.bg }, textColor: t.text },
-      grid: { vertLines: { color: t.grid }, horzLines: { color: t.grid } },
-      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-      rightPriceScale: { borderColor: t.border },
-      timeScale: { borderColor: t.border, timeVisible: true, secondsVisible: false },
-    });
+    const devChart = LightweightCharts.createChart(devChartEl, chartOpts());
 
     // Cross-venue divergence chart: one line series, per-block CoV %.
     const vdChartEl = document.getElementById('venue-divergence-chart');
-    const vdChart = LightweightCharts.createChart(vdChartEl, {
-      layout: { background: { color: t.bg }, textColor: t.text },
-      grid: { vertLines: { color: t.grid }, horzLines: { color: t.grid } },
-      crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
-      rightPriceScale: { borderColor: t.border },
-      timeScale: { borderColor: t.border, timeVisible: true, secondsVisible: false },
-    });
+    const vdChart = LightweightCharts.createChart(vdChartEl, chartOpts());
     let vdSeries = null; // single line series, recreated on each rebuild
+
+    // Per-venue volume chart: one line per venue, value = sum of base-asset
+    // volume in each TF bucket. Visibility is controlled by the parent panel
+    // (.aux-panel.visible) — hidden whenever the loaded .simdata has no
+    // per-venue volume data (synthetic mode, legacy dirs predating the
+    // volumes field).
+    const volumeChartEl = document.getElementById('venue-volume-chart');
+    const volumeChart = LightweightCharts.createChart(volumeChartEl, chartOpts());
+
+    // Custom wheel handler — replaces Lightweight Charts' built-in one.
+    // Discriminates per-event by axis dominance:
+    //   - Pinch (e.ctrlKey, synthesized by Mac trackpad pinch): pass through;
+    //     LWC's handleScale.pinch handles it.
+    //   - Vertical-DOMINANT swipe (|deltaY| strictly > |deltaX| AND |deltaY|
+    //     above a small noise floor): zoom at cursor.
+    //   - Everything else (horizontal-dominant, ties, or small-|deltaY|
+    //     events): pan only.
+    // Two filters defend against the "horizontal swipe also alters zoom" bug:
+    //   1. The dominance check has to be STRICT (`>`, not `>=`), so a tied
+    //      event goes to pan.
+    //   2. The noise-floor cutoff (`WHEEL_ZOOM_MIN_DELTA_Y`) prevents a
+    //      barely-non-zero deltaY component (the kind a Mac trackpad emits
+    //      during a mostly-horizontal swipe) from ever entering the zoom
+    //      branch even if it happens to nominally exceed deltaX.
+    const WHEEL_ZOOM_MIN_DELTA_Y = 3;
+    function attachWheelHandler(chart, chartEl) {
+      chartEl.addEventListener('wheel', (e) => {
+        if (e.ctrlKey) return;     // pinch → let LWC handle
+        e.preventDefault();
+        const lr = chart.timeScale().getVisibleLogicalRange();
+        if (!lr) return;
+        const span = lr.to - lr.from;
+        const absX = Math.abs(e.deltaX);
+        const absY = Math.abs(e.deltaY);
+        if (absX === 0 && absY === 0) return;
+        const isZoom = absY > absX && absY >= WHEEL_ZOOM_MIN_DELTA_Y;
+        if (isZoom) {
+          // Zoom at cursor. Scroll up (deltaY < 0) = zoom in; down = zoom
+          // out. The /200 divisor controls sensitivity — tuned so one
+          // trackpad "tick" (~20 px) ≈ 10% zoom, and a full mouse-wheel
+          // click (~100 px) ≈ 65% zoom, matching the perceived speed of the
+          // LWC default we replaced.
+          const rect = chartEl.getBoundingClientRect();
+          const cursorX = e.clientX - rect.left;
+          const cursorLogical = chart.timeScale().coordinateToLogical(cursorX);
+          const factor = Math.exp(e.deltaY / 200);
+          const newSpan = span * factor;
+          let newFrom, newTo;
+          if (cursorLogical !== null) {
+            const ratio = (cursorLogical - lr.from) / span;
+            newFrom = cursorLogical - ratio * newSpan;
+            newTo = cursorLogical + (1 - ratio) * newSpan;
+          } else {
+            const center = (lr.from + lr.to) / 2;
+            newFrom = center - newSpan / 2;
+            newTo = center + newSpan / 2;
+          }
+          chart.timeScale().setVisibleLogicalRange({ from: newFrom, to: newTo });
+        } else {
+          // Pan. deltaX / chartWidth ≈ fraction of the visible window the
+          // user dragged across; multiply by current logical span for a
+          // constant-velocity feel at any zoom level. We pan even when
+          // deltaX is 0 but deltaY was below the zoom threshold — shift is
+          // 0 in that case, so it's a harmless no-op.
+          const w = Math.max(1, chartEl.clientWidth);
+          const shift = span * (e.deltaX / w);
+          chart.timeScale().setVisibleLogicalRange({
+            from: lr.from + shift,
+            to: lr.to + shift,
+          });
+        }
+      }, { passive: false });
+    }
+    attachWheelHandler(priceChart, priceChartEl);
+    attachWheelHandler(devChart, devChartEl);
+    attachWheelHandler(vdChart, vdChartEl);
+    attachWheelHandler(volumeChart, volumeChartEl);
+    // Keyed by venue id; rebuilt only when the venue set changes (cheap and
+    // matches the price-chart venue-line pattern).
+    const volumeSeriesByVenue = new Map();
 
     // ── Series management ──
     let activePriceSeries = [];
@@ -1424,25 +1597,22 @@
         transitionLock = true;
 
         // Apply ALL data updates first (price/dev series + venue-divergence
-        // series), THEN set the final visible range. Doing it in the other
-        // order let `refreshVenueDivergence`'s setData re-trigger auto-fit on
-        // vdChart, which clobbered the just-restored saved range and showed
-        // up as a one-frame jump on every pan/zoom — the "flicker".
+        // + venue-volume), THEN set the final visible range. Doing it in the
+        // other order let setData on the aux charts re-trigger auto-fit,
+        // which clobbered the just-restored saved range and showed up as a
+        // one-frame jump on every pan/zoom — the "flicker".
         if (canUpdateInPlace(data)) {
           updateSeriesData(data);
         } else {
           rebuildServerSeries(data);
         }
         refreshVenueDivergence();
+        refreshVenueVolume();
 
         if (fitContent) {
-          priceChart.timeScale().fitContent();
-          devChart.timeScale().fitContent();
-          vdChart.timeScale().fitContent();
+          for (const c of allCharts) c.timeScale().fitContent();
         } else if (savedTimeRange) {
-          priceChart.timeScale().setVisibleRange(savedTimeRange);
-          devChart.timeScale().setVisibleRange(savedTimeRange);
-          vdChart.timeScale().setVisibleRange(savedTimeRange);
+          for (const c of allCharts) c.timeScale().setVisibleRange(savedTimeRange);
         }
 
         transitionLock = false;
@@ -1635,9 +1805,7 @@
           transitionLock = true;
           rebuildServerSeries(lastServerData);
           if (savedRange) {
-            priceChart.timeScale().setVisibleRange(savedRange);
-            devChart.timeScale().setVisibleRange(savedRange);
-            vdChart.timeScale().setVisibleRange(savedRange);
+            for (const c of allCharts) c.timeScale().setVisibleRange(savedRange);
           }
           transitionLock = false;
         }
@@ -1732,6 +1900,136 @@
 
     document.getElementById('btn-reset').addEventListener('click', resetToDefaults);
 
+    // ── Jump-to-date popover ──
+    // Open/close the popover under the calendar button. The picker preserves
+    // zoom span (current `to - from`) and granularity (currentTF); only the
+    // viewport CENTER moves to the chosen timestamp. If the target lands
+    // outside the dataset bounds we clamp it; if the centered window would
+    // overhang totalTimeRange we slide it back in so the user always sees
+    // their requested time on-screen.
+    const jumpBtn = document.getElementById('btn-jump');
+    const jumpPopover = document.getElementById('jump-popover');
+    const jumpDateInput = document.getElementById('jump-date');
+    const jumpTimeInput = document.getElementById('jump-time');
+    const jumpGoBtn = document.getElementById('jump-go');
+    const jumpCancelBtn = document.getElementById('jump-cancel');
+    const jumpErrorEl = document.getElementById('jump-error');
+
+    function openJumpPopover() {
+      // Seed the inputs from the CURRENT viewport center, so the user starts
+      // editing from a familiar reference point instead of an empty field.
+      const tr = priceChart.timeScale().getVisibleRange();
+      if (tr) {
+        const centerSec = (tr.from + tr.to) / 2;
+        const d = new Date(centerSec * 1000);
+        jumpDateInput.value = d.toISOString().slice(0, 10);
+        jumpTimeInput.value = d.toISOString().slice(11, 19);  // HH:MM:SS UTC
+      } else if (totalTimeRange) {
+        const d = new Date(totalTimeRange.from * 1000);
+        jumpDateInput.value = d.toISOString().slice(0, 10);
+        jumpTimeInput.value = '';
+      }
+      jumpErrorEl.style.display = 'none';
+
+      // Position the popover under the calendar button, right-aligned so it
+      // doesn't overflow the viewport edge.
+      const rect = jumpBtn.getBoundingClientRect();
+      jumpPopover.style.display = 'block';
+      const popoverWidth = jumpPopover.offsetWidth || 240;
+      let left = rect.right - popoverWidth;
+      if (left < 8) left = 8;
+      jumpPopover.style.left = `${left}px`;
+      jumpPopover.style.top = `${rect.bottom + 4}px`;
+      jumpDateInput.focus();
+    }
+
+    function closeJumpPopover() {
+      jumpPopover.style.display = 'none';
+    }
+
+    function performJump() {
+      const dateStr = jumpDateInput.value;
+      if (!dateStr) {
+        jumpErrorEl.textContent = 'Pick a date.';
+        jumpErrorEl.style.display = 'block';
+        return;
+      }
+      const timeStr = jumpTimeInput.value || '00:00:00';
+      // Treat input as UTC — matches the time axis labelling and tooltip
+      // timestamps (which are also UTC).
+      const targetMs = Date.parse(`${dateStr}T${timeStr}Z`);
+      if (isNaN(targetMs)) {
+        jumpErrorEl.textContent = `Couldn't parse ${dateStr} ${timeStr}.`;
+        jumpErrorEl.style.display = 'block';
+        return;
+      }
+      const targetSec = targetMs / 1000;
+
+      if (!totalTimeRange) {
+        jumpErrorEl.textContent = 'No dataset loaded.';
+        jumpErrorEl.style.display = 'block';
+        return;
+      }
+      if (targetSec < totalTimeRange.from || targetSec > totalTimeRange.to) {
+        const fromStr = new Date(totalTimeRange.from * 1000).toISOString().slice(0, 16).replace('T', ' ');
+        const toStr = new Date(totalTimeRange.to * 1000).toISOString().slice(0, 16).replace('T', ' ');
+        jumpErrorEl.textContent = `Outside dataset (${fromStr} → ${toStr} UTC).`;
+        jumpErrorEl.style.display = 'block';
+        return;
+      }
+
+      // Preserve current zoom span — only the center moves.
+      const tr = priceChart.timeScale().getVisibleRange();
+      let span;
+      if (tr) {
+        span = tr.to - tr.from;
+      } else {
+        span = totalTimeRange.to - totalTimeRange.from;
+      }
+      let newFrom = targetSec - span / 2;
+      let newTo = targetSec + span / 2;
+
+      // If the centered window overhangs the dataset, slide it back in
+      // without changing the span.
+      if (newFrom < totalTimeRange.from) {
+        newTo += totalTimeRange.from - newFrom;
+        newFrom = totalTimeRange.from;
+      }
+      if (newTo > totalTimeRange.to) {
+        newFrom -= newTo - totalTimeRange.to;
+        newTo = totalTimeRange.to;
+        if (newFrom < totalTimeRange.from) newFrom = totalTimeRange.from;
+      }
+
+      // Time-based sync propagates this to dev/divergence/volume charts via
+      // the subscribeVisibleLogicalRangeChange handler. If the new window
+      // sits outside the buffered fetch, onViewportChange's debounce will
+      // pick it up and trigger a re-fetch at the current granularity.
+      priceChart.timeScale().setVisibleRange({ from: newFrom, to: newTo });
+      closeJumpPopover();
+    }
+
+    jumpBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (jumpPopover.style.display === 'block') closeJumpPopover();
+      else openJumpPopover();
+    });
+    jumpGoBtn.addEventListener('click', performJump);
+    jumpCancelBtn.addEventListener('click', closeJumpPopover);
+    // Enter in either input triggers Jump; Escape closes.
+    [jumpDateInput, jumpTimeInput].forEach(el => {
+      el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); performJump(); }
+        else if (e.key === 'Escape') { e.preventDefault(); closeJumpPopover(); }
+      });
+    });
+    // Click outside closes the popover.
+    document.addEventListener('click', (e) => {
+      if (jumpPopover.style.display !== 'block') return;
+      if (jumpPopover.contains(e.target) || jumpBtn.contains(e.target)) return;
+      closeJumpPopover();
+    });
+
     // Keyboard shortcuts
     document.addEventListener('keydown', (e) => {
       if (e.target.tagName === 'INPUT') return;
@@ -1748,38 +2046,31 @@
     });
 
     // ── Sync charts ──
+    // Cross-chart sync is TIME-based, not logical-based. The auxiliary charts
+    // (venue-divergence, venue-volume) frequently have DIFFERENT data lengths
+    // than the main charts — buildVenueDivergenceSeries skips blocks where
+    // < 2 venues have data, and per-venue volume series can each cover their
+    // own subset of time. With logical-range sync, the same `{from, to}`
+    // logical indices on two charts map to DIFFERENT times when their data
+    // lengths differ — that's why the user saw the CoV chart's time axis
+    // drift out of alignment after a pan. setVisibleRange/getVisibleRange
+    // work in unix seconds and stay aligned regardless of length.
     let syncing = false;
     let transitionLock = false;
-    function syncTo(target, range) {
-      if (!range) return;
-      if (target === priceChart) priceChart.timeScale().setVisibleLogicalRange(range);
-      if (target === devChart)   devChart.timeScale().setVisibleLogicalRange(range);
-      if (target === vdChart)    vdChart.timeScale().setVisibleLogicalRange(range);
+    const allCharts = [priceChart, devChart, vdChart, volumeChart];
+    for (const src of allCharts) {
+      src.timeScale().subscribeVisibleLogicalRangeChange(() => {
+        if (syncing || transitionLock) return;
+        const tr = src.timeScale().getVisibleRange();
+        if (!tr) return;
+        syncing = true;
+        for (const dst of allCharts) {
+          if (dst !== src) dst.timeScale().setVisibleRange(tr);
+        }
+        syncing = false;
+        recomputeVenueDivergence();
+      });
     }
-    priceChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-      if (syncing || transitionLock || !range) return;
-      syncing = true;
-      syncTo(devChart, range);
-      syncTo(vdChart, range);
-      syncing = false;
-      recomputeVenueDivergence();
-    });
-    devChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-      if (syncing || transitionLock || !range) return;
-      syncing = true;
-      syncTo(priceChart, range);
-      syncTo(vdChart, range);
-      syncing = false;
-      recomputeVenueDivergence();
-    });
-    vdChart.timeScale().subscribeVisibleLogicalRangeChange(range => {
-      if (syncing || transitionLock || !range) return;
-      syncing = true;
-      syncTo(priceChart, range);
-      syncTo(devChart, range);
-      syncing = false;
-      recomputeVenueDivergence();
-    });
 
     // ── Cross-venue divergence: per-block series cache ──
     // Computed once per data refresh from lastServerData.venues. Drives both
@@ -1817,14 +2108,19 @@
     }
 
     function renderVenueDivergenceChart() {
+      const panelEl = document.getElementById('venue-divergence-panel');
       const chartEl = document.getElementById('venue-divergence-chart');
-      // Hide the chart entirely when there's no multi-venue data to show.
+      // Hide the panel entirely when there's no multi-venue data to show.
       if (vdSeriesData.length === 0) {
-        chartEl.classList.remove('visible');
+        panelEl.classList.remove('visible');
         if (vdSeries) { vdChart.removeSeries(vdSeries); vdSeries = null; }
         return;
       }
-      chartEl.classList.add('visible');
+      panelEl.classList.add('visible');
+      // Skip the expensive setData when collapsed — the chart isn't drawn,
+      // and the cached series data here would be stale relative to the
+      // current fetch anyway. We refresh on expand (see panel click handler).
+      if (panelEl.classList.contains('collapsed')) return;
       vdChart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight });
       // Keep the series object alive across refreshes — re-creating it on
       // every fetch caused vdChart to auto-fit to the new series' data and
@@ -1839,6 +2135,61 @@
         });
       }
       vdSeries.setData(vdSeriesData);
+    }
+
+    // ── Per-venue volume chart ──
+    // Renders one line per venue, value = base-asset volume traded in each
+    // TF bucket (sum-aggregated, not last-value — see aggregateVolume in
+    // src/viz/aggregation.ts). Colors are pulled from VENUE_COLORS so the
+    // volume line for each venue matches its price line. Like vdSeries,
+    // each per-venue series is kept alive across refreshes so setData
+    // doesn't trigger auto-fit / range flicker.
+    function refreshVenueVolume() {
+      const panelEl = document.getElementById('venue-volume-panel');
+      const chartEl = document.getElementById('venue-volume-chart');
+      const vols = lastServerData && lastServerData.venueVolumes;
+      // No volume data → hide the panel entirely. Two cases trigger this:
+      // synthetic / candle modes that don't carry per-venue volumes, and
+      // older .simdata directories that predate the `volumes` field in
+      // venues.json.
+      if (!vols || Object.keys(vols).length === 0) {
+        panelEl.classList.remove('visible');
+        for (const [, s] of volumeSeriesByVenue) volumeChart.removeSeries(s);
+        volumeSeriesByVenue.clear();
+        return;
+      }
+      panelEl.classList.add('visible');
+      // Skip the expensive setData when collapsed; refresh on expand.
+      if (panelEl.classList.contains('collapsed')) return;
+      volumeChart.applyOptions({ width: chartEl.clientWidth, height: chartEl.clientHeight });
+
+      // Drop any series for venues no longer present (defensive — the venue
+      // set is fixed per-.simdata in practice).
+      for (const [vid, s] of [...volumeSeriesByVenue]) {
+        if (!(vid in vols)) {
+          volumeChart.removeSeries(s);
+          volumeSeriesByVenue.delete(vid);
+        }
+      }
+
+      // Add/update one line per venue, matching the price-chart venue color
+      // by venueIds index so the volume chart reads as a direct companion.
+      for (let i = 0; i < venueIds.length; i++) {
+        const vid = venueIds[i];
+        const line = vols[vid];
+        if (!line) continue;
+        let series = volumeSeriesByVenue.get(vid);
+        if (!series) {
+          series = volumeChart.addLineSeries({
+            color: VENUE_COLORS[i % VENUE_COLORS.length],
+            lineWidth: 1,
+            priceLineVisible: false,
+            lastValueVisible: true,
+          });
+          volumeSeriesByVenue.set(vid, series);
+        }
+        series.setData(line);
+      }
     }
 
     // ── Footer (visible-window average) ──
@@ -2138,83 +2489,82 @@
         priceChart.applyOptions({ width: priceChartEl.clientWidth, height: priceChartEl.clientHeight });
         devChart.applyOptions({ width: devChartEl.clientWidth, height: devChartEl.clientHeight });
         vdChart.applyOptions({ width: vdChartEl.clientWidth, height: vdChartEl.clientHeight });
+        volumeChart.applyOptions({ width: volumeChartEl.clientWidth, height: volumeChartEl.clientHeight });
       }
     });
     ro.observe(priceChartEl);
     ro.observe(devChartEl);
     ro.observe(vdChartEl);
+    ro.observe(volumeChartEl);
 
-    // ── Drag-to-zoom ──
-    function setupDragZoom(containerEl, chart) {
-      let startX = null;
-      let isDragging = false;
-      let selBox = null;
-      const THRESHOLD = 8;
-
-      containerEl.addEventListener('pointerdown', (e) => {
-        if (e.button !== 0) return;
-        const rect = containerEl.getBoundingClientRect();
-        const localY = e.clientY - rect.top;
-        const localX = e.clientX - rect.left;
-        if (localY > rect.height - 30) return;
-        if (localX > rect.width - 60) return;
-        startX = e.clientX;
-        isDragging = false;
-      });
-
-      document.addEventListener('pointermove', (e) => {
-        if (startX === null) return;
-        const dx = e.clientX - startX;
-
-        if (!isDragging && Math.abs(dx) >= THRESHOLD) {
-          isDragging = true;
-          const rect = containerEl.getBoundingClientRect();
-          selBox = document.createElement('div');
-          selBox.className = 'drag-select';
-          selBox.style.top = rect.top + 'px';
-          selBox.style.height = rect.height + 'px';
-          document.body.appendChild(selBox);
-        }
-
-        if (isDragging && selBox) {
-          const left = Math.min(startX, e.clientX);
-          selBox.style.left = left + 'px';
-          selBox.style.width = Math.abs(dx) + 'px';
-        }
-      });
-
-      document.addEventListener('pointerup', (e) => {
-        if (isDragging && selBox) {
-          const rect = containerEl.getBoundingClientRect();
-          const x1 = Math.min(startX, e.clientX) - rect.left;
-          const x2 = Math.max(startX, e.clientX) - rect.left;
-
-          const ts = chart.timeScale();
-          const from = ts.coordinateToLogical(x1);
-          const to = ts.coordinateToLogical(x2);
-
-          if (from !== null && to !== null && Math.abs(to - from) > 1) {
-            ts.setVisibleLogicalRange({ from, to });
-          }
-
-          selBox.remove();
-          selBox = null;
-        }
-        startX = null;
-        isDragging = false;
-      });
-
+    // ── Double-click to fit content ──
+    // Previously this lived alongside a custom drag-to-select-range
+    // implementation (a manual selection box + setVisibleLogicalRange on
+    // pointerup). The drag-select was removed in favor of the calendar
+    // jump button — see the toolbar — because pan-by-drag was the more
+    // common gesture and the drag-select fought with it.
+    function setupDblClickFit(containerEl) {
       containerEl.addEventListener('dblclick', () => {
         transitionLock = true;
-        priceChart.timeScale().fitContent();
-        devChart.timeScale().fitContent();
-        vdChart.timeScale().fitContent();
+        for (const c of allCharts) c.timeScale().fitContent();
         transitionLock = false;
       });
     }
+    setupDblClickFit(priceChartEl);
+    setupDblClickFit(devChartEl);
 
-    setupDragZoom(priceChartEl, priceChart);
-    setupDragZoom(devChartEl, devChart);
+    // ── Collapsible aux panels ──
+    // Each .aux-panel-header toggles the `.collapsed` class on its parent
+    // panel (CSS flips flex behavior + hides the body). State is persisted
+    // in localStorage so the user's preferred layout sticks across reloads.
+    // We don't need to manually resize the other charts on collapse — when
+    // the flex changes their clientHeight, the ResizeObserver above fires
+    // and reapplies width/height on every chart.
+    const COLLAPSE_STORAGE_KEY = 'oracleSim.collapsedPanels';
+    function loadCollapsedPanels() {
+      try {
+        const raw = localStorage.getItem(COLLAPSE_STORAGE_KEY);
+        if (!raw) return new Set();
+        const arr = JSON.parse(raw);
+        return new Set(Array.isArray(arr) ? arr : []);
+      } catch { return new Set(); }
+    }
+    function saveCollapsedPanels(set) {
+      try { localStorage.setItem(COLLAPSE_STORAGE_KEY, JSON.stringify([...set])); }
+      catch { /* localStorage may be disabled; collapse just won't persist */ }
+    }
+    const collapsedPanels = loadCollapsedPanels();
+    document.querySelectorAll('.aux-panel').forEach(panel => {
+      const id = panel.dataset.panelId;
+      if (id && collapsedPanels.has(id)) panel.classList.add('collapsed');
+      const header = panel.querySelector('.aux-panel-header');
+      if (header) {
+        header.addEventListener('click', () => {
+          const wasCollapsed = panel.classList.contains('collapsed');
+          panel.classList.toggle('collapsed');
+          const isCollapsed = panel.classList.contains('collapsed');
+          if (id) {
+            if (isCollapsed) collapsedPanels.add(id);
+            else collapsedPanels.delete(id);
+            saveCollapsedPanels(collapsedPanels);
+          }
+          // Going collapsed→expanded: the chart wasn't being refreshed while
+          // hidden (refresh* short-circuit when collapsed), so populate it
+          // from the most recent fetch now AND restore the current visible
+          // range so it lines up with the other charts immediately.
+          if (wasCollapsed && !isCollapsed) {
+            const tr = priceChart.timeScale().getVisibleRange();
+            if (id === 'venue-divergence') {
+              renderVenueDivergenceChart();
+              if (tr) vdChart.timeScale().setVisibleRange(tr);
+            } else if (id === 'venue-volume') {
+              refreshVenueVolume();
+              if (tr) volumeChart.timeScale().setVisibleRange(tr);
+            }
+          }
+        });
+      }
+    });
 
     // ── Init ──
     initServer();

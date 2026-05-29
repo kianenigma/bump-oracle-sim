@@ -185,7 +185,7 @@ export class MaliciousValidator extends BaseValidator {
       const n = wrongBumps.length;
       const wrongSign = wrongDir === Bump.Up ? 1 : -1;
       const withoutPrice = ctx.lastPrice + wrongSign * n * vel.baseEpsilon;
-      const withPrice    = ctx.lastPrice + wrongSign * n * vel.baseEpsilon * vel.pendingProposal.coefficient;
+      const withPrice = ctx.lastPrice + wrongSign * n * vel.baseEpsilon * vel.pendingProposal.coefficient;
       if (Math.abs(withPrice - targetPrice) > Math.abs(withoutPrice - targetPrice)) {
         this.wantedBoost = true;
       }
@@ -247,7 +247,7 @@ export class PushyMaliciousValidator extends BaseValidator {
       const n = bumps.length;
       const sign = direction === Bump.Up ? 1 : -1;
       const withoutPrice = ctx.lastPrice + sign * n * vel.baseEpsilon;
-      const withPrice    = ctx.lastPrice + sign * n * vel.baseEpsilon * vel.pendingProposal.coefficient;
+      const withPrice = ctx.lastPrice + sign * n * vel.baseEpsilon * vel.pendingProposal.coefficient;
       if (Math.abs(withPrice - targetPrice) > Math.abs(withoutPrice - targetPrice)) {
         this.wantedBoost = true;
       }
@@ -269,22 +269,29 @@ export class PushyMaliciousValidator extends BaseValidator {
 //   * divergence up: over-borrow pUSD
 //   * divergence down: redeem against DOTs in the vaults for cheap
 // so the attack target is `max |oracle - real|`, not a fixed direction.
-export class MaximallyPushyNudgeValidator extends BaseValidator {
-  static readonly compatibleEngines: ReadonlyArray<AggregatorMode> = ["nudge"];
+export class MaximallyPushyValidator extends BaseValidator {
+  static readonly compatibleEngines: ReadonlyArray<AggregatorMode> = ["nudge", "median"];
   readonly type: ValidatorType = "pushy-max";
 
-  protected produceQuoteInput(_ctx: ProduceCtx): Submission {
-    throw new Error(
-      `MaximallyPushyNudgeValidator (index=${this.index}): quote-mode is unsupported. ` +
-      `Use --aggregator=nudge.`,
-    );
+  protected produceQuoteInput(ctx: ProduceCtx): Submission {
+    return quote(this.index, this.type, 0);
   }
 
-  protected produceQuoteInherent(_inputs: Submission[], _ctx: ProduceCtx): Submission[] {
-    throw new Error(
-      `MaximallyPushyNudgeValidator (index=${this.index}): quote-mode is unsupported. ` +
-      `Use --aggregator=nudge.`,
-    );
+  protected produceQuoteInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
+
+    const honest = inputs.filter(s => s.kind === "quote" && s.type === "honest");
+    const ourCabal = inputs.filter(s => s.kind === "quote" && s.type === this.type);
+    const quotesNeeded = ctx.inputKind.kind === "quote" ? ctx.inputKind.minInputs : 0;
+    const honestToInclude = quotesNeeded - ourCabal.length
+    // sort all honest quotes, take the first honestToInclude, and return that.
+    const sortedHonest = honest.sort((a, b) => { if (a.kind === "quote" && b.kind === "quote") { return a.price - b.price; } else { return 0; } });
+    const maxBiased = sortedHonest.slice(0, honestToInclude).concat(ourCabal);
+    if (maxBiased.length != quotesNeeded) {
+      throw new Error(`MaximallyPushyValidator: failed to produce enough quotes: ${maxBiased.length} of ${quotesNeeded}`);
+    }
+    return maxBiased
+
+
   }
 
   protected produceNudgeInput(ctx: ProduceCtx): Submission {
@@ -321,7 +328,7 @@ export class MaximallyPushyNudgeValidator extends BaseValidator {
     const upInherent = honestAllUp.concat(cabalAllUp);
     const downInherent = honestAllDown.concat(cabalAllDown);
     const candidates: Candidate[] = [
-      { inherent: upInherent,   finalPrice: priceFromNudges(upInherent,   baseEps, ctx.lastPrice), useBoost: false },
+      { inherent: upInherent, finalPrice: priceFromNudges(upInherent, baseEps, ctx.lastPrice), useBoost: false },
       { inherent: downInherent, finalPrice: priceFromNudges(downInherent, baseEps, ctx.lastPrice), useBoost: false },
     ];
     if (vel?.pendingProposal) {
@@ -437,52 +444,5 @@ export class DriftValidator extends BaseValidator {
 
   protected produceNudgeInherent(inputs: Submission[], _ctx: ProduceCtx): Submission[] {
     return pickAllInDirectionBumps(inputs, Bump.Up);
-  }
-}
-
-// ── WithholderValidator ─────────────────────────────────────────────────────
-// 1/3-cabal that abstains exactly when honest publication would push the
-// oracle in `withholderDirection`. The chain moves only AGAINST the attack
-// direction: the oracle ratchets one way over any period in which real
-// drifts in the suppressed direction. Implicit coordination via shared
-// observable.
-//
-// Nudge-only — quote-mode hooks throw because this validator is only
-// meaningful against the nudge aggregator's bump pool.
-export class WithholderValidator extends BaseValidator {
-  static readonly compatibleEngines: ReadonlyArray<AggregatorMode> = ["nudge"];
-  readonly type: ValidatorType = "withholder";
-
-  private suppressing(observed: number, lastPrice: number): boolean {
-    return wouldPushOracle(this.params.withholderDirection, observed, lastPrice);
-  }
-
-  protected produceQuoteInput(_ctx: ProduceCtx): Submission {
-    throw new Error(
-      `WithholderValidator (index=${this.index}): quote-mode is unsupported. ` +
-      `Use --aggregator=nudge.`,
-    );
-  }
-
-  protected produceQuoteInherent(_inputs: Submission[], _ctx: ProduceCtx): Submission[] {
-    throw new Error(
-      `WithholderValidator (index=${this.index}): quote-mode is unsupported. ` +
-      `Use --aggregator=nudge.`,
-    );
-  }
-
-  protected produceNudgeInput(ctx: ProduceCtx): Submission | null {
-    const observed = this.observe(ctx.blockIndex);
-    if (this.suppressing(observed, ctx.lastPrice)) return null;
-    return nudge(this.index, this.type, observed >= ctx.lastPrice ? Bump.Up : Bump.Down);
-  }
-
-  protected produceNudgeInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
-    const observed = this.observe(ctx.blockIndex);
-    if (this.suppressing(observed, ctx.lastPrice)) return [];
-    const diff = observed - ctx.lastPrice;
-    const direction = diff >= 0 ? Bump.Up : Bump.Down;
-    const needed = optimalBumpCount(Math.abs(diff), ctx, inputs.length);
-    return pickInDirectionBumps(inputs, direction, needed);
   }
 }

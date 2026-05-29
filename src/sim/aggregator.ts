@@ -347,7 +347,7 @@ export class MedianAggregator implements Aggregator {
   }
 
   inputKindFor(_lastPrice: number): InputKind {
-    return { kind: "quote" };
+    return { kind: "quote", minInputs: this.minInputs };
   }
 
   /** Median has no per-block schedule; both hooks are no-ops. */

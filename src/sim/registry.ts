@@ -2,11 +2,10 @@ import { HonestValidator, type ValidatorConstructor } from "./validator.js";
 import {
   MaliciousValidator,
   PushyMaliciousValidator,
-  MaximallyPushyNudgeValidator,
   NoopValidator,
   DelayedValidator,
   DriftValidator,
-  WithholderValidator,
+  MaximallyPushyValidator,
 } from "./malicious.js";
 import type { ValidatorType } from "../types.js";
 
@@ -20,9 +19,8 @@ export const VALIDATOR_REGISTRY: Record<ValidatorType, ValidatorConstructor> = {
   honest:      HonestValidator,
   malicious:   MaliciousValidator,
   pushy:       PushyMaliciousValidator,
-  "pushy-max": MaximallyPushyNudgeValidator,
+  "pushy-max": MaximallyPushyValidator,
   noop:        NoopValidator,
   delayed:     DelayedValidator,
   drift:       DriftValidator,
-  withholder:  WithholderValidator,
 };

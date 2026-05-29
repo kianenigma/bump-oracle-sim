@@ -184,6 +184,10 @@ export function writeIndex(
       timestamps,
       venues: priceSource.venuePrices,
     };
+    // Volumes are optional — synthetic mode doesn't produce them, and older
+    // .simdata dirs predate this field. Readers default to "no volumes" when
+    // the key is absent.
+    if (priceSource.venueVolumes) payload.volumes = priceSource.venueVolumes;
     Bun.write(join(outputDir, "venues.json"), JSON.stringify(payload));
   }
 
@@ -215,10 +219,13 @@ export async function loadEvents(outputDir: string): Promise<EventsFile | null> 
   return Bun.file(path).json();
 }
 
-/** Shape of `venues.json` (alongside index.json in a .simdata directory). */
+/** Shape of `venues.json` (alongside index.json in a .simdata directory).
+ *  `volumes` is optional for backward compat with older .simdata dirs that
+ *  predate per-venue volume tracking; readers fall back to "no volumes". */
 export interface VenuesFile {
   timestamps: number[];
   venues: Record<VenueId, number[]>;
+  volumes?: Record<VenueId, number[]>;
 }
 
 /** Load venues.json if present. Returns null when not in trades mode. */

@@ -37,7 +37,7 @@ export type InputKind =
         config: VelocityConfig;
       };
     }
-  | { kind: "quote" };
+  | { kind: "quote", minInputs: number };
 
 /** Per-block context handed to every produceInput / produceInherent call. */
 export interface ProduceCtx {

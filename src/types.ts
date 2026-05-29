@@ -185,6 +185,12 @@ export interface SyntheticEventSpanLite {
 export interface ResolvedPriceSource {
   pricePoints: PricePoint[];
   venuePrices?: Record<VenueId, number[]>;
+  /** Per-venue, per-block base-asset volume aligned with `pricePoints` and
+   *  `venuePrices`. Present only in trades mode (synthetic and candle modes
+   *  have no notion of per-venue volume). Zero in blocks where a venue had
+   *  no trades — NOT carried forward. Surfaces in the UI's per-venue volume
+   *  chart and is what cross-venue VWAP weighs by. */
+  venueVolumes?: Record<VenueId, number[]>;
   events?: SyntheticEventSpanLite[];
 }
 
@@ -194,7 +200,7 @@ export interface ResolvedPriceSource {
 // validatorPriceSource, maliciousParams) bundle. A simulation's full
 // validator set is the concatenation of all groups, in order.
 export type ValidatorType =
-  "honest" | "malicious" | "pushy" | "pushy-max" | "noop" | "delayed" | "drift" | "withholder";
+  "honest" | "malicious" | "pushy" | "pushy-max" | "noop" | "delayed" | "drift";
 
 /** Type-specific behavior knobs. Required keys depend on `type`:
  *    delayed   → delayBlocks
@@ -460,4 +466,10 @@ export interface ApiDataResponse {
   /** Per-venue price lines, present only when the .simdata was produced from
    *  trade data. Keyed by VenueId. Each is downsampled for the visible window. */
   venues?: Record<string, LinePoint[]>;
+  /** Per-venue base-asset volume lines, present only when the .simdata was
+   *  produced from trade data AND venues.json includes the `volumes` field
+   *  (i.e. not older legacy directories). Same downsampling window as
+   *  `venues`, but each bucket is a SUM across the constituent 6s blocks
+   *  rather than the last value — volume is additive over time. */
+  venueVolumes?: Record<string, LinePoint[]>;
 }

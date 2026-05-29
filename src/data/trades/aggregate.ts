@@ -2,10 +2,19 @@ import type { CrossVenueSpec, PricePoint, VenueId } from "../../types.js";
 import { BLOCK_TIME_SECONDS, BLOCKS_PER_DAY, type RawTrade, type VenueBucket } from "./types.js";
 
 /** Per-block prices for the cross-venue median plus, in trades mode, every
- *  individual venue's carry-forward-filled series. Same length as `points`. */
+ *  individual venue's carry-forward-filled series. Same length as `points`.
+ *
+ *  `venueVolumes` carries the per-block, per-venue base-asset volume from the
+ *  source bucket (`VenueBucket.volume`). Volumes are NOT carried forward —
+ *  a venue with no trades in a block contributes 0, even though its price
+ *  may be filled by carry-forward in `venuePrices`. The price series and the
+ *  volume series therefore have the same indices/length but describe
+ *  different things: "what price the venue was last seen at" vs "how much
+ *  it actually traded right now". */
 export interface CombinedSource {
   points: PricePoint[];
   venuePrices: Map<VenueId, number[]>;
+  venueVolumes: Map<VenueId, number[]>;
 }
 
 /**
@@ -74,7 +83,7 @@ export function combineVenues(
 ): CombinedSource {
   const venues = [...perVenue.keys()];
   if (venues.length === 0) {
-    return { points: [], venuePrices: new Map() };
+    return { points: [], venuePrices: new Map(), venueVolumes: new Map() };
   }
 
   const lengths = new Set(venues.map((v) => perVenue.get(v)!.length));
@@ -91,7 +100,11 @@ export function combineVenues(
 
   const points: PricePoint[] = [];
   const venueSeries = new Map<VenueId, number[]>();
-  for (const v of venues) venueSeries.set(v, []);
+  const venueVolumeSeries = new Map<VenueId, number[]>();
+  for (const v of venues) {
+    venueSeries.set(v, []);
+    venueVolumeSeries.set(v, []);
+  }
   let started = false;
 
   for (let i = 0; i < N; i++) {
@@ -146,14 +159,20 @@ export function combineVenues(
 
     // Per-venue series: fresh → bucket vwap; stale → carry forward; pre-first-
     // print → seed from the just-computed cross-venue price.
+    // Per-venue volume series: ONLY the fresh-bucket volume — no carry-
+    // forward. A quiet venue's stale price is still a price; its volume
+    // really is zero in that block.
     for (const v of venues) {
       const cur = perVenue.get(v)![i];
-      const arr = venueSeries.get(v)!;
+      const priceArr = venueSeries.get(v)!;
+      const volArr = venueVolumeSeries.get(v)!;
       if (cur.vwap !== null) {
-        arr.push(cur.vwap);
+        priceArr.push(cur.vwap);
+        volArr.push(cur.volume);
       } else {
         const prev = lastSeen.get(v);
-        arr.push(prev !== null && prev !== undefined ? prev : crossPrice);
+        priceArr.push(prev !== null && prev !== undefined ? prev : crossPrice);
+        volArr.push(0);
       }
     }
   }
@@ -161,7 +180,7 @@ export function combineVenues(
   if (!started) {
     throw new Error("combineVenues: no venue produced any data in the requested range");
   }
-  return { points, venuePrices: venueSeries };
+  return { points, venuePrices: venueSeries, venueVolumes: venueVolumeSeries };
 }
 
 function medianOf(values: number[]): number {

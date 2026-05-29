@@ -86,6 +86,40 @@ export function aggregateLine(
     .map(([time, value]) => ({ time, value }));
 }
 
+/**
+ * Aggregate per-block volumes into per-bucket sums. Unlike line/OHLC, volume
+ * is additive: a 1-minute bucket's volume = sum of its ten 6s blocks' volumes,
+ * not the last value. At interval=6 (block-aligned) this just passes through.
+ */
+export function aggregateVolume(
+  timestamps: number[],
+  volumes: number[],
+  from: number,
+  to: number,
+  interval: number
+): LinePoint[] {
+  const startIdx = lowerBound(timestamps, from);
+  const endIdx = upperBound(timestamps, to);
+  if (startIdx >= endIdx) return [];
+
+  if (interval <= 6) {
+    const result: LinePoint[] = [];
+    for (let i = startIdx; i < endIdx; i++) {
+      result.push({ time: timestamps[i], value: volumes[i] });
+    }
+    return result;
+  }
+
+  const map = new Map<number, number>();
+  for (let i = startIdx; i < endIdx; i++) {
+    const bucket = Math.floor(timestamps[i] / interval) * interval;
+    map.set(bucket, (map.get(bucket) ?? 0) + volumes[i]);
+  }
+  return Array.from(map.entries())
+    .sort((a, b) => a[0] - b[0])
+    .map(([time, value]) => ({ time, value }));
+}
+
 export function aggregateDeviation(
   timestamps: number[],
   deviations: number[],

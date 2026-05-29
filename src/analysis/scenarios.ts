@@ -738,11 +738,11 @@ export const scenarios: Record<string, ScenarioFn> = {
   async "aggregator-comparison"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: aggregator-comparison]`);
     const aggregators: AggregatorConfig[] = [
-      nudgeAgg(ctx),
+      { kind: "nudge", epsilon: ctx.defaultEpsilon },
       { kind: "median", minInputs: Math.floor(2 * ctx.validatorCount / 3) },
     ];
-    const adversaryTypes: Exclude<ValidatorType, "honest">[] = ["malicious", "pushy", "pushy-max", "noop", "drift"];
-    const fractions = [0.10, 0.33, 0.49, 0.5];
+    const adversaryTypes: Exclude<ValidatorType, "honest">[] = ["malicious", "pushy-max"];
+    const fractions = [0.10, 0.33, 0.49];
 
     const configs: SimulationConfig[] = [];
     for (const agg of aggregators) {

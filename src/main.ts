@@ -39,6 +39,7 @@ import { generateReport } from "./analysis/research-report.js";
 // agree on a direction the oracle moves by 1% of price in that block — the
 // same target ceiling the `research-ratio-eps` scenario uses, just generalised
 // to whatever --validators count the user picks.
+// TODO: remove this as we often override validator count
 const DEFAULT_EPSILON: EpsilonSpec = { ratio: 0.01 / DEFAULT_VALIDATOR_COUNT };
 
 /** Format an EpsilonSpec into the string form parseable by `parseEpsilonArg`,

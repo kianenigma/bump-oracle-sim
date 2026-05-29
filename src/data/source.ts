@@ -97,8 +97,10 @@ async function loadTradeSourcePoints(
 
   const perVenue = new Map<VenueId, VenueBucket[]>(venueResults);
   const combined = combineVenues(perVenue, crossVenue);
-  // Convert Map to a structuredClone-friendly Record so we can postMessage to workers.
+  // Convert Maps to structuredClone-friendly Records so we can postMessage to workers.
   const venuePrices: Record<VenueId, number[]> = {} as Record<VenueId, number[]>;
+  const venueVolumes: Record<VenueId, number[]> = {} as Record<VenueId, number[]>;
   for (const [id, arr] of combined.venuePrices) venuePrices[id] = arr;
-  return { pricePoints: combined.points, venuePrices };
+  for (const [id, arr] of combined.venueVolumes) venueVolumes[id] = arr;
+  return { pricePoints: combined.points, venuePrices, venueVolumes };
 }
