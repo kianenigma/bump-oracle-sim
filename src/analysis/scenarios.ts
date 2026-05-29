@@ -1,6 +1,5 @@
 import { join } from "path";
 import { mkdirSync } from "fs";
-import { epsilonValue } from "../types.js";
 import type {
   AggregatorConfig,
   RealPriceSpec,
@@ -16,7 +15,6 @@ import type {
 } from "../types.js";
 import { DEFAULT_CONFIG, DEFAULT_PRICE_SOURCE, DEFAULT_VALIDATOR_COUNT } from "../config.js";
 import { runSimulation, type BlockSink } from "../sim/engine.js";
-import { maxBlockDelta } from "../data/interpolator.js";
 import { ChunkWriter, CsvWriter, combineSinks, writeIndex, scenarioDirName } from "../viz/writer.js";
 import { loadCriteria } from "./research-criteria.js";
 import { generateReport } from "./research-report.js";
@@ -407,7 +405,7 @@ function truncate(s: string, max: number): string {
   return s.length <= max ? s : s.slice(0, max - 1) + "…";
 }
 
-const RESEARCH_MULTIPLIERS = [0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
+const RESEARCH_MULTIPLIERS = [0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
 
 /** Mixes used by the research scenarios — kept as a record-of-fractions for
  *  readability (same shape as the old ValidatorMix). */
@@ -466,10 +464,16 @@ const ENTIRE_VENUES_HISTORY = {
 // the runner.
 
 export const scenarios: Record<string, ScenarioFn> = {
-  /** Baseline: engine=ctx.aggregator × mix=100% honest. */
+  /** 100% honest baseline across both aggregators: nudge(ε=ctx.defaultEpsilon) and median. */
   async honest(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: honest]`);
-    return runBatch([makeConfig(ctx, [])], priceSource, outputDir, threadCount);
+    const baselineEpsilon = 0.01 / ctx.validatorCount;
+    const configs: SimulationConfig[] = [
+      makeConfig(ctx, [], { kind: "nudge", epsilon: { ratio: baselineEpsilon } }),
+      makeConfig(ctx, [], { kind: "nudge", epsilon: { ratio: baselineEpsilon * 2 } }),
+      makeConfig(ctx, [], { kind: "median", minInputs: ctx.validatorCount * 2 / 3 + 1 }),
+    ];
+    return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
   /** 100% honest baseline across both aggregators (nudge + median), running
@@ -501,7 +505,7 @@ export const scenarios: Record<string, ScenarioFn> = {
       r >= 0.51 ? maxMultiplier : 1.0;
     const gateNext = (r: number) => r >= 0.51;
     const bidirectional: VelocityConfig = {
-      up:   { nextEpsilonCoefficient: proposeNext, agreementGate: gateNext },
+      up: { nextEpsilonCoefficient: proposeNext, agreementGate: gateNext },
       down: { nextEpsilonCoefficient: proposeNext, agreementGate: gateNext },
     };
 
@@ -563,8 +567,15 @@ export const scenarios: Record<string, ScenarioFn> = {
   /** engine=nudge(ε ∈ {base/5, base, base*5}) × {0, 10, 20, 30}% malicious. */
   async "sweep-malicious-and-epsilon"(ctx, priceSource, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3];
-    const base = epsilonValue(ctx.defaultEpsilon);
-    const epsilons: EpsilonSpec[] = [base / 5, ctx.defaultEpsilon, base * 5];
+    // `scaleEpsilon` so a ratio-mode default stays a ratio at the swept
+    // endpoints — `epsilonValue(...) * k` would silently collapse to a
+    // plain number and run as an absolute step, which under the default
+    // ratio ε is several orders of magnitude off.
+    const epsilons: EpsilonSpec[] = [
+      scaleEpsilon(ctx.defaultEpsilon, 1 / 5),
+      ctx.defaultEpsilon,
+      scaleEpsilon(ctx.defaultEpsilon, 5),
+    ];
     const configs: SimulationConfig[] = [];
     for (const frac of fractions) {
       for (const eps of epsilons) {
@@ -578,8 +589,11 @@ export const scenarios: Record<string, ScenarioFn> = {
   /** engine=nudge(ε ∈ {base/5, base, base*5}) × {0, 10, 20, 30}% pushy. */
   async "sweep-pushy-and-epsilon"(ctx, priceSource, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3];
-    const base = epsilonValue(ctx.defaultEpsilon);
-    const epsilons: EpsilonSpec[] = [base / 5, ctx.defaultEpsilon, base * 5];
+    const epsilons: EpsilonSpec[] = [
+      scaleEpsilon(ctx.defaultEpsilon, 1 / 5),
+      ctx.defaultEpsilon,
+      scaleEpsilon(ctx.defaultEpsilon, 5),
+    ];
     const configs: SimulationConfig[] = [];
     for (const frac of fractions) {
       for (const eps of epsilons) {
@@ -590,23 +604,17 @@ export const scenarios: Record<string, ScenarioFn> = {
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  /** engine=nudge(ε ∈ {0.25, 0.5, 1, 2, 4}×base) × mix=100% honest. */
+  /** engine=nudge(ε ∈ {0.25, 0.5, 1, 2, 4} × ctx.defaultEpsilon) × mix=100% honest.
+   *  Sweeps multipliers around the ctx default so the kind (ratio vs absolute)
+   *  is preserved — earlier this scenario built its own absolute base from
+   *  maxBlockDelta, which silently overrode the user's `--epsilon ratio:…`. */
   async "epsilon-sweep"(ctx, priceSource, outputDir, threadCount) {
     const multipliers = [0.25, 0.5, 1, 2, 4];
-    const maxDelta = maxBlockDelta(priceSource.pricePoints);
-    const baseEpsilon = maxDelta / ctx.validatorCount;
     const configs = multipliers.map((mult) => {
-      const eps = baseEpsilon * mult;
+      const eps = scaleEpsilon(ctx.defaultEpsilon, mult);
       return makeConfig(ctx, [], nudgeAgg(ctx, eps), `(${mult}x)`);
     });
     return runBatch(configs, priceSource, outputDir, threadCount);
-  },
-
-  /** engine=ctx.aggregator × mix=49% malicious. */
-  async stress(ctx, priceSource, outputDir, threadCount) {
-    console.log(`\n[Scenario: stress]`);
-    const specs: GroupSpec[] = [{ type: "malicious", fraction: 0.49 }];
-    return runBatch([makeConfig(ctx, specs)], priceSource, outputDir, threadCount);
   },
 
   /** engine=ctx.aggregator × {49, 50}% × {malicious, pushy, noop, delayed, drift}. */
@@ -671,6 +679,39 @@ export const scenarios: Record<string, ScenarioFn> = {
     for (const mult of RESEARCH_MULTIPLIERS) {
       const ratio = autoRatio * mult;
       for (const mix of RESEARCH_MIXES) {
+        const specs = specsFromMix(mix);
+        const cfg: SimulationConfig = {
+          ...makeConfig(ctx, specs, nudgeAgg(ctx, { ratio }), `(${mult}x)`),
+          convergenceThreshold: criteria.convergenceThreshold,
+        };
+        configs.push(cfg);
+      }
+    }
+
+    console.log(`  Grid: ${RESEARCH_MULTIPLIERS.length} ratios x ${RESEARCH_MIXES.length} mixes = ${configs.length} simulations`);
+    const results = await runBatch(configs, priceSource, outputDir, threadCount);
+    const reportPath = outputDir ? join(outputDir, "research_report.json") : "research_report.json";
+    generateReport(results, epsilonMultipliers, criteria, autoRatio, reportPath);
+    return results;
+  },
+
+  /** engine=nudge(ratio ∈ RESEARCH_MULTIPLIERS × auto-ratio) × every RESEARCH_MIXES entry. */
+  async "research-ratio-eps-all-honest"(ctx, priceSource, outputDir, threadCount) {
+    console.log(`\n[Scenario: research-ratio-eps-all-honest]`);
+    const criteria = loadCriteria();
+    const autoRatio = 0.01 / ctx.validatorCount;
+    console.log(`  Auto-ratio base: ${(autoRatio * 100).toFixed(6)}% per bump (1% collective / ${ctx.validatorCount} validators)`);
+
+    const epsilonMultipliers = new Map<number, number>();
+    for (const mult of RESEARCH_MULTIPLIERS) {
+      epsilonMultipliers.set(autoRatio * mult, mult);
+    }
+
+    const configs: SimulationConfig[] = [];
+    for (const mult of RESEARCH_MULTIPLIERS) {
+      const ratio = autoRatio * mult;
+      const allHonestMix = [{}];
+      for (const mix of allHonestMix) {
         const specs = specsFromMix(mix);
         const cfg: SimulationConfig = {
           ...makeConfig(ctx, specs, nudgeAgg(ctx, { ratio }), `(${mult}x)`),

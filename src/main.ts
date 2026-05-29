@@ -34,14 +34,27 @@ import { scenarios, listScenarios, SCENARIO_DATE_RANGES, type ScenarioCtx } from
 import { loadCriteria } from "./analysis/research-criteria.js";
 import { generateReport } from "./analysis/research-report.js";
 
-const DEFAULT_EPSILON: EpsilonSpec = 1 / DEFAULT_VALIDATOR_COUNT / 10;
+// Default ε is in ratio mode: each bump moves the oracle by this fraction of
+// the current price. The value `0.01 / N` means that when ALL N validators
+// agree on a direction the oracle moves by 1% of price in that block — the
+// same target ceiling the `research-ratio-eps` scenario uses, just generalised
+// to whatever --validators count the user picks.
+const DEFAULT_EPSILON: EpsilonSpec = { ratio: 0.01 / DEFAULT_VALIDATOR_COUNT };
+
+/** Format an EpsilonSpec into the string form parseable by `parseEpsilonArg`,
+ *  used as the default for the --epsilon CLI flag and in --help output. */
+function epsilonToCliString(spec: EpsilonSpec): string {
+  if (spec === "auto") return "auto";
+  if (typeof spec === "object" && "ratio" in spec) return `ratio:${spec.ratio}`;
+  return String(spec);
+}
 
 const { values: args } = parseArgs({
   args: Bun.argv.slice(2),
   options: {
     "start-date": { type: "string", default: DEFAULT_CONFIG.startDate },
     "end-date": { type: "string", default: DEFAULT_CONFIG.endDate },
-    epsilon: { type: "string", default: String(DEFAULT_EPSILON) },
+    epsilon: { type: "string", default: epsilonToCliString(DEFAULT_EPSILON) },
     validators: { type: "string", default: String(DEFAULT_VALIDATOR_COUNT) },
     mix: { type: "string", default: "" },
     seed: { type: "string", default: String(DEFAULT_CONFIG.seed) },
@@ -82,7 +95,7 @@ Options:
   --start-date <YYYY-MM-DD>    Start date (default: ${DEFAULT_CONFIG.startDate})
   --end-date <YYYY-MM-DD>      End date (default: ${DEFAULT_CONFIG.endDate})
   --epsilon <value>            Epsilon: number (absolute), "auto", or "ratio:0.01"
-                                Used when --aggregator=nudge (default: ${DEFAULT_EPSILON})
+                                Used when --aggregator=nudge (default: ${epsilonToCliString(DEFAULT_EPSILON)})
   --validators <number>        Number of validators (default: ${DEFAULT_VALIDATOR_COUNT})
   --mix <spec>                 Validator mix, e.g. "malicious=0.2,pushy=0.1" (rest are honest)
   --seed <number>              Random seed (default: ${DEFAULT_CONFIG.seed})
