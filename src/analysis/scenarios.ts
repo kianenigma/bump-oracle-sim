@@ -61,12 +61,14 @@ const COMPARISON_PARAMS: Required<ValidatorParams> = {
 // ── Scenario context ────────────────────────────────────────────────────────
 //
 // The CLI builds one of these from --start-date / --validators / --jitter /
-// --aggregator / etc., then hands it to a ScenarioFn.
+// etc., then hands it to a ScenarioFn.
 //
 // The ctx owns the *defaults* a scenario applies when it doesn't have a
-// stronger opinion: validatorCount, the price-source kind/jitter, the
-// aggregator (when the scenario doesn't sweep aggregators), and a default
-// epsilon (when the aggregator is nudge and the scenario doesn't sweep ε).
+// stronger opinion: validatorCount, the price-source kind/jitter, and the
+// aggregator (when the scenario doesn't sweep aggregators). Epsilon is NOT
+// in the ctx — every scenario that needs ε computes its own explicitly via
+// `ratioEpsilon(validatorCount, multiplier?)`, so there's no implicit
+// default that can decouple from the scenario's actual validator count.
 export interface ScenarioCtx {
   startDate: string;
   endDate: string;
@@ -79,8 +81,6 @@ export interface ScenarioCtx {
   priceSource: ValidatorPriceSource;
   /** Total number of validators in each scenario sim. */
   validatorCount: number;
-  /** Default epsilon to use when a scenario doesn't sweep ε itself. */
-  defaultEpsilon: EpsilonSpec;
 }
 
 export type ScenarioFn = (
@@ -160,28 +160,19 @@ function makeConfig(
   };
 }
 
-/** Convenience: nudge aggregator with the given epsilon (or ctx.defaultEpsilon). */
-function nudgeAgg(ctx: ScenarioCtx, epsilon?: EpsilonSpec): AggregatorConfig {
-  return { kind: "nudge", epsilon: epsilon ?? ctx.defaultEpsilon };
+/** Convenience: nudge aggregator with the given epsilon. */
+function nudgeAgg(epsilon: EpsilonSpec): AggregatorConfig {
+  return { kind: "nudge", epsilon };
 }
 
-/** Scale an `EpsilonSpec` by a numeric factor, preserving its kind so a
- *  `{ratio}` spec stays a ratio and an absolute step stays absolute. Used by
- *  the velocity sweep to derive a `baseEpsilon / maxMultiplier` from the
- *  same `--epsilon` flag the baseline scenario consumes — so the two
- *  scenarios stay coupled when the CLI value changes.
- *
- *  Throws on `"auto"`: that needs price-data to resolve, which scenarios
- *  don't have here. Callers that want to scale should pre-resolve auto or
- *  pass a concrete value via `--epsilon`. */
-function scaleEpsilon(spec: EpsilonSpec, factor: number): EpsilonSpec {
-  if (spec === "auto") {
-    throw new Error(
-      "scaleEpsilon: cannot scale 'auto' — pass a numeric or ratio epsilon",
-    );
-  }
-  if (typeof spec === "object" && "ratio" in spec) return { ratio: spec.ratio * factor };
-  return spec * factor;
+/** Single source of truth for the default ratio epsilon: when ALL N
+ *  validators agree on a direction, the oracle moves 1% of price that block
+ *  (i.e. per-bump ratio = 0.01 / N). The optional `multiplier` is how
+ *  scenarios sweep ε — `ratioEpsilon(N, 0.2)` = "1/5 of the default",
+ *  `ratioEpsilon(N, 5)` = "5× the default", etc. — without ever having to
+ *  reconstruct the 0.01 constant inline. */
+function ratioEpsilon(validatorCount: number, multiplier: number = 1): EpsilonSpec {
+  return { ratio: (0.01 / validatorCount) * multiplier };
 }
 
 /** Convert the legacy "ValidatorMix"-style record into GroupSpec[]. */
@@ -464,13 +455,13 @@ const ENTIRE_VENUES_HISTORY = {
 // the runner.
 
 export const scenarios: Record<string, ScenarioFn> = {
-  /** 100% honest baseline across both aggregators: nudge(ε=ctx.defaultEpsilon) and median. */
+  /** 100% honest baseline across both aggregators: nudge at the default
+   *  ratio ε (1% per fully-agreed block), nudge at 2× that, and median. */
   async honest(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: honest]`);
-    const baselineEpsilon = 0.01 / ctx.validatorCount;
     const configs: SimulationConfig[] = [
-      makeConfig(ctx, [], { kind: "nudge", epsilon: { ratio: baselineEpsilon } }),
-      makeConfig(ctx, [], { kind: "nudge", epsilon: { ratio: baselineEpsilon * 2 } }),
+      makeConfig(ctx, [], nudgeAgg(ratioEpsilon(ctx.validatorCount))),
+      makeConfig(ctx, [], nudgeAgg(ratioEpsilon(ctx.validatorCount, 2))),
       makeConfig(ctx, [], { kind: "median", minInputs: ctx.validatorCount * 2 / 3 + 1 }),
     ];
     return runBatch(configs, priceSource, outputDir, threadCount);
@@ -486,7 +477,7 @@ export const scenarios: Record<string, ScenarioFn> = {
     const range = ENTIRE_VENUES_HISTORY;
     console.log(`  Date range (intersection across all venues): ${range.startDate} → ${range.endDate}`);
     const configs: SimulationConfig[] = [
-      makeConfig(ctx, [], { kind: "nudge", epsilon: ctx.defaultEpsilon }, undefined, range),
+      makeConfig(ctx, [], nudgeAgg(ratioEpsilon(ctx.validatorCount)), undefined, range),
       makeConfig(ctx, [], { kind: "median" }, undefined, range),
     ];
     return runBatch(configs, priceSource, outputDir, threadCount);
@@ -509,17 +500,17 @@ export const scenarios: Record<string, ScenarioFn> = {
       down: { nextEpsilonCoefficient: proposeNext, agreementGate: gateNext },
     };
 
-    // The baseline scenario walks at ε = ctx.defaultEpsilon every block.
-    // The velocity scenario starts from baseEpsilon = ctx.defaultEpsilon /
-    // maxMultiplier so a fully-boosted block (gate fired, coefficient ×
-    // maxMultiplier) lands on the same effective ε as the baseline. With no
-    // boost it walks 1/maxMultiplier as fast — the cost of needing full
-    // consensus to match the baseline's step. Head-to-head, both scenarios
-    // share the same upper bound on per-block oracle movement.
-    const baselineAgg: AggregatorConfig = { kind: "nudge", epsilon: ctx.defaultEpsilon };
+    // The baseline scenario walks at the default ratio ε every block. The
+    // velocity scenario starts from baseEpsilon = default / maxMultiplier
+    // so a fully-boosted block (gate fired, coefficient × maxMultiplier)
+    // lands on the same effective ε as the baseline. With no boost it walks
+    // 1/maxMultiplier as fast — the cost of needing full consensus to match
+    // the baseline's step. Head-to-head, both scenarios share the same
+    // upper bound on per-block oracle movement.
+    const baselineAgg: AggregatorConfig = nudgeAgg(ratioEpsilon(ctx.validatorCount));
     const velocityAgg: AggregatorConfig = {
       kind: "nudge",
-      epsilon: scaleEpsilon(ctx.defaultEpsilon, 1 / maxMultiplier),
+      epsilon: ratioEpsilon(ctx.validatorCount, 1 / maxMultiplier),
       velocity: bidirectional,
     };
 
@@ -564,55 +555,50 @@ export const scenarios: Record<string, ScenarioFn> = {
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  /** engine=nudge(ε ∈ {base/5, base, base*5}) × {0, 10, 20, 30}% malicious. */
+  /** engine=nudge(ε ∈ {base/5, base, base*5}) × {0, 10, 20, 30}% malicious.
+   *  `base` here is the default ratio ε `0.01 / validatorCount`. */
   async "sweep-malicious-and-epsilon"(ctx, priceSource, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3];
-    // `scaleEpsilon` so a ratio-mode default stays a ratio at the swept
-    // endpoints — `epsilonValue(...) * k` would silently collapse to a
-    // plain number and run as an absolute step, which under the default
-    // ratio ε is several orders of magnitude off.
     const epsilons: EpsilonSpec[] = [
-      scaleEpsilon(ctx.defaultEpsilon, 1 / 5),
-      ctx.defaultEpsilon,
-      scaleEpsilon(ctx.defaultEpsilon, 5),
+      ratioEpsilon(ctx.validatorCount, 1 / 5),
+      ratioEpsilon(ctx.validatorCount),
+      ratioEpsilon(ctx.validatorCount, 5),
     ];
     const configs: SimulationConfig[] = [];
     for (const frac of fractions) {
       for (const eps of epsilons) {
         const specs = frac > 0 ? [{ type: "malicious" as const, fraction: frac }] : [];
-        configs.push(makeConfig(ctx, specs, nudgeAgg(ctx, eps)));
+        configs.push(makeConfig(ctx, specs, nudgeAgg(eps)));
       }
     }
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  /** engine=nudge(ε ∈ {base/5, base, base*5}) × {0, 10, 20, 30}% pushy. */
+  /** engine=nudge(ε ∈ {base/5, base, base*5}) × {0, 10, 20, 30}% pushy.
+   *  `base` here is the default ratio ε `0.01 / validatorCount`. */
   async "sweep-pushy-and-epsilon"(ctx, priceSource, outputDir, threadCount) {
     const fractions = [0, 0.1, 0.2, 0.3];
     const epsilons: EpsilonSpec[] = [
-      scaleEpsilon(ctx.defaultEpsilon, 1 / 5),
-      ctx.defaultEpsilon,
-      scaleEpsilon(ctx.defaultEpsilon, 5),
+      ratioEpsilon(ctx.validatorCount, 1 / 5),
+      ratioEpsilon(ctx.validatorCount),
+      ratioEpsilon(ctx.validatorCount, 5),
     ];
     const configs: SimulationConfig[] = [];
     for (const frac of fractions) {
       for (const eps of epsilons) {
         const specs = frac > 0 ? [{ type: "pushy" as const, fraction: frac }] : [];
-        configs.push(makeConfig(ctx, specs, nudgeAgg(ctx, eps)));
+        configs.push(makeConfig(ctx, specs, nudgeAgg(eps)));
       }
     }
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
-  /** engine=nudge(ε ∈ {0.25, 0.5, 1, 2, 4} × ctx.defaultEpsilon) × mix=100% honest.
-   *  Sweeps multipliers around the ctx default so the kind (ratio vs absolute)
-   *  is preserved — earlier this scenario built its own absolute base from
-   *  maxBlockDelta, which silently overrode the user's `--epsilon ratio:…`. */
+  /** engine=nudge(ε ∈ {0.25, 0.5, 1, 2, 4} × default ratio ε) × mix=100% honest. */
   async "epsilon-sweep"(ctx, priceSource, outputDir, threadCount) {
     const multipliers = [0.25, 0.5, 1, 2, 4];
     const configs = multipliers.map((mult) => {
-      const eps = scaleEpsilon(ctx.defaultEpsilon, mult);
-      return makeConfig(ctx, [], nudgeAgg(ctx, eps), `(${mult}x)`);
+      const eps = ratioEpsilon(ctx.validatorCount, mult);
+      return makeConfig(ctx, [], nudgeAgg(eps), `(${mult}x)`);
     });
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
@@ -649,7 +635,7 @@ export const scenarios: Record<string, ScenarioFn> = {
       for (const mix of RESEARCH_MIXES) {
         const specs = specsFromMix(mix);
         const cfg: SimulationConfig = {
-          ...makeConfig(ctx, specs, nudgeAgg(ctx, eps), `(${mult}x)`),
+          ...makeConfig(ctx, specs, nudgeAgg(eps), `(${mult}x)`),
           convergenceThreshold: criteria.convergenceThreshold,
         };
         configs.push(cfg);
@@ -681,7 +667,7 @@ export const scenarios: Record<string, ScenarioFn> = {
       for (const mix of RESEARCH_MIXES) {
         const specs = specsFromMix(mix);
         const cfg: SimulationConfig = {
-          ...makeConfig(ctx, specs, nudgeAgg(ctx, { ratio }), `(${mult}x)`),
+          ...makeConfig(ctx, specs, nudgeAgg({ ratio }), `(${mult}x)`),
           convergenceThreshold: criteria.convergenceThreshold,
         };
         configs.push(cfg);
@@ -714,7 +700,7 @@ export const scenarios: Record<string, ScenarioFn> = {
       for (const mix of allHonestMix) {
         const specs = specsFromMix(mix);
         const cfg: SimulationConfig = {
-          ...makeConfig(ctx, specs, nudgeAgg(ctx, { ratio }), `(${mult}x)`),
+          ...makeConfig(ctx, specs, nudgeAgg({ ratio }), `(${mult}x)`),
           convergenceThreshold: criteria.convergenceThreshold,
         };
         configs.push(cfg);
@@ -730,7 +716,7 @@ export const scenarios: Record<string, ScenarioFn> = {
 
   /**
    * Cross-engine sweep: 3 aggregators × (1 honest + N validator types × M fractions).
-   *   - aggregators: nudge(ε=ctx.defaultEpsilon), median(min=0), median(min=floor(2N/3)).
+   *   - aggregators: nudge(default ratio ε), median(min=0), median(min=floor(2N/3)).
    *   - attacker types: malicious, pushy, noop, drift (those compatible with both engines).
    *   - fractions: 10%, 33%, 49%, 50%.
    * Incompatible (engine, validator) pairs are filtered out.
@@ -738,7 +724,7 @@ export const scenarios: Record<string, ScenarioFn> = {
   async "aggregator-comparison"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: aggregator-comparison]`);
     const aggregators: AggregatorConfig[] = [
-      { kind: "nudge", epsilon: ctx.defaultEpsilon },
+      nudgeAgg(ratioEpsilon(ctx.validatorCount)),
       { kind: "median", minInputs: Math.floor(2 * ctx.validatorCount / 3) },
     ];
     const adversaryTypes: Exclude<ValidatorType, "honest">[] = ["malicious", "pushy-max"];

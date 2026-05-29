@@ -14,50 +14,24 @@ import type {
   AggregatorConfig,
   CrossVenueSpec,
   RealPriceSpec,
-  EpsilonSpec,
-  ScenarioMeta,
   SimulationConfig,
   ValidatorPriceSource,
   VenueId,
 } from "./types.js";
-import {
-  buildValidators,
-  formatValidators,
-  parseValidatorsCli,
-  isBaselineValidators,
-} from "./validators.js";
+import { isBaselineValidators } from "./validators.js";
 import { loadPriceSource } from "./data/source.js";
-import { runSimulation } from "./sim/engine.js";
-import { ChunkWriter, CsvWriter, combineSinks, writeIndex, loadIndex, scenarioDirName } from "./viz/writer.js";
+import { loadIndex } from "./viz/writer.js";
 import { startServer } from "./viz/server.js";
 import { scenarios, listScenarios, SCENARIO_DATE_RANGES, type ScenarioCtx } from "./analysis/scenarios.js";
 import { loadCriteria } from "./analysis/research-criteria.js";
 import { generateReport } from "./analysis/research-report.js";
-
-// Default ε is in ratio mode: each bump moves the oracle by this fraction of
-// the current price. The value `0.01 / N` means that when ALL N validators
-// agree on a direction the oracle moves by 1% of price in that block — the
-// same target ceiling the `research-ratio-eps` scenario uses, just generalised
-// to whatever --validators count the user picks.
-// TODO: remove this as we often override validator count
-const DEFAULT_EPSILON: EpsilonSpec = { ratio: 0.01 / DEFAULT_VALIDATOR_COUNT };
-
-/** Format an EpsilonSpec into the string form parseable by `parseEpsilonArg`,
- *  used as the default for the --epsilon CLI flag and in --help output. */
-function epsilonToCliString(spec: EpsilonSpec): string {
-  if (spec === "auto") return "auto";
-  if (typeof spec === "object" && "ratio" in spec) return `ratio:${spec.ratio}`;
-  return String(spec);
-}
 
 const { values: args } = parseArgs({
   args: Bun.argv.slice(2),
   options: {
     "start-date": { type: "string", default: DEFAULT_CONFIG.startDate },
     "end-date": { type: "string", default: DEFAULT_CONFIG.endDate },
-    epsilon: { type: "string", default: epsilonToCliString(DEFAULT_EPSILON) },
     validators: { type: "string", default: String(DEFAULT_VALIDATOR_COUNT) },
-    mix: { type: "string", default: "" },
     seed: { type: "string", default: String(DEFAULT_CONFIG.seed) },
     output: { type: "string", default: "output.simdata" },
     scenario: { type: "string" },
@@ -75,7 +49,6 @@ const { values: args } = parseArgs({
     "no-open": { type: "boolean", default: false },
     threads: { type: "string", default: String(cpus().length) },
     force: { type: "boolean", default: false },
-    aggregator: { type: "string" },
     "data-source": { type: "string", default: "trades" },
     venues: { type: "string" },
     "cross-venue": { type: "string" },
@@ -95,13 +68,10 @@ Usage: bun run src/main.ts [options]
 Options:
   --start-date <YYYY-MM-DD>    Start date (default: ${DEFAULT_CONFIG.startDate})
   --end-date <YYYY-MM-DD>      End date (default: ${DEFAULT_CONFIG.endDate})
-  --epsilon <value>            Epsilon: number (absolute), "auto", or "ratio:0.01"
-                                Used when --aggregator=nudge (default: ${epsilonToCliString(DEFAULT_EPSILON)})
   --validators <number>        Number of validators (default: ${DEFAULT_VALIDATOR_COUNT})
-  --mix <spec>                 Validator mix, e.g. "malicious=0.2,pushy=0.1" (rest are honest)
   --seed <number>              Random seed (default: ${DEFAULT_CONFIG.seed})
   --output <path>              Output directory (default: output.simdata)
-  --scenario <name>            Named scenario (use --list-scenarios to see options)
+  --scenario <name>            REQUIRED — named scenario (use --list-scenarios to see options)
   --fetch-only                 Only fetch and cache price data, don't simulate
   --jitter <fraction>          Price jitter std dev as fraction (default: ${DEFAULT_PRICE_SOURCE.jitterStdDev})
   --convergence-threshold <%>  Convergence threshold in % (default: ${DEFAULT_CONFIG.convergenceThreshold})
@@ -116,7 +86,6 @@ Options:
   --no-open                    Don't auto-open browser
   --threads <number>           Worker threads for batch scenarios (default: CPU count)
   --force                      Overwrite existing output directory
-  --aggregator <mode>          Aggregation rule: "nudge" or "median" (default)
   --data-source <kind>         "trades" (default, per-trade multi-venue), "candles" (Binance US 1m),
                                 or "synthetic" (deterministic scripted price path; --start-date /
                                 --end-date are rejected in this mode).
@@ -235,26 +204,6 @@ function parseRealPriceArg(
   }
   console.error(`Invalid --data-source: "${kind}". Expected: candles, trades, synthetic.`);
   process.exit(1);
-}
-
-function parseAggregatorArg(raw: string | undefined, epsilon: EpsilonSpec): AggregatorConfig | undefined {
-  if (raw === undefined) return undefined;
-  if (raw === "nudge") return { kind: "nudge", epsilon };
-  if (raw === "median") return { kind: "median" };
-  console.error(`Invalid --aggregator: "${raw}". Expected: nudge, median.`);
-  process.exit(1);
-}
-
-function parseEpsilonArg(raw: string): EpsilonSpec {
-  if (raw === "auto") return "auto";
-  if (raw.startsWith("ratio:")) {
-    const val = parseFloat(raw.slice(6));
-    if (isNaN(val)) { console.error(`Invalid ratio epsilon: "${raw}"`); process.exit(1); }
-    return { ratio: val };
-  }
-  const val = parseFloat(raw);
-  if (isNaN(val)) { console.error(`Invalid epsilon: "${raw}"`); process.exit(1); }
-  return val;
 }
 
 function variantLabel(d: import("./data/synthetic.js").SyntheticEventDescriptor): string {
@@ -482,7 +431,6 @@ const validatorCount = parseInt(args.validators!);
 const seed = parseInt(args.seed!);
 const jitterStdDev = parseFloat(args.jitter!);
 const convergenceThreshold = parseFloat(args["convergence-threshold"]!);
-const epsilon = parseEpsilonArg(args.epsilon!);
 
 // Default validator price-source: random-venue if trades data, cross-venue if candles.
 let priceSourceKind = parsePriceSourceKindArg(args["price-source"]);
@@ -491,79 +439,46 @@ if (priceSourceKind === undefined) {
 }
 const ctxPriceSource: ValidatorPriceSource = { kind: priceSourceKind, jitterStdDev };
 
-const aggregatorOverride = parseAggregatorArg(args.aggregator, epsilon);
-const ctxAggregator: AggregatorConfig = aggregatorOverride
-  ?? (DEFAULT_CONFIG.aggregator ?? { kind: "median" });
+// `ctx.aggregator` used to be CLI-driven via --aggregator. We removed that
+// flag — the CLI runs scenarios only, and each scenario specifies the
+// aggregator(s) it cares about inline. We still need a fallback here for
+// the handful of scenarios that read `ctx.aggregator` directly
+// (sweep-malicious, sweep-all-malicious, edge-malicious, stress); they all
+// inherit the project-wide DEFAULT_CONFIG.aggregator (median).
+const ctxAggregator: AggregatorConfig = DEFAULT_CONFIG.aggregator ?? { kind: "median" };
 
-// Determine output directory
-const userSetOutput = Bun.argv.slice(2).includes("--output");
-let outputDir: string;
-if (userSetOutput) {
-  outputDir = args.output!;
-} else if (args.scenario) {
-  outputDir = `${args.scenario}_${startDate}_${endDate}.simdata`;
-} else {
-  outputDir = args.output!;
+// --scenario is required: the CLI doesn't support ad-hoc single sims.
+if (!args.scenario) {
+  console.error("Error: --scenario is required. Use --list-scenarios to see options.");
+  process.exit(1);
 }
+const scenarioFn = scenarios[args.scenario];
+if (!scenarioFn) {
+  console.error(`Unknown scenario: ${args.scenario}. Available: ${listScenarios().join(", ")}`);
+  process.exit(1);
+}
+
+// Output dir: derived from --scenario name + date range, unless --output is
+// passed explicitly.
+const outputDir: string = cliPassed("--output")
+  ? args.output!
+  : `${args.scenario}_${startDate}_${endDate}.simdata`;
 
 ensureOutputDir(outputDir, !!args.force);
 
 const threadCount = parseInt(args.threads!);
 
-if (args.scenario) {
-  const scenarioFn = scenarios[args.scenario];
-  if (!scenarioFn) {
-    console.error(`Unknown scenario: ${args.scenario}. Available: ${listScenarios().join(", ")}`);
-    process.exit(1);
-  }
-  const ctx: ScenarioCtx = {
-    startDate,
-    endDate,
-    seed,
-    convergenceThreshold,
-    realPrice,
-    aggregator: ctxAggregator,
-    priceSource: ctxPriceSource,
-    validatorCount,
-    defaultEpsilon: epsilon,
-  };
-  await scenarioFn(ctx, priceSource, outputDir, threadCount);
-} else {
-  // Single simulation
-  const parsed = parseValidatorsCli(args.mix!, ctxPriceSource);
-  const honestPS: ValidatorPriceSource = parsed.honestJitter !== undefined
-    ? { ...ctxPriceSource, jitterStdDev: parsed.honestJitter }
-    : ctxPriceSource;
-  const validators = buildValidators(validatorCount, parsed.specs, ctxPriceSource, honestPS);
-  const config: SimulationConfig = {
-    startDate,
-    endDate,
-    seed,
-    convergenceThreshold,
-    realPrice,
-    aggregator: ctxAggregator,
-    label: formatValidators(validators),
-    validators,
-  };
-  console.log(`\n[Single simulation]`);
-  const dirName = scenarioDirName(config.label, 0);
-  const writer = new ChunkWriter(join(outputDir, dirName));
-  const csv = new CsvWriter(join(outputDir, `${dirName}.csv`));
-  const result = runSimulation(config, priceSource, combineSinks(writer.sink, csv.sink));
-  const info = writer.finish();
-  csv.finish();
-
-  const meta: ScenarioMeta = {
-    config: result.config,
-    summary: result.summary,
-    blockCount: info.blockCount,
-    chunkCount: info.chunkCount,
-    timeRange: info.timeRange,
-    chunkTimeRanges: info.chunkTimeRanges,
-    dir: dirName,
-  };
-  writeIndex(outputDir, [meta], priceSource);
-}
+const ctx: ScenarioCtx = {
+  startDate,
+  endDate,
+  seed,
+  convergenceThreshold,
+  realPrice,
+  aggregator: ctxAggregator,
+  priceSource: ctxPriceSource,
+  validatorCount,
+};
+await scenarioFn(ctx, priceSource, outputDir, threadCount);
 
 // Start server
 const port = parseInt(args.port!);
