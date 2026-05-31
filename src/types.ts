@@ -29,7 +29,13 @@ export interface PricePoint {
 //              aggregator config (was top-level before).
 //   "median" : validators submit absolute price quotes; runtime sorts and
 //              takes the median of the inherent.
-export type AggregatorMode = "nudge" | "median";
+//   "latched-median" : like median but with NO minInputs. The aggregator
+//              keeps each validator's last submitted quote ("latches" it) and
+//              every block re-takes the median over the full latched set
+//              (the inherent only refreshes the latches of the validators it
+//              contains). A validator that goes quiet keeps influencing the
+//              price with its stale latch until it submits again.
+export type AggregatorMode = "nudge" | "median" | "latched-median";
 
 // Epsilon specification: how much the oracle price moves per activated bump.
 // - number: absolute step size (e.g. 0.00033)
@@ -94,7 +100,8 @@ export interface VelocityConfig {
 
 export type AggregatorConfig =
   | { kind: "nudge"; epsilon: EpsilonSpec; minInputs?: number; velocity?: VelocityConfig }
-  | { kind: "median"; minInputs?: number };
+  | { kind: "median"; minInputs?: number }
+  | { kind: "latched-median" };
 
 export function aggregatorMode(cfg: AggregatorConfig): AggregatorMode {
   return cfg.kind;

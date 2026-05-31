@@ -47,6 +47,12 @@ export interface ProduceCtx {
   inputKind: InputKind;
   /** Total validator count this block. Available for any per-block */
   validatorCount: number;
+  /** The aggregator family driving this run. `inputKind.kind` already tells a
+   *  validator the SUBMISSION shape (nudge vs quote), but `median` and
+   *  `latched-median` share the same `quote` shape while rewarding different
+   *  author strategies — so a validator that wants to attack the latched set
+   *  specifically discriminates on this. */
+  aggregatorMode: AggregatorMode;
 }
 
 export interface ValidatorAgent {
@@ -137,7 +143,7 @@ export function pickInDirectionBumps(
 // ── HonestValidator ─────────────────────────────────────────────────────────
 
 export class HonestValidator implements ValidatorAgent {
-  static readonly compatibleEngines: ReadonlyArray<AggregatorMode> = ["nudge", "median"];
+  static readonly compatibleEngines: ReadonlyArray<AggregatorMode> = ["nudge", "median", "latched-median"];
 
   readonly index: number;
   readonly type: ValidatorType = "honest";

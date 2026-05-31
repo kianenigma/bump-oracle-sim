@@ -25,9 +25,13 @@ import { buildValidators, formatValidators, isCompatibleWithAggregator, type Gro
 // src/sim/malicious.ts.
 //
 // Engines:
-//   nudge   Validators submit Up/Down. Author picks subset.
-//           price' = lastPrice + (net activated bumps) × ε.
-//   median  Validators submit absolute prices. price' = median(inherent quotes).
+//   nudge          Validators submit Up/Down. Author picks subset.
+//                  price' = lastPrice + (net activated bumps) × ε.
+//   median         Validators submit absolute prices. price' = median(inherent quotes).
+//   latched-median Like median, but NO minInputs and the per-validator last
+//                  quote is latched: price' = median over the full latched set,
+//                  refreshed each block by the inherent. Currently exercised by
+//                  honest + pushy-max only (see compatibleEngines).
 //
 // Validators (and the engines they declare compatibility with):
 //   honest        — both. Submits a jittered observation; honest nudge author.
@@ -38,9 +42,6 @@ import { buildValidators, formatValidators, isCompatibleWithAggregator, type Gro
 //   noop          — both. Author-side censorship (drops the inherent).
 //   delayed       — both. Honest intent, reads observation `delayBlocks` ago.
 //   drift         — both. Persistent upward bias regardless of real price.
-//   withholder    — nudge only. 1/3-cabal abstaining when honest publication
-//                   would push the oracle in the suppressed direction; the
-//                   chain ratchets the opposite way over a sustained real move.
 //
 // Per-group ValidatorParams (delayBlocks / pushyQuoteBias / maliciousQuoteBias
 // / driftQuoteStep / withholderDirection) fall back to
@@ -111,6 +112,7 @@ function formatEpsilon(eps: EpsilonSpec): string {
 
 function formatEngine(cfg: AggregatorConfig): string {
   if (cfg.kind === "nudge") return `nudge:${formatEpsilon(cfg.epsilon)}`;
+  if (cfg.kind === "latched-median") return "latched-median";
   return cfg.minInputs !== undefined ? `median:min=${cfg.minInputs}` : "median";
 }
 
@@ -714,20 +716,35 @@ export const scenarios: Record<string, ScenarioFn> = {
     return results;
   },
 
-  /**
-   * Cross-engine sweep: 3 aggregators × (1 honest + N validator types × M fractions).
-   *   - aggregators: nudge(default ratio ε), median(min=0), median(min=floor(2N/3)).
-   *   - attacker types: malicious, pushy, noop, drift (those compatible with both engines).
-   *   - fractions: 10%, 33%, 49%, 50%.
-   * Incompatible (engine, validator) pairs are filtered out.
-   */
+  /** engine={latched-median, median(min=floor(2N/3))} × {0, 10, 33, 49}% pushy-max.
+   *  Head-to-head of the latched aggregator vs plain median under the only two
+   *  validator types wired for it so far (honest + pushy-max). */
+  async "latched-median"(ctx, priceSource, outputDir, threadCount) {
+    console.log(`\n[Scenario: latched-median]`);
+    const aggregators: AggregatorConfig[] = [
+      { kind: "latched-median" },
+      { kind: "median", minInputs: Math.floor(2 * ctx.validatorCount / 3) },
+    ];
+    const fractions = [0, 0.10, 0.33, 0.49];
+    const configs: SimulationConfig[] = [];
+    for (const agg of aggregators) {
+      for (const frac of fractions) {
+        const specs: GroupSpec[] = frac > 0 ? [{ type: "pushy-max", fraction: frac }] : [];
+        configs.push(makeConfig(ctx, specs, agg));
+      }
+    }
+    console.log(`  Grid: ${aggregators.length} engines × ${fractions.length} pushy-max fractions = ${configs.length} configs`);
+    return runBatch(configs, priceSource, outputDir, threadCount);
+  },
+
   async "aggregator-comparison"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: aggregator-comparison]`);
     const aggregators: AggregatorConfig[] = [
       nudgeAgg(ratioEpsilon(ctx.validatorCount)),
       { kind: "median", minInputs: Math.floor(2 * ctx.validatorCount / 3) },
+      { kind: "latched-median" },
     ];
-    const adversaryTypes: Exclude<ValidatorType, "honest">[] = ["malicious", "pushy-max"];
+    const adversaryTypes: Exclude<ValidatorType, "honest">[] = ["pushy-max", "noop"];
     const fractions = [0.10, 0.33, 0.49];
 
     const configs: SimulationConfig[] = [];

@@ -59,6 +59,7 @@ export class Chain {
       blockIndex,
       inputKind: this.aggregator.inputKindFor(this.lastPrice),
       validatorCount: this.validators.length,
+      aggregatorMode: this.aggregator.mode,
     };
 
     // 1. Gather one input per validator (offchain gossip). Validators that

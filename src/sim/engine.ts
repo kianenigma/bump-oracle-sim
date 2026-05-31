@@ -98,7 +98,11 @@ export function runSimulation(
     }
   }
 
-  const resolvedMinInputs = aggregatorCfg.minInputs ?? defaultMinInputs(aggregatorCfg.kind, validatorCount);
+  // latched-median has no minInputs at all; the others resolve it (config
+  // override → kind default).
+  const resolvedMinInputs: number | undefined = aggregatorCfg.kind === "latched-median"
+    ? undefined
+    : (aggregatorCfg.minInputs ?? defaultMinInputs(aggregatorCfg.kind, validatorCount));
   let epsilon = 0;
   let epsilonMode: EpsilonMode = "abs";
   if (aggregatorCfg.kind === "nudge") {
@@ -111,7 +115,10 @@ export function runSimulation(
     validatorCount,
     aggregatorCfg.kind === "nudge" ? { value: epsilon, mode: epsilonMode } : undefined,
   );
-  if (!quiet) console.log(`  Aggregator min inputs: ${resolvedMinInputs}/${validatorCount}`);
+  if (!quiet) {
+    if (resolvedMinInputs !== undefined) console.log(`  Aggregator min inputs: ${resolvedMinInputs}/${validatorCount}`);
+    else console.log(`  Aggregator: ${aggregatorCfg.kind} (no min inputs)`);
+  }
 
   // Instantiate validators in group order. Each gets a unique index and a
   // mulberry32 derived from `seed + index + 1`.
@@ -233,10 +240,15 @@ export function runSimulation(
   // downstream consumers (in-memory only — functions don't survive JSON)
   // can still inspect the policy.
   const resolvedEpsilon: EpsilonSpec = epsilonMode === "ratio" ? { ratio: epsilon } : epsilon;
-  const resolvedAggregator: AggregatorConfig =
-    aggregatorCfg.kind === "nudge"
-      ? { ...aggregatorCfg, epsilon: resolvedEpsilon, minInputs: resolvedMinInputs }
-      : { ...aggregatorCfg, minInputs: resolvedMinInputs };
+  let resolvedAggregator: AggregatorConfig;
+  if (aggregatorCfg.kind === "nudge") {
+    resolvedAggregator = { ...aggregatorCfg, epsilon: resolvedEpsilon, minInputs: resolvedMinInputs };
+  } else if (aggregatorCfg.kind === "median") {
+    resolvedAggregator = { ...aggregatorCfg, minInputs: resolvedMinInputs };
+  } else {
+    // latched-median: no minInputs field to resolve.
+    resolvedAggregator = { ...aggregatorCfg };
+  }
 
   return { config: { ...config, aggregator: resolvedAggregator }, summary };
 }
@@ -245,7 +257,7 @@ export function runSimulation(
 function printConfig(config: SimulationConfig, pricePoints?: PricePoint[]): void {
   const agg = config.aggregator ?? DEFAULT_AGGREGATOR;
   const aggParts: string[] = [];
-  if (agg.minInputs !== undefined) aggParts.push(`minInputs=${agg.minInputs}`);
+  if ((agg.kind === "nudge" || agg.kind === "median") && agg.minInputs !== undefined) aggParts.push(`minInputs=${agg.minInputs}`);
   const aggStr = aggParts.length > 0 ? `${agg.kind}(${aggParts.join(", ")})` : agg.kind;
 
   // Build a one-liner mix string from the validators array.

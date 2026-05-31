@@ -1,4 +1,4 @@
-import { Bump, type AggregatorConfig, type EpsilonMode, type Submission, type VelocityConfig } from "../types.js";
+import { Bump, type AggregatorConfig, type AggregatorMode, type EpsilonMode, type Submission, type VelocityConfig } from "../types.js";
 import type { InputKind } from "./validator.js";
 
 /**
@@ -62,7 +62,7 @@ export interface AggregateOutcome {
 export interface Aggregator {
   /** Aggregator family. Determines what kind of submission validators must
    *  produce and what shape of inherent the chain expects. */
-  readonly mode: "nudge" | "median";
+  readonly mode: AggregatorMode;
   apply(ctx: AggregatorContext): AggregateOutcome;
   /** Build the per-block `InputKind` variant for `ProduceCtx`. Carries any
    *  aggregator-owned parameters validators need for THIS block — e.g.
@@ -121,7 +121,7 @@ function assertSubmissionKind(
   s: Submission,
   expected: "nudge" | "quote",
   where: "inputs" | "inherent",
-  mode: "nudge" | "median",
+  mode: AggregatorMode,
 ): void {
   if (s.kind === expected) return;
   throw new Error(
@@ -377,14 +377,90 @@ export class MedianAggregator implements Aggregator {
   }
 }
 
+// ── LatchedMedianAggregator ───────────────────────────────────────────────────
+// Same price math as median (sort the values, take the middle one) but with
+// two differences:
+//   1. NO minInputs — the aggregator always has data to median once any
+//      validator has ever submitted, so it never holds the price for want of
+//      inputs (block 0 with an empty inherent is the lone exception).
+//   2. State is LATCHED. The aggregator keeps the last quote each validator
+//      submitted in `latched` (keyed by validatorIndex). Each block, the
+//      inherent's quotes refresh the latches of the validators they contain;
+//      the median is then taken over the FULL latched set — including the
+//      stale latches of validators absent from this block's inherent.
+//
+// Consequence: a validator that submits once and then goes quiet keeps
+// influencing the price with its stale value until it submits again. This is
+// the key behavioural difference from plain median (which only ever sees the
+// current block's inherent).
+//
+// Metric semantics mirror the other aggregators:
+//   totalBumps     = quotes gossiped this block (count in `inputs`)
+//   activatedBumps = quotes the author put in this block's inherent
+// The median is over the latched set, which is generally larger than the
+// inherent, so `medianValidatorIndex` may point at a validator that did not
+// submit this block.
+export class LatchedMedianAggregator implements Aggregator {
+  readonly mode = "latched-median" as const;
+
+  /** validatorIndex → that validator's most recently submitted quote price.
+   *  Persists across blocks for the lifetime of the run. */
+  private latched = new Map<number, number>();
+
+  inputKindFor(_lastPrice: number): InputKind {
+    // No minInputs: advertise 0 so author-side logic that reads it doesn't
+    // gate on a threshold.
+    return { kind: "quote", minInputs: 0 };
+  }
+
+  /** Latched-median has no per-block schedule; both hooks are no-ops. */
+  onBeforeApply(_ctx: BeforeApplyContext): void { /* deliberately empty */ }
+  onBlockEnd(_ctx: BlockEndContext): void { /* deliberately empty */ }
+
+  apply(ctx: AggregatorContext): AggregateOutcome {
+    for (const s of ctx.inputs) assertSubmissionKind(s, "quote", "inputs", this.mode);
+    for (const s of ctx.inherent) assertSubmissionKind(s, "quote", "inherent", this.mode);
+
+    const totalQuotes = ctx.inputs.length;
+
+    // Refresh the latches of every validator present in this block's inherent.
+    for (const s of ctx.inherent) {
+      if (s.kind !== "quote") continue; // unreachable: asserted above
+      this.latched.set(s.validatorIndex, s.price);
+    }
+
+    // No validator has ever submitted (e.g. block 0 with an empty inherent) —
+    // nothing to median, hold the price.
+    if (this.latched.size === 0) {
+      return { newPrice: ctx.lastPrice, totalBumps: totalQuotes, activatedBumps: ctx.inherent.length, netDirection: 0, priceUpdated: false };
+    }
+
+    // Median over the FULL latched set (not just this block's inherent).
+    const entries: Array<{ price: number; index: number }> = new Array(this.latched.size);
+    let i = 0;
+    for (const [index, price] of this.latched) entries[i++] = { price, index };
+    const { prices: sorted, indices: sortedIndices } = sortQuotesWithIndex(entries);
+    const { value: newPrice, index: medianValidatorIndex } =
+      medianOfRangeWithIndex(sorted, sortedIndices, 0, sorted.length);
+    return {
+      newPrice,
+      totalBumps: totalQuotes,
+      activatedBumps: ctx.inherent.length,
+      netDirection: Math.sign(newPrice - ctx.lastPrice),
+      priceUpdated: true,
+      medianValidatorIndex,
+    };
+  }
+}
+
 // ── Factory ─────────────────────────────────────────────────────────────────
 
 /** Polkadot assumes ≥ 2/3 honest validators. Requiring `floor(2/3·N) + 1`
  *  inputs to update guarantees that more than half of the contributing
  *  data points come from honest validators, protecting the median. For
- *  nudge, the natural default is 0. */
+ *  nudge, the natural default is 0; latched-median has no minInputs at all. */
 export function defaultMinInputs(kind: AggregatorConfig["kind"], validatorCount: number): number {
-  if (kind === "nudge") return 0;
+  if (kind === "nudge" || kind === "latched-median") return 0;
   return Math.floor((2 / 3) * validatorCount) + 1;
 }
 
@@ -397,12 +473,12 @@ export function makeAggregator(
   validatorCount: number,
   resolvedNudgeEpsilon?: { value: number; mode: EpsilonMode },
 ): Aggregator {
-  const minInputs = cfg.minInputs ?? defaultMinInputs(cfg.kind, validatorCount);
   switch (cfg.kind) {
     case "nudge": {
       if (resolvedNudgeEpsilon === undefined) {
         throw new Error("makeAggregator: nudge aggregator requires a resolved epsilon");
       }
+      const minInputs = cfg.minInputs ?? defaultMinInputs("nudge", validatorCount);
       return new NudgeAggregator(
         minInputs,
         resolvedNudgeEpsilon.value,
@@ -410,8 +486,13 @@ export function makeAggregator(
         cfg.velocity,
       );
     }
-    case "median":
+    case "median": {
+      const minInputs = cfg.minInputs ?? defaultMinInputs("median", validatorCount);
       return new MedianAggregator(minInputs);
+    }
+    case "latched-median":
+      // No minInputs — the latched set is always non-empty after block 0.
+      return new LatchedMedianAggregator();
   }
 }
 

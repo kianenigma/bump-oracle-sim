@@ -117,6 +117,11 @@ bun run src/main.ts --help                             # full flag list
   Only mode that uses ε. `minInputs` defaults to 0.
 - **median**: validators submit absolute price quotes; `price' = median(inherent quotes)`.
   `minInputs` defaults to `floor(2/3·N) + 1` (Polkadot's 2/3-honest assumption protects the median).
+- **latched-median**: like median but **no minInputs**, and per-validator quotes are
+  *latched*. The aggregator keeps each validator's last submitted quote; each block the
+  inherent refreshes the latches of the validators it contains, then the median is taken
+  over the **full latched set** (including stale latches of absent validators). Wired for
+  `honest` + `pushy-max` only so far (other validators are incompatible and throw).
 
 `AggregatorConfig` lives on `SimulationConfig.aggregator`; the engine resolves
 `"auto"`/ratio epsilon and default `minInputs` before instantiating.
@@ -158,7 +163,7 @@ Build them with `buildValidators(total, GroupSpec[], priceSource)`.
 `honest`, `entire-venue-history`, `nudge-velocity`, `sweep-malicious`,
 `sweep-all-malicious`, `sweep-malicious-and-epsilon`, `sweep-pushy-and-epsilon`,
 `epsilon-sweep`, `edge-malicious`, `research-absolute-eps`, `research-ratio-eps`,
-`research-ratio-eps-all-honest`, `aggregator-comparison`.
+`research-ratio-eps-all-honest`, `latched-median`, `aggregator-comparison`.
 
 Each scenario emits a batch of `SimulationConfig`s with canonical labels
 (`<engine> | <mix> [suffix]`) and runs them via `runBatch`, which uses a Bun
@@ -219,7 +224,10 @@ absent fields default sensibly for backward compat). `BLOCKS_PER_CHUNK = 1_000_0
 
 ## Upcoming / In-Flight
 
-`PROMPT_LATCHED.md` describes a planned **latched-median** aggregator: median
-semantics with no `minInputs`, storing each validator's last submission and taking
-the median over the latched set each block. To be implemented as a new aggregator
-type, initially supporting only `honest` and `pushy-max`. Not yet built.
+The **latched-median** aggregator (`PROMPT_LATCHED.md`) is now implemented
+(`LatchedMedianAggregator` in `aggregator.ts`, `latched-median` scenario). Only
+`honest` and `pushy-max` are wired for it; extending the other adversary types to
+behave meaningfully under the latched set is the next step (the prompt reserved
+that work). `pushy-max`'s latched-median behavior (extreme-outlier input +
+cabal-only, honest-withholding authorship) is an opinionated first cut intended
+to be tuned.

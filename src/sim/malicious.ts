@@ -270,28 +270,34 @@ export class PushyMaliciousValidator extends BaseValidator {
 //   * divergence down: redeem against DOTs in the vaults for cheap
 // so the attack target is `max |oracle - real|`, not a fixed direction.
 export class MaximallyPushyValidator extends BaseValidator {
-  static readonly compatibleEngines: ReadonlyArray<AggregatorMode> = ["nudge", "median"];
+  static readonly compatibleEngines: ReadonlyArray<AggregatorMode> = ["nudge", "median", "latched-median"];
   readonly type: ValidatorType = "pushy-max";
 
   protected produceQuoteInput(ctx: ProduceCtx): Submission {
+    // TODO: for now our cabal is only submitting 0, but we can submit o or inf depending on which produces more divergence.
     return quote(this.index, this.type, 0);
   }
 
   protected produceQuoteInherent(inputs: Submission[], ctx: ProduceCtx): Submission[] {
-
-    const honest = inputs.filter(s => s.kind === "quote" && s.type === "honest");
     const ourCabal = inputs.filter(s => s.kind === "quote" && s.type === this.type);
-    const quotesNeeded = ctx.inputKind.kind === "quote" ? ctx.inputKind.minInputs : 0;
-    const honestToInclude = quotesNeeded - ourCabal.length
-    // sort all honest quotes, take the first honestToInclude, and return that.
-    const sortedHonest = honest.sort((a, b) => { if (a.kind === "quote" && b.kind === "quote") { return a.price - b.price; } else { return 0; } });
-    const maxBiased = sortedHonest.slice(0, honestToInclude).concat(ourCabal);
-    if (maxBiased.length != quotesNeeded) {
-      throw new Error(`MaximallyPushyValidator: failed to produce enough quotes: ${maxBiased.length} of ${quotesNeeded}`);
+    if (ctx.aggregatorMode === "median") {
+      // we need to meet the minInputs requirement.
+      const honest = inputs.filter(s => s.kind === "quote" && s.type === "honest");
+      const quotesNeeded = ctx.inputKind.kind === "quote" ? ctx.inputKind.minInputs : 0;
+      const honestToInclude = Math.max(0, quotesNeeded - ourCabal.length)
+      // sort all honest quotes, take the first honestToInclude, and return that.
+      const sortedHonest = honest.sort((a, b) => { if (a.kind === "quote" && b.kind === "quote") { return a.price - b.price; } else { return 0; } });
+      const maxBiased = sortedHonest.slice(0, honestToInclude).concat(ourCabal);
+      if (maxBiased.length != quotesNeeded && quotesNeeded !== 0) {
+        throw new Error(`MaximallyPushyValidator: failed to produce enough quotes: ${maxBiased.length} of ${quotesNeeded}`);
+      }
+      return maxBiased
+    } else if (ctx.aggregatorMode === "latched-median") {
+      // we can only include our own quotes in the inherent and be done.
+      return ourCabal;
+    } else {
+      throw new Error(`MaximallyPushyValidator: unsupported aggregator mode: ${ctx.aggregatorMode}`);
     }
-    return maxBiased
-
-
   }
 
   protected produceNudgeInput(ctx: ProduceCtx): Submission {
@@ -366,7 +372,7 @@ export class MaximallyPushyValidator extends BaseValidator {
 //   Nudge: emit honest bumps; as author activate none → freeze.
 //   Quote: abstain; as author drop the inherent → freeze.
 export class NoopValidator extends BaseValidator {
-  static readonly compatibleEngines: ReadonlyArray<AggregatorMode> = ["nudge", "median"];
+  static readonly compatibleEngines: ReadonlyArray<AggregatorMode> = ["nudge", "median", "latched-median"];
   readonly type: ValidatorType = "noop";
 
   protected produceQuoteInput(_ctx: ProduceCtx): Submission | null {
