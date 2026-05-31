@@ -1,0 +1,436 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Block Detail · Oracle Bump Simulation</title>
+  <style>
+    :root[data-theme="dark"] {
+      --bg: #1b1d23; --bg-surface: #22252b; --bg-elevated: #2a2d34;
+      --border: #363940; --border-light: #2e3138;
+      --text: #d4d4d8; --text-muted: #8b8d94; --text-dim: #5c5e66;
+      --accent: #e4e4e7; --hover-bg: #2e3138; --tag-bg: #2a2d34;
+      --good: #7dd37d; --bad: #e88; --warn: #fc6; --info: #9cf;
+    }
+    :root[data-theme="light"] {
+      --bg: #f7f7f5; --bg-surface: #efeee9; --bg-elevated: #e7e6e1;
+      --border: #d5d4cf; --border-light: #e0dfda;
+      --text: #2c2c2a; --text-muted: #6b6b68; --text-dim: #9a9a96;
+      --accent: #2c2c2a; --hover-bg: #e7e6e1; --tag-bg: #e7e6e1;
+      --good: #2e8b2e; --bad: #c0392b; --warn: #b8860b; --info: #2c6fbf;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: var(--bg); color: var(--text); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    #header { padding: 12px 24px; background: var(--bg-surface); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 16px; position: sticky; top: 0; z-index: 10; }
+    #header-left { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+    #header h1 { font-size: 17px; font-weight: 600; }
+    #block-sub { font-size: 12px; color: var(--text-muted); }
+    #header-right { display: flex; gap: 8px; align-items: center; }
+    .btn { background: none; color: var(--text-muted); border: 1px solid var(--border); border-radius: 4px; padding: 5px 12px; font-size: 12px; cursor: pointer; text-decoration: none; transition: all 0.12s; }
+    .btn:hover:not(:disabled) { background: var(--hover-bg); color: var(--text); }
+    .btn:disabled { opacity: 0.35; cursor: not-allowed; }
+
+    #main { max-width: 1080px; margin: 0 auto; padding: 20px 24px 60px; display: flex; flex-direction: column; gap: 12px; }
+    #intro { font-size: 12px; color: var(--text-dim); }
+
+    .card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+    .card.active { border-color: var(--border-light); box-shadow: inset 3px 0 0 0 var(--card-color, transparent); }
+    .card-head { display: flex; align-items: center; gap: 10px; padding: 12px 16px; cursor: pointer; user-select: none; }
+    .card-head:hover { background: var(--hover-bg); }
+    .dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+    .card-title { font-size: 13px; font-weight: 600; }
+    .card-engine { font-size: 11px; color: var(--text-muted); background: var(--tag-bg); padding: 2px 8px; border-radius: 4px; white-space: nowrap; }
+    .card-summary { font-size: 12px; color: var(--text-muted); margin-left: auto; text-align: right; }
+    .chevron { color: var(--text-dim); font-size: 11px; width: 14px; text-align: center; transition: transform 0.12s; }
+    .card.open .chevron { transform: rotate(90deg); }
+    .card-body { display: none; padding: 4px 16px 16px; border-top: 1px solid var(--border-light); }
+    .card.open .card-body { display: block; }
+
+    .section-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-dim); margin: 14px 0 6px; }
+    .facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px 18px; }
+    .fact { font-size: 12.5px; }
+    .fact .k { color: var(--text-dim); margin-right: 6px; }
+    .fact .v { color: var(--text); font-weight: 500; }
+
+    .price-flow { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 14px; margin: 4px 0; }
+    .price-flow .pill { background: var(--bg-elevated); border: 1px solid var(--border); border-radius: 6px; padding: 6px 12px; }
+    .price-flow .pill .lbl { font-size: 10px; color: var(--text-dim); display: block; text-transform: uppercase; letter-spacing: 0.05em; }
+    .price-flow .arrow { color: var(--text-dim); }
+
+    .badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 4px; background: var(--tag-bg); }
+    .badge.honest { color: var(--good); } .badge.adversary { color: var(--bad); }
+    .delta-up { color: var(--good); } .delta-down { color: var(--bad); } .delta-zero { color: var(--text-muted); }
+
+    table.votes { width: 100%; border-collapse: collapse; font-size: 12.5px; margin-top: 4px; }
+    table.votes th { text-align: left; color: var(--text-dim); font-weight: 500; font-size: 11px; padding: 4px 8px; border-bottom: 1px solid var(--border-light); }
+    table.votes td { padding: 5px 8px; border-bottom: 1px solid var(--border-light); }
+    .grp-row { cursor: pointer; }
+    .grp-row:hover { background: var(--hover-bg); }
+    .grp-row.has-rows .gname::after { content: ' ▸'; color: var(--text-dim); font-size: 10px; }
+    .grp-row.expanded.has-rows .gname::after { content: ' ▾'; }
+    .grp-row.is-author td:first-child { box-shadow: inset 3px 0 0 0 var(--warn); }
+    .grp-row.is-median td:first-child { box-shadow: inset 3px 0 0 0 var(--info); }
+    .raw-rows td { background: var(--bg); color: var(--text-muted); font-size: 11.5px; }
+    .raw-rows .mono { color: var(--text); }
+    .nudge-bar { display: inline-flex; height: 8px; border-radius: 3px; overflow: hidden; vertical-align: middle; margin-left: 6px; width: 90px; border: 1px solid var(--border); }
+    .nudge-bar .up { background: var(--good); } .nudge-bar .down { background: var(--bad); }
+    .muted { color: var(--text-muted); } .dim { color: var(--text-dim); }
+    .loading, .empty { color: var(--text-dim); font-size: 12px; padding: 10px 0; }
+    .err { color: var(--bad); font-size: 12px; padding: 10px 0; }
+  </style>
+</head>
+<body>
+  <div id="header">
+    <div id="header-left">
+      <h1>Block Detail</h1>
+      <span id="block-sub" class="mono"></span>
+    </div>
+    <div id="header-right">
+      <button id="prev-block" class="btn" title="Previous block (←)" disabled>← Prev</button>
+      <button id="next-block" class="btn" title="Next block (→)" disabled>Next →</button>
+      <button id="theme-toggle" class="btn" title="Toggle theme">◐</button>
+      <a id="back" class="btn" href="/">← Back to chart</a>
+    </div>
+  </div>
+  <div id="main">
+    <div id="intro" class="dim">Per-block breakdown across every scenario in this dataset. Active scenarios are expanded; click any header to expand the rest.</div>
+    <div id="cards"></div>
+  </div>
+
+  <script>
+    // ── Shared palette / glyphs (kept in sync with template.html) ──
+    function generateColors(n) {
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const hue = (i * 137.508) % 360;
+        const s = 0.75, l = 0.58;
+        const a = s * Math.min(l, 1 - l);
+        const f = (k) => { const t = (k + hue / 30) % 12; return l - a * Math.max(Math.min(t - 3, 9 - t, 1), -1); };
+        const r = Math.round(f(0) * 255), g = Math.round(f(8) * 255), b = Math.round(f(4) * 255);
+        out.push('#' + ((1 << 24) | (r << 16) | (g << 8) | b).toString(16).slice(1));
+      }
+      return out;
+    }
+    const COLORS = generateColors(32);
+    const TYPE_GLYPH = { honest: '✓', malicious: '✗', pushy: '⇈', 'pushy-max': '⤊', noop: '∅', delayed: '⌛', drift: '↗' };
+    const HONEST_TYPES = new Set(['honest']);
+
+    function esc(s) { return String(s).replace(/[<>&]/g, c => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c])); }
+    function glyph(t) { return TYPE_GLYPH[t] ?? '·'; }
+    function isHonest(t) { return HONEST_TYPES.has(t); }
+    function fmtPrice(p) { return (p === null || p === undefined) ? '—' : Number(p).toFixed(4); }
+    function median(arr) {
+      if (arr.length === 0) return null;
+      const s = [...arr].sort((a, b) => a - b); const m = Math.floor(s.length / 2);
+      return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
+    }
+
+    // ── URL params ──
+    const params = new URLSearchParams(location.search);
+    const qTime = params.get('time');
+    const qBlock = params.get('block');
+    // `active` present (even empty) ⇒ respect it EXACTLY (empty = none open).
+    // Absent ⇒ no opinion was passed, fall back to opening the first card.
+    const activeParamRaw = params.get('active');
+    const hasActiveParam = activeParamRaw !== null;
+    const activeSet = new Set((activeParamRaw || '').split(',').map(s => parseInt(s, 10)).filter(n => !isNaN(n)));
+
+    document.getElementById('theme-toggle').addEventListener('click', () => {
+      const h = document.documentElement;
+      h.dataset.theme = h.dataset.theme === 'dark' ? 'light' : 'dark';
+    });
+
+    // ── Engine / aggregator formatting (mirrors scenarios.ts formatEngine) ──
+    function epsilonStr(summary) {
+      if (summary == null || summary.epsilon == null) return '?';
+      if (summary.epsilonMode === 'ratio') return (summary.epsilon * 100).toFixed(4) + '% / bump';
+      const e = summary.epsilon;
+      return Math.abs(e) >= 1e-3 ? e.toFixed(4) : e.toExponential(2);
+    }
+    function engineLabel(cfg) {
+      if (!cfg) return 'median';
+      if (cfg.kind === 'nudge') return 'nudge' + (cfg.velocity ? ' · velocity' : '');
+      if (cfg.kind === 'latched-median') return 'latched-median';
+      return cfg.minInputs !== undefined ? 'median · min=' + cfg.minInputs : 'median';
+    }
+
+    // ── Resolve block index from time (uniform 6s spacing) ──
+    const BLOCK_TIME = 6;
+    function blockFromTime(meta, time) {
+      if (meta.blockCount === 0) return 0;
+      if (time <= meta.timeRange.from) return 0;
+      if (time >= meta.timeRange.to) return meta.blockCount - 1;
+      return Math.max(0, Math.min(meta.blockCount - 1, Math.floor((time - meta.timeRange.from) / BLOCK_TIME)));
+    }
+
+    let META = null;
+
+    async function init() {
+      try {
+        const res = await fetch('/api/meta');
+        META = await res.json();
+      } catch (e) {
+        document.getElementById('cards').innerHTML = '<div class="err">Failed to load /api/meta</div>';
+        return;
+      }
+      if (!META.scenarios || META.scenarios.length === 0) {
+        document.getElementById('cards').innerHTML = '<div class="empty">No scenarios in this dataset.</div>';
+        return;
+      }
+
+      // Resolve the block from the first scenario (shared timeline).
+      const ref = META.scenarios[0];
+      let block;
+      if (qBlock !== null && !isNaN(parseInt(qBlock, 10))) block = parseInt(qBlock, 10);
+      else if (qTime !== null) block = blockFromTime(ref, parseFloat(qTime));
+      else block = 0;
+      block = Math.max(0, Math.min(ref.blockCount - 1, block));
+      const ts = ref.timeRange.from + block * BLOCK_TIME;
+      const when = new Date(ts * 1000).toISOString().replace('T', ' ').replace(/\.\d+Z$/, ' UTC');
+      document.getElementById('block-sub').textContent = `Block #${block.toLocaleString()} · ${when}`;
+      document.title = `Block #${block} · Oracle Sim`;
+
+      // Wire prev/next now that we know the block range.
+      setupBlockNav(block, ref.blockCount - 1);
+
+      const cardsEl = document.getElementById('cards');
+      META.scenarios.forEach((sc, idx) => {
+        const color = COLORS[idx % COLORS.length];
+        // Explicit active set ⇒ open exactly those; no param ⇒ open the first.
+        const open = hasActiveParam ? activeSet.has(sc.index) : (idx === 0);
+        cardsEl.appendChild(buildCard(sc, color, block, open));
+      });
+    }
+
+    // ── Prev/next block navigation (buttons + ← / → arrows) ──
+    // Navigates by `block` index (preserving the `active` scenario set) so the
+    // step is exact regardless of the timeframe the user clicked from.
+    function setupBlockNav(block, maxBlock) {
+      const prevBtn = document.getElementById('prev-block');
+      const nextBtn = document.getElementById('next-block');
+      const gotoBlock = (nb) => {
+        if (nb < 0 || nb > maxBlock) return;
+        // Carry the CURRENTLY-expanded scenarios (not the original URL param),
+        // so whatever the user has open now stays open on the next block. The
+        // `active` key is always present — empty means "expand none".
+        const open = [...document.querySelectorAll('.card.open')]
+          .map(c => c.dataset.scenario)
+          .filter(v => v !== undefined && v !== '');
+        location.href = `/block?block=${nb}&active=${encodeURIComponent(open.join(','))}`;
+      };
+      prevBtn.disabled = block <= 0;
+      nextBtn.disabled = block >= maxBlock;
+      prevBtn.addEventListener('click', () => gotoBlock(block - 1));
+      nextBtn.addEventListener('click', () => gotoBlock(block + 1));
+      document.addEventListener('keydown', (e) => {
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        if (e.key === 'ArrowLeft') { e.preventDefault(); gotoBlock(block - 1); }
+        else if (e.key === 'ArrowRight') { e.preventDefault(); gotoBlock(block + 1); }
+      });
+    }
+
+    function buildCard(sc, color, block, open) {
+      const card = document.createElement('div');
+      card.className = 'card' + (open ? ' active open' : '');
+      card.dataset.scenario = sc.index;
+      card.style.setProperty('--card-color', color);
+
+      const head = document.createElement('div');
+      head.className = 'card-head';
+      head.innerHTML =
+        `<span class="chevron">▶</span>` +
+        `<span class="dot" style="background:${color}"></span>` +
+        `<span class="card-title">${esc(sc.config.label || ('Scenario ' + sc.index))}</span>` +
+        `<span class="card-engine">${esc(engineLabel(sc.config.aggregator))}</span>` +
+        `<span class="card-summary dim">…</span>`;
+      card.appendChild(head);
+
+      const body = document.createElement('div');
+      body.className = 'card-body';
+      body.innerHTML = '<div class="loading">Loading block detail…</div>';
+      card.appendChild(body);
+
+      let loaded = false;
+      const summaryEl = head.querySelector('.card-summary');
+      async function ensureLoaded() {
+        if (loaded) return;
+        loaded = true;
+        await loadDetail(sc, block, body, summaryEl);
+      }
+      head.addEventListener('click', () => {
+        const nowOpen = !card.classList.contains('open');
+        card.classList.toggle('open', nowOpen);
+        card.classList.toggle('active', nowOpen); // keep the color highlight in sync
+        if (nowOpen) ensureLoaded();
+      });
+      if (open) ensureLoaded();
+      return card;
+    }
+
+    async function loadDetail(sc, block, body, summaryEl) {
+      let d;
+      try {
+        const res = await fetch(`/api/block-detail?scenario=${sc.index}&block=${block}`);
+        d = await res.json();
+        if (d.error) throw new Error(d.error);
+      } catch (e) {
+        body.innerHTML = `<div class="err">Failed to load block detail: ${esc(e.message || e)}</div>`;
+        summaryEl.textContent = 'error';
+        return;
+      }
+      if (!d.found) {
+        body.innerHTML = `<div class="empty">No CSV row for this block (the scenario's <span class="mono">.csv</span> may be missing).</div>`;
+        summaryEl.textContent = 'no data';
+        return;
+      }
+      renderHeadSummary(summaryEl, d);
+      body.innerHTML = renderBody(sc, d);
+      wireGroupToggles(body);
+    }
+
+    function renderHeadSummary(el, d) {
+      const a = d.author;
+      const status = d.priceUpdated === false
+        ? `<span style="color:var(--bad)">⨯ frozen</span>`
+        : `<span style="color:var(--good)">✓ updated</span>`;
+      const delta = deltaSpan(d.prevPrice, d.newPrice);
+      el.innerHTML = `<span class="muted">${glyph(a.type)} ${esc(a.type)}</span> · ${status} · ${delta}`;
+    }
+
+    function deltaSpan(prev, next) {
+      if (prev == null || next == null) return '<span class="dim">—</span>';
+      const diff = next - prev;
+      const pct = prev !== 0 ? (diff / prev) * 100 : 0;
+      const cls = diff > 1e-12 ? 'delta-up' : diff < -1e-12 ? 'delta-down' : 'delta-zero';
+      const sign = diff > 0 ? '+' : '';
+      return `<span class="${cls} mono">${sign}${pct.toFixed(3)}%</span>`;
+    }
+
+    function renderBody(sc, d) {
+      const cfg = sc.config.aggregator || {};
+      const a = d.author;
+      const dev = (d.realPrice && d.newPrice != null) ? Math.abs(d.realPrice - d.newPrice) / d.realPrice * 100 : null;
+
+      // Price flow
+      let html = `<div class="price-flow">`;
+      html += pill('Prev oracle', fmtPrice(d.prevPrice));
+      html += `<span class="arrow">→</span>`;
+      html += pill('New oracle', fmtPrice(d.newPrice));
+      html += `<span class="arrow">·</span>`;
+      html += pill('Real price', fmtPrice(d.realPrice));
+      html += `<span style="margin-left:6px">${deltaSpan(d.prevPrice, d.newPrice)}</span>`;
+      if (dev != null) html += `<span class="dim" style="font-size:12px">dev <span class="mono">${dev.toFixed(3)}%</span></span>`;
+      html += `</div>`;
+
+      // Block facts
+      html += `<div class="section-title">Block</div><div class="facts">`;
+      html += fact('Author', `<span class="badge ${a.isHonest ? 'honest' : 'adversary'}">${glyph(a.type)} ${esc(a.type)}</span> <span class="dim mono">#${a.index}</span>`);
+      html += fact('Price updated', d.priceUpdated === false ? '<span style="color:var(--bad)">no (frozen)</span>' : '<span style="color:var(--good)">yes</span>');
+      html += fact('Inherent inputs', `<span class="mono">${d.inherentTotal ?? '—'}</span>` + (d.inherentNonHonest != null ? ` <span class="dim">(${d.inherentNonHonest} non-honest)</span>` : ''));
+      html += `</div>`;
+
+      // Aggregator-specific
+      html += `<div class="section-title">Aggregator · ${esc(cfg.kind || 'median')}</div><div class="facts">`;
+      if (cfg.kind === 'nudge') {
+        html += fact('ε (resolved)', `<span class="mono">${epsilonStr(sc.summary)}</span>`);
+        html += fact('Velocity', cfg.velocity ? 'enabled' : '<span class="dim">none</span>');
+        if (d.agreementRate != null) html += fact('Agreement rate', `<span class="mono">${(d.agreementRate * 100).toFixed(0)}%</span>`);
+        if (d.epsilonCoefficient != null) {
+          const boosted = Math.abs(d.epsilonCoefficient - 1) > 1e-9;
+          html += fact('ε coefficient', `<span class="mono" style="${boosted ? 'color:var(--warn);font-weight:600' : ''}">×${d.epsilonCoefficient.toFixed(2)}</span>`);
+        }
+      } else if (cfg.kind === 'latched-median') {
+        html += fact('Min inputs', '<span class="dim">none (latched set)</span>');
+        if (d.medianValidator) html += fact('Median selected', medianValidatorHtml(d.medianValidator));
+      } else { // median
+        html += fact('Min inputs', `<span class="mono">${cfg.minInputs ?? '—'}</span>`);
+        if (d.medianValidator) html += fact('Median selected', medianValidatorHtml(d.medianValidator));
+      }
+      html += `</div>`;
+
+      // Inputs (grouped)
+      html += `<div class="section-title">Inputs · author-selected inherent (${d.votes.length})</div>`;
+      html += renderVotes(d);
+      return html;
+    }
+
+    function medianValidatorHtml(mv) {
+      const idx = mv.index != null ? ` <span class="dim mono">#${mv.index}</span>` : '';
+      return `<span class="badge ${isHonest(mv.type) ? 'honest' : 'adversary'}">${glyph(mv.type)} ${esc(mv.type)}</span>${idx}`;
+    }
+
+    function pill(lbl, val) { return `<span class="pill"><span class="lbl">${lbl}</span><span class="mono">${val}</span></span>`; }
+    function fact(k, v) { return `<div class="fact"><span class="k">${k}</span><span class="v">${v}</span></div>`; }
+
+    function renderVotes(d) {
+      if (!d.votes || d.votes.length === 0) return `<div class="empty">Empty inherent — the author selected no inputs (price held).</div>`;
+      const isNudge = d.votes[0].kind === 'nudge';
+      // Group by validator type.
+      const groups = new Map();
+      for (const v of d.votes) {
+        if (!groups.has(v.type)) groups.set(v.type, []);
+        groups.get(v.type).push(v);
+      }
+      const medianType = d.medianValidator ? d.medianValidator.type : null;
+      const authorType = d.author ? d.author.type : null;
+
+      let rows = '';
+      // Sort groups: largest first.
+      const sorted = [...groups.entries()].sort((a, b) => b[1].length - a[1].length);
+      let gi = 0;
+      for (const [type, vs] of sorted) {
+        const cls = ['grp-row'];
+        if (type === authorType) cls.push('is-author');
+        if (type === medianType) cls.push('is-median');
+        let detailCell;
+        let rawRows = '';
+        if (isNudge) {
+          const up = vs.filter(v => v.bump > 0).length, down = vs.length - up;
+          const upPct = vs.length ? (up / vs.length) * 100 : 0;
+          detailCell = `<span class="mono">↑${up} ↓${down}</span>` +
+            `<span class="nudge-bar"><span class="up" style="width:${upPct}%"></span><span class="down" style="width:${100 - upPct}%"></span></span>`;
+        } else {
+          const prices = vs.map(v => v.price);
+          const mn = Math.min(...prices), mx = Math.max(...prices), md = median(prices);
+          detailCell = `<span class="mono">${mn.toFixed(4)} / ${md.toFixed(4)} / ${mx.toFixed(4)}</span> <span class="dim">min·med·max</span>`;
+          // Raw rows (sorted) — lazily shown on expand.
+          const ps = [...prices].sort((a, b) => a - b);
+          rawRows = ps.map((p, i) => `<tr class="raw-rows"><td></td><td class="dim">#${i + 1}</td><td class="mono">${p.toFixed(6)}</td></tr>`).join('');
+        }
+        const hasRows = rawRows.length > 0;
+        cls.push(hasRows ? 'has-rows' : '');
+        const badges = (type === authorType ? ' <span class="dim" title="block author">author</span>' : '') +
+                       (type === medianType ? ' <span class="dim" title="median-selected validator type">median</span>' : '');
+        rows += `<tr class="${cls.join(' ')}" data-gi="${gi}">` +
+          `<td class="gname"><span class="badge ${isHonest(type) ? 'honest' : 'adversary'}">${glyph(type)} ${esc(type)}</span>${badges}</td>` +
+          `<td class="mono">${vs.length}</td>` +
+          `<td>${detailCell}</td></tr>`;
+        if (hasRows) rows += `<tbody class="raw-${gi}" style="display:none">${rawRows}</tbody>`;
+        gi++;
+      }
+      const header = isNudge
+        ? `<tr><th>Validator type</th><th>Count</th><th>Direction split</th></tr>`
+        : `<tr><th>Validator type</th><th>Count</th><th>Value (min / med / max)</th></tr>`;
+      return `<table class="votes"><thead>${header}</thead><tbody>${rows}</tbody></table>`;
+    }
+
+    function wireGroupToggles(body) {
+      body.querySelectorAll('.grp-row.has-rows').forEach(row => {
+        row.addEventListener('click', () => {
+          const gi = row.getAttribute('data-gi');
+          const tb = body.querySelector('.raw-' + gi);
+          if (!tb) return;
+          const showing = tb.style.display !== 'none';
+          tb.style.display = showing ? 'none' : '';
+          row.classList.toggle('expanded', !showing);
+        });
+      });
+    }
+
+    init();
+  </script>
+</body>
+</html>

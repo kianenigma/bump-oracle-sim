@@ -17,6 +17,7 @@ import { mulberry32 } from "../rng.js";
 import { BLOCK_TIME_SECONDS } from "../config.js";
 
 const TEMPLATE_PATH = join(import.meta.dir, "template.html");
+const BLOCK_TEMPLATE_PATH = join(import.meta.dir, "block.html");
 const MAX_CANDLES = 10_000;
 const OVER_FETCH_RATIO = 0.1;
 const CHUNK_CACHE_MAX = 60;
@@ -122,6 +123,124 @@ function findEventForBlock(
     return { ...ev, phase };
   }
   return null;
+}
+
+// ── Per-block CSV reader (full inherent votes) ───────────────────────────────
+// The chunked .simdata only stores summary arrays — the full per-block list of
+// inherent submissions (each input's validator type + value) lives ONLY in the
+// per-scenario CSV written alongside it (`<dir>.csv`, one row per block in
+// order, block N at line index N+1 after the header). The block-detail page
+// needs those individual votes, so we scan the CSV for the single target row.
+//
+// Scan cost is O(targetBlock) lines, but a block-detail open is a rare,
+// user-initiated action (one click) and the typical smoke-test sim is well
+// under ~100k blocks, so a streaming scan with early-exit is fine.
+
+interface ParsedVote {
+  type: ValidatorType;
+  kind: "quote" | "nudge";
+  price?: number;
+  bump?: number;
+}
+
+interface CsvBlockRow {
+  authorIndex: number;
+  authorType: ValidatorType;
+  inherentTotal: number;
+  inherentNonHonest: number;
+  priceUpdated: boolean;
+  oraclePrice: number;
+  realPrice: number;
+  medianValidatorType: string | null;
+  votes: ParsedVote[];
+}
+
+/** Parse the `inherentVotes` payload (already CSV-unquoted). Format is
+ *  `[(type, value); (type, value); ...]` or `[]`. `mode` disambiguates the
+ *  value: nudge rows carry a signed bump (`+1`/`-1`), quote rows a price —
+ *  passing the aggregator mode avoids mis-reading a quote price of -1 as a
+ *  down bump. */
+function parseInherentVotes(raw: string, mode: string): ParsedVote[] {
+  let s = raw.trim();
+  if (s.startsWith("[")) s = s.slice(1);
+  if (s.endsWith("]")) s = s.slice(0, -1);
+  s = s.trim();
+  if (s.length === 0) return [];
+  const out: ParsedVote[] = [];
+  for (const entry of s.split("; ")) {
+    const m = entry.match(/^\(\s*(.+?)\s*,\s*([^)]+)\)$/);
+    if (!m) continue;
+    const type = m[1].trim() as ValidatorType;
+    const val = m[2].trim();
+    if (mode === "nudge") {
+      out.push({ type, kind: "nudge", bump: val.startsWith("-") ? -1 : 1 });
+    } else {
+      out.push({ type, kind: "quote", price: parseFloat(val) });
+    }
+  }
+  return out;
+}
+
+/** Split one CSV data row into its fields. The first 12 columns are
+ *  comma-free; the 13th (inherentVotes) is double-quoted and may contain
+ *  commas/semicolons, so everything past the 12th comma is the votes payload. */
+function parseCsvBlockRow(line: string, mode: string): CsvBlockRow | null {
+  const trimmed = line.replace(/\r$/, "");
+  let idx = 0;
+  const cols: string[] = [];
+  for (let k = 0; k < 12; k++) {
+    const c = trimmed.indexOf(",", idx);
+    if (c < 0) return null; // malformed / header
+    cols.push(trimmed.slice(idx, c));
+    idx = c + 1;
+  }
+  let votesRaw = trimmed.slice(idx);
+  // Unwrap the CSV quoting the writer applied to the votes field.
+  if (votesRaw.startsWith('"') && votesRaw.endsWith('"')) {
+    votesRaw = votesRaw.slice(1, -1).replace(/""/g, '"');
+  }
+  const medType = cols[11];
+  return {
+    authorIndex: parseInt(cols[2], 10),
+    authorType: cols[3] as ValidatorType,
+    inherentTotal: parseInt(cols[4], 10),
+    inherentNonHonest: parseInt(cols[5], 10),
+    priceUpdated: cols[7] === "1",
+    oraclePrice: parseFloat(cols[8]),
+    realPrice: parseFloat(cols[9]),
+    medianValidatorType: medType && medType !== "-" ? medType : null,
+    votes: parseInherentVotes(votesRaw, mode),
+  };
+}
+
+/** Stream a CSV file and return the line at `targetLineIdx` (0-based; line 0 is
+ *  the header) plus the line immediately before it. Avoids reading the whole
+ *  file into memory or past the target row. */
+async function readCsvLineAt(
+  path: string,
+  targetLineIdx: number,
+): Promise<{ line: string | null; prevLine: string | null }> {
+  const file = Bun.file(path);
+  if (!(await file.exists())) return { line: null, prevLine: null };
+  const decoder = new TextDecoder();
+  let buf = "";
+  let lineIdx = 0;
+  let prevLine: string | null = null;
+  // @ts-ignore — Bun's BunFile stream is async-iterable over Uint8Array chunks.
+  for await (const chunk of file.stream()) {
+    buf += decoder.decode(chunk, { stream: true });
+    let nl: number;
+    while ((nl = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, nl);
+      buf = buf.slice(nl + 1);
+      if (lineIdx === targetLineIdx) return { line, prevLine };
+      prevLine = line;
+      lineIdx++;
+    }
+  }
+  buf += decoder.decode();
+  if (buf.length > 0 && lineIdx === targetLineIdx) return { line: buf, prevLine };
+  return { line: null, prevLine };
 }
 
 /** Floor a timestamp to the block index using uniform 6s spacing from
@@ -299,6 +418,7 @@ export async function startServer(
   const venues = await loadVenues(outputDir);
   const events = await loadEvents(outputDir);
   const templateHtml = await Bun.file(TEMPLATE_PATH).text();
+  const blockTemplateHtml = await Bun.file(BLOCK_TEMPLATE_PATH).text();
   const metaResponse = JSON.stringify(buildMetaResponse(index, filterIndices, timeConstraint));
 
   const reportPath = join(outputDir, "research_report.json");
@@ -422,6 +542,121 @@ export async function startServer(
         const event = events ? findEventForBlock(events, block) : null;
 
         return new Response(JSON.stringify({ block, timestamp: blockTimestamp, authors, event }), {
+          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+        });
+      }
+
+      if (url.pathname === "/block") {
+        // Standalone per-block detail page. It pulls everything it needs from
+        // /api/meta + /api/block-detail; the route just serves the shell.
+        return new Response(blockTemplateHtml, {
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
+
+      if (url.pathname === "/api/block-detail") {
+        // Full per-block detail for ONE scenario: author, prices, and the
+        // complete inherent vote list (read from the scenario's CSV). Static
+        // config/summary the page already has from /api/meta — this endpoint
+        // only returns the per-block dynamic data.
+        const scenarioIdx = parseInt(url.searchParams.get("scenario") ?? "", 10);
+        const timeParam = url.searchParams.get("time");
+        const blockParam = url.searchParams.get("block");
+        if (isNaN(scenarioIdx) || scenarioIdx < 0 || scenarioIdx >= index.scenarios.length) {
+          return new Response(JSON.stringify({ error: "Invalid scenario" }), {
+            status: 400, headers: { "Content-Type": "application/json" },
+          });
+        }
+        // Respect the active filter so a URL can't reach a hidden scenario.
+        if (filterIndices && !filterIndices.includes(scenarioIdx)) {
+          return new Response(JSON.stringify({ error: "Scenario not served" }), {
+            status: 404, headers: { "Content-Type": "application/json" },
+          });
+        }
+
+        const meta = index.scenarios[scenarioIdx];
+        let block: number;
+        if (blockParam !== null && !isNaN(parseInt(blockParam, 10))) {
+          block = Math.max(0, Math.min(meta.blockCount - 1, parseInt(blockParam, 10)));
+        } else {
+          const time = parseFloat(timeParam ?? "");
+          if (isNaN(time)) {
+            return new Response(JSON.stringify({ error: "Invalid time/block" }), {
+              status: 400, headers: { "Content-Type": "application/json" },
+            });
+          }
+          block = blockAtTimestamp(meta, time);
+        }
+        const blockTimestamp = meta.timeRange.from + block * BLOCK_TIME_SECONDS;
+        const mode = meta.config.aggregator?.kind ?? "median";
+
+        // Full votes + author + prices from the CSV row (and the prior row for
+        // the pre-block oracle price).
+        const dir = scenarioDir(meta, scenarioIdx);
+        const csvPath = join(outputDir, `${dir}.csv`);
+        const { line, prevLine } = await readCsvLineAt(csvPath, block + 1);
+        const row = line ? parseCsvBlockRow(line, mode) : null;
+
+        // Per-block diagnostics not in the CSV (agreement rate, ε coefficient,
+        // median validator index) come from the chunk. Best-effort.
+        let agreementRate: number | null = null;
+        let epsilonCoefficient: number | null = null;
+        let medianValidatorIndex: number | null = null;
+        let initialPrice: number | null = null;
+        try {
+          const chunkIdx = Math.floor(block / BLOCKS_PER_CHUNK);
+          const chunk = await loadChunkCached(outputDir, dir, chunkIdx);
+          const tick = block - chunk.blockOffset;
+          if (chunk.agreementRates && tick >= 0 && tick < chunk.agreementRates.length) {
+            const ar = chunk.agreementRates[tick];
+            if (ar >= 0) agreementRate = ar;
+          }
+          if (chunk.epsilonCoefficients && tick >= 0 && tick < chunk.epsilonCoefficients.length) {
+            const ec = chunk.epsilonCoefficients[tick];
+            if (ec >= 0) epsilonCoefficient = ec;
+          }
+          if (chunk.medianValidatorIndices && tick >= 0 && tick < chunk.medianValidatorIndices.length) {
+            const mvi = chunk.medianValidatorIndices[tick];
+            if (mvi >= 0) medianValidatorIndex = mvi;
+          }
+          // Block 0's "previous" price is the chain's initial price = the first
+          // real price. Only chunk 0 carries it; only needed when block === 0.
+          if (chunkIdx === 0 && chunk.realPrices.length > 0) initialPrice = chunk.realPrices[0];
+        } catch {
+          // Legacy simdata without these arrays — degrade gracefully.
+        }
+
+        const validators = meta.config.validators;
+        const prevRow = prevLine ? parseCsvBlockRow(prevLine, mode) : null;
+        const prevPrice = block === 0
+          ? initialPrice
+          : (prevRow ? prevRow.oraclePrice : null);
+
+        const medianValidator = medianValidatorIndex !== null
+          ? { index: medianValidatorIndex, type: validatorTypeAt(validators, medianValidatorIndex) }
+          : (row?.medianValidatorType ? { index: null, type: row.medianValidatorType } : null);
+
+        const payload = {
+          scenario: scenarioIdx,
+          label: meta.config.label,
+          block,
+          timestamp: blockTimestamp,
+          found: row !== null,
+          author: row
+            ? { index: row.authorIndex, type: row.authorType, isHonest: row.authorType === "honest" }
+            : null,
+          prevPrice,
+          newPrice: row ? row.oraclePrice : null,
+          realPrice: row ? row.realPrice : null,
+          priceUpdated: row ? row.priceUpdated : null,
+          inherentTotal: row ? row.inherentTotal : null,
+          inherentNonHonest: row ? row.inherentNonHonest : null,
+          medianValidator,
+          agreementRate,
+          epsilonCoefficient,
+          votes: row ? row.votes : [],
+        };
+        return new Response(JSON.stringify(payload), {
           headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
         });
       }

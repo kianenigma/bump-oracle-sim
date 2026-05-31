@@ -58,10 +58,11 @@ src/
     research-report.ts    Formatted research report (stdout + research_report.json)
     scoring-functions.ts  Scoring primitives used by the report
   viz/
-    server.ts          Bun.serve() with /api/meta, /api/data; LRU chunk cache; author replay
+    server.ts          Bun.serve(): /api/meta, /api/data, /api/block, /api/block-detail; /block page; LRU chunk cache; author replay
     aggregation.ts     Server-side OHLC/line/deviation/volume aggregation via binary search
     writer.ts          ChunkWriter (.simdata chunks) + CsvWriter + index/venues/events files
-    template.html      Chart viewer (server-fetch mode)
+    template.html      Chart viewer (server-fetch mode); click a block → /block detail page
+    block.html         Standalone per-block detail page (all scenarios; active ones expanded)
     UI_RULES.md        Chart UI conventions
 ```
 
@@ -208,7 +209,25 @@ absent fields default sensibly for backward compat). `BLOCKS_PER_CHUNK = 1_000_0
   need no re-fetch), plus per-venue lines/volumes when present. Adds 10%
   over-fetch padding; auto-upgrades the timeframe so a window never exceeds
   `MAX_CANDLES` (10K). `TIMEFRAMES` = [6s … 1w]. LRU chunk cache (60 chunks).
-- Author selection is replayed per-scenario (seeded) for tooltips.
+- `GET /api/block?time=&scenarios=` — lightweight hover-tooltip lookup: author +
+  per-block summary (priceUpdated, inherentTotal, median validator, agreement
+  rate, ε coefficient) for the active scenarios. No full vote list.
+- Author selection is replayed per-scenario (seeded) for tooltips/detail — never
+  written to `.simdata`.
+
+### Per-block detail page
+
+Clicking any block in the chart navigates to `/block?time=<ts>&active=<idxs>`
+(`block.html`). It lists **every** scenario in the dataset (collapsed), expands
+the ones passed in `active`, and fetches detail lazily per scenario on expand:
+- `GET /api/block-detail?scenario=<i>&block=<n>` (or `&time=`) — full detail for
+  one scenario at one block: author, prev→new oracle price, real price, median
+  validator, agreement rate / ε coefficient, and the **complete inherent vote
+  list** (type + value/bump per input). The vote list exists **only** in the
+  per-scenario CSV, so this endpoint streams that `<dir>.csv` to the target row
+  (block N = line N+1); everything else comes from the chunk + `index.json`.
+  The page groups votes by validator type (count + min/median/max, or up/down
+  split for nudge), expandable to raw per-input rows.
 
 ## Gotchas
 

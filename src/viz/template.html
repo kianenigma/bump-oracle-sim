@@ -338,7 +338,7 @@
       </div>
     </div>
     <span class="toolbar-hint">
-      <kbd>Dbl-click</kbd> fit &nbsp; <kbd>2-finger scroll</kbd> pan/zoom &nbsp; <kbd>&#8592;&#8594;</kbd> pan &nbsp; <kbd>+/-</kbd> zoom &nbsp; <kbd>R</kbd> reset
+      <kbd>Click</kbd> block details &nbsp; <kbd>Dbl-click</kbd> fit &nbsp; <kbd>2-finger scroll</kbd> pan/zoom &nbsp; <kbd>&#8592;&#8594;</kbd> pan &nbsp; <kbd>+/-</kbd> zoom &nbsp; <kbd>R</kbd> reset
     </span>
   </div>
 
@@ -2482,6 +2482,24 @@
     devChart.subscribeCrosshairMove(makeAuthorTooltipHandler(devChartEl));
     priceChartEl.addEventListener('mouseleave', hideAuthorTooltip);
     devChartEl.addEventListener('mouseleave', hideAuthorTooltip);
+
+    // ── Click a block → open the per-block detail page ────────────────────
+    // Lightweight Charts fires subscribeClick on a genuine click (not a drag-
+    // pan), so this won't trip during panning. We hand the detail page the
+    // clicked timestamp plus the currently-active scenarios (so it can expand
+    // exactly those). At coarse timeframes the timestamp resolves to the first
+    // block of the hovered bucket, which the detail page reports explicitly.
+    function makeBlockClickHandler() {
+      return (param) => {
+        if (!param || !param.time || currentTab !== 'chart') return;
+        const t = Math.floor(param.time);
+        const active = [...activeScenarios].join(',');
+        hideAuthorTooltip();
+        window.location.href = `/block?time=${t}&active=${encodeURIComponent(active)}`;
+      };
+    }
+    priceChart.subscribeClick(makeBlockClickHandler());
+    devChart.subscribeClick(makeBlockClickHandler());
 
     // ── Resize ──
     const ro = new ResizeObserver(() => {
