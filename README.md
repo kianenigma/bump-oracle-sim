@@ -1,6 +1,10 @@
 # Oracle Bump Simulation
 
-Simulates an oracle price-bump mechanism where validators submit bumps to track a real price (DOT/USDT). Fetches historical candle data from Binance, interpolates to 6-second blocks, runs the simulation, and visualizes results in an interactive chart.
+Simulates an oracle price-aggregation mechanism where a set of validators submit inputs each block and the chain combines them into an oracle price that tries to track a real price (DOT/USDT). Real price comes from per-trade multi-venue data (default), historical Binance candles, or a deterministic synthetic path. The simulation runs block-by-block, writes results to a chunked `.simdata` directory, then serves an interactive chart.
+
+> **Runtime: [Bun](https://bun.sh/), not Node.js.** All commands use `bun`.
+>
+> For architecture and internals, see [`CLAUDE.md`](./CLAUDE.md).
 
 ## Prerequisites
 
@@ -10,31 +14,54 @@ Simulates an oracle price-bump mechanism where validators submit bumps to track 
 bun install
 ```
 
+There are no runtime dependencies — only `@types/bun` and `typescript` as devDependencies.
+
 ## Quick Start
 
-```bash
-# Run with defaults (1 week, opens browser with interactive chart)
-bun run src/main.ts
-
-# Custom date range
-bun run src/main.ts --start-date 2024-01-01 --end-date 2024-06-30
-
-# Run a named scenario (multi-simulation sweep)
-bun run src/main.ts --scenario sweep-malicious --start-date 2024-01-01 --end-date 2024-03-01
-
-# Run the research grid search (see below)
-bun run src/main.ts --scenario research --start-date 2021-12-03 --end-date 2021-12-13 --no-open
-```
-
-## Pre-fetch All Data
-
-Downloads the entire DOT/USDT 1m candle history available on Binance into a local cache. Subsequent simulation runs use this cache and skip network requests.
+A simulation is always driven by a **named scenario** — `--scenario` is required (there is no ad-hoc single-sim path).
 
 ```bash
-bun run src/fetch-all.ts
+# Run the honest baseline, write .simdata, serve the chart, open the browser
+bun run src/main.ts --scenario honest
+
+# List every available scenario
+bun run src/main.ts --list-scenarios
+
+# Quick iteration: few validators, a few days of data
+bun run src/main.ts --scenario honest --validators 30 --start-date 2024-01-01 --end-date 2024-01-04
+
+# Serve an existing result without re-running the simulation
+bun run src/main.ts --data honest_2024-01-01_2024-01-04.simdata
 ```
 
-Re-running this script is incremental — it only fetches candles newer than what's already cached.
+Output goes to a directory named `<scenario>_<start>_<end>.simdata` unless `--output` is given.
+
+> A year of data is ~5.2M blocks per simulation and takes minutes to run. For quick iteration, use ~30 validators and a few days of data.
+
+## Data Sources
+
+Select with `--data-source` (default `trades`):
+
+| Source | What it is |
+|--------|-----------|
+| `trades` *(default)* | Per-trade dumps from up to 6 spot venues (binance, kraken, bybit, gate, okx, coinbase), bucketed to 6s VWAP per venue, then combined via `--cross-venue` (mean/median/vwap) into the ground truth. Yields per-venue price/volume series. |
+| `candles` | Binance US 1m OHLC, linearly interpolated to 6s blocks. Fast to iterate on. |
+| `synthetic` | Deterministic 24-event scripted price path. No real dates — `--start-date`/`--end-date` are rejected. |
+
+How each validator *observes* the price is set by `--validator-price-source`:
+- `random-venue` (default for trades) — each query reads a random venue.
+- `cross-venue` (default for candles) — each query reads the combined ground truth.
+
+`--jitter` adds Gaussian noise (as a fraction of price) on top of the observation; default `0` (no jitter).
+
+## Pre-fetch Data
+
+Downloads price data into a local cache so subsequent runs skip the network. Re-running is incremental.
+
+```bash
+bun run src/fetch-all.ts                 # pre-fetch the full candle history
+bun run src/main.ts --scenario honest --fetch-only   # fetch/generate only for one scenario's config
+```
 
 ## CLI Reference
 
@@ -42,180 +69,147 @@ Re-running this script is incremental — it only fetches candles newer than wha
 bun run src/main.ts [options]
 
 Options:
+  --scenario <name>            REQUIRED to simulate. See --list-scenarios.
   --start-date <YYYY-MM-DD>    Start date (default: 2025-01-01)
   --end-date <YYYY-MM-DD>      End date (default: 2025-01-07)
-  --epsilon <number|auto>       Price epsilon per bump
-  --validators <number>         Number of validators (default: 300)
-  --mix <spec>                  Validator mix, e.g. "malicious=0.2,pushy=0.1"
-  --seed <number>               Random seed (default: 42)
-  --jitter <fraction>           Price jitter std dev as fraction (default: 0.001)
-  --convergence-threshold <%>   Convergence threshold in % (default: 0.5)
-  --scenario <name>             Run a named scenario
-  --output <path>               Output directory (default: output.simdata)
-  --data <path>                 Serve an existing .simdata directory without re-running sim
-  --label <substring>           Filter scenarios by label (case-insensitive substring, use with --data)
-  --index <N>                   Filter to a single scenario by index (use with --data)
-  --reanalyze                   Re-run scoring/report on existing --data without re-simulating
-  --fetch-only                  Only fetch and cache price data, don't simulate
-  --threads <number>            Worker threads for batch scenarios (default: CPU count)
-  --port <number>               Server port (default: 3000)
-  --no-open                     Don't auto-open browser
-  --force                       Overwrite existing output directory
-  --list-scenarios              List available scenario names
-  --help                        Show help
+  --validators <number>        Number of validators (default: 300)
+  --seed <number>              Random seed (default: 42)
+  --jitter <fraction>          Per-observation jitter std dev as a fraction (default: 0)
+  --convergence-threshold <%>  Convergence threshold in % (default: 0.5)
+  --output <path>              Output directory (default: <scenario>_<start>_<end>.simdata)
+  --force                      Overwrite an existing output directory
+  --threads <number>           Worker threads for batch scenarios (default: CPU count)
+
+  --data-source <kind>         "trades" (default), "candles", or "synthetic"
+  --venues <list|all>          Comma-separated venue ids, or "all" (default).
+                               Venues: binance, kraken, bybit, gate, okx, coinbase
+  --cross-venue <rule>         Combine per-venue prices into the ground truth:
+                               "mean" (default), "median", "vwap" (trades only)
+  --validator-price-source <mode>
+                               "random-venue" (default for trades) or "cross-venue"
+                               (default for candles)
+  --synthetic-venue-jitter <f> Per-venue jitter for synthetic mode (default: 0.001)
+  --synthetic-move-blocks <l>  Comma-separated move-phase schedule for synthetic mode (default: "10")
+
+  --data <path>                Serve an existing .simdata directory without re-running
+  --label <substring>          Filter scenarios by label substring (use with --data)
+  --index <N>                  Filter to a single scenario by index (use with --data)
+  --from <YYYY-MM-DD>          View window start (use with --data)
+  --to <YYYY-MM-DD>            View window end (use with --data)
+  --reanalyze                  Re-run scoring/report on existing --data (no re-simulation)
+
+  --fetch-only                 Only fetch/generate price data, don't simulate
+  --list-scenarios             List available scenario names
+  --port <number>              Server port (default: 3000)
+  --no-open                    Don't auto-open the browser
+  --help                       Show help
 ```
+
+Some scenarios pin their own date range (see `SCENARIO_DATE_RANGES` in `src/analysis/scenarios.ts`) and override `--start-date`/`--end-date`.
 
 ## Scenarios
 
-| Name | Description |
-|------|-------------|
-| `honest` | Baseline with 100% honest validators |
-| `sweep-malicious` | Sweeps malicious fraction (0% to 50%) |
-| `sweep-malicious-and-epsilon` | Sweeps malicious fraction x epsilon combinations |
-| `sweep-pushy-and-epsilon` | Sweeps pushy fraction x epsilon combinations |
-| `epsilon-sweep` | Sweeps epsilon multipliers with 100% honest validators |
-| `stress` | 49% malicious stress test |
-| `research` | Grid search over epsilon x adversary mixes with scoring (see below) |
+Each scenario emits a batch of `SimulationConfig`s with canonical labels (`<engine> | <mix> [suffix]`) and runs them via a Bun Worker pool. List the current set with `--list-scenarios`.
+
+| Name | What it sweeps |
+|------|----------------|
+| `honest` | 100% honest baseline across nudge (1× and 2× default ε) and median |
+| `entire-venue-history` | Honest baseline (nudge + median) over the full window all venues have trade data |
+| `nudge-velocity` | Fixed-ε nudge vs. velocity-boosted nudge, under 0/10/33/49% pushy-max |
+| `sweep-malicious` | Malicious fraction 0 → 50% on the default aggregator |
+| `sweep-all-malicious` | Every adversary type × {10, 20, 33}% on the default aggregator |
+| `sweep-malicious-and-epsilon` | Malicious fraction × {⅕×, 1×, 5×} default ε (nudge) |
+| `sweep-pushy-and-epsilon` | Pushy fraction × {⅕×, 1×, 5×} default ε (nudge) |
+| `epsilon-sweep` | ε ∈ {0.25, 0.5, 1, 2, 4}× default, 100% honest (nudge) |
+| `min-epsilon` | Smallest nudge ε that tracks DOT within 0.5% over its history since 2023 (all honest, no jitter) |
+| `edge-malicious` | {49, 50}% of each adversary type on the default aggregator |
+| `research-absolute-eps` | Grid: absolute-ε multipliers × adversary mixes, with scoring report |
+| `research-ratio-eps` | Grid: ratio-ε multipliers × adversary mixes, with scoring report |
+| `research-ratio-eps-all-honest` | Ratio-ε grid, honest only, with scoring report |
+| `latched-median` | latched-median vs. median under 0/10/33/49% pushy-max |
+| `aggregator-comparison` | nudge vs. median vs. latched-median under pushy-max / noop |
+
+## Aggregators
+
+The aggregator is chosen per-config inside each scenario (it is not a CLI flag).
+
+- **nudge** — validators emit signed `Up`/`Down` bumps; `price' = lastPrice + (Σ activated bumps) × ε`. The only mode that uses ε.
+- **median** — validators submit absolute price quotes; `price' = median(quotes)`. Requires a quorum (`minInputs`, default `floor(2/3·N)+1`, Polkadot's 2/3-honest assumption).
+- **latched-median** — like median but with no quorum; each validator's last quote is *latched*, and the median is taken over the full latched set each block (including stale latches of absent validators). Currently wired for `honest` + `pushy-max`.
+
+### Epsilon (nudge only)
+
+The project default ε is **ratio-based**: `0.01 / N` per bump — i.e. a 1% oracle move when all N validators agree on a direction in a single block. Scenarios sweep it via a multiplier (e.g. `2×` or `⅕×` the default). Epsilon can also be an absolute step or `"auto"` (`maxBlockDelta / N`).
 
 ## Adversary Types
 
-| Type | Bump behavior | Author behavior |
-|------|---------------|-----------------|
-| `malicious` | Opposite of honest (inverts direction) | Pushes price away from truth |
-| `pushy` | Honest (correct direction) | Activates all bumps in correct direction (overshoots) |
-| `noop` | Honest | Activates nothing (freezes oracle price) |
-| `delayed` | Honest but reads price from 10 blocks ago | Same as honest but uses stale price |
-| `drift` | Always bumps Up | Activates all Up bumps (persistent upward drift) |
+Honest is the auto-derived remainder of any validator mix. Each adversary class declares which aggregators it's compatible with; the engine throws on an incompatible pairing.
 
-## Research Scenario
+| Type | Behavior |
+|------|----------|
+| `malicious` | Inverse strategy — pushes price *away* from the real price |
+| `pushy` | Honest direction but overshoots past the real price |
+| `pushy-max` | *(nudge only)* Picks whichever bump direction maximizes divergence |
+| `noop` | Author-side censorship — drops the inherent, freezing the oracle |
+| `delayed` | Honest intent, but reads an observation `delayBlocks` (default 10 ≈ 60s) ago |
+| `drift` | Persistent upward bias regardless of the real price |
 
-The `research` scenario performs a systematic grid search to find the optimal epsilon value for the oracle mechanism. It evaluates how well different epsilon values perform under both honest and adversarial conditions.
+## Research Scenarios
 
-### How it works
+The `research-*` scenarios run a grid search over epsilon × adversary mixes, score every run, and write a `research_report.json` alongside the `.simdata` (plus a ranking table to stdout).
 
-1. **Compute auto-epsilon**: `maxBlockDelta(pricePoints) / validatorCount` — the epsilon at which the oracle can exactly track the steepest 6-second price move when all validators agree.
+Each run is scored on a weighted combination of metrics (max deviation, convergence rate, deviation integral, mean deviation, recovery, p95/p99 tails). Epsilons are then ranked by a composite of baseline performance and resilience under attack. The exact weights, thresholds, and formula live in `src/analysis/research-criteria.ts` and `research-report.ts`.
 
-2. **Build the grid**: 10 epsilon multipliers x 16 adversary mixes = 160 simulations.
-   - **Epsilon multipliers**: `[0.1x, 0.25x, 0.5x, 0.75x, 1.0x, 1.5x, 2.0x, 3.0x, 4.0x, 5.0x]` of auto-epsilon
-   - **Adversary mixes**: baseline (0%), then 10%/20%/33% of each adversary type (malicious, pushy, noop, delayed, drift)
-
-3. **Run all simulations** in parallel using Bun Workers (one per CPU core by default).
-
-4. **Score each simulation** and rank epsilon values.
-
-5. **Generate a report** printed to stdout and saved as `research_report.json`.
-
-### Scoring
-
-Each simulation is scored on a 0–1 scale using a weighted combination of four metrics. All metrics are normalized to [0, 1] where 1 = best.
-
-| Metric | What it measures | Default weight |
-|--------|-----------------|----------------|
-| **Max deviation** | Worst-case peak divergence from truth | 0.8 |
-| **Convergence rate** | % of blocks where deviation < 0.1% | 0.3 |
-| **Deviation integral** | Cumulative deviation over time (area under curve) | 0.3 |
-| **Mean deviation** | Average deviation across all blocks | 0.1 |
-
-**Hard reject**: If the max deviation ever exceeds `maxAcceptableDeviation` (default: 10%), the simulation scores 0 regardless of other metrics.
-
-The per-simulation score formula:
-
-```
-score = (w_maxDev * maxDevScore + w_conv * convergence + w_integral * integral + w_meanDev * meanDev)
-        / (w_maxDev + w_conv + w_integral + w_meanDev)
-```
-
-### Epsilon ranking
-
-Each epsilon value is ranked by a **composite score** that balances baseline performance with resilience under adversarial conditions:
-
-1. **Baseline score**: The score of the 0% adversary (honest-only) run for that epsilon.
-2. **Worst-case score at 33%**: The lowest score among all 33%-adversary runs for that epsilon (across all adversary types).
-3. **Resilience gap**: `baselineScore - worstScore33` — how much performance degrades under attack.
-4. **Composite score**: `(1 - w_resilience) * baselineScore + w_resilience * (1 - resilienceGap)`
-
-The default resilience weight is 0.5, meaning baseline performance and attack resilience contribute equally to the final ranking.
-
-### Customizing criteria
-
-All weights and thresholds can be overridden via environment variables:
+All weights and thresholds are overridable via environment variables:
 
 ```bash
 WEIGHT_MAX_DEVIATION=0.8 WEIGHT_CONVERGENCE=0.3 WEIGHT_INTEGRAL=0.3 \
 WEIGHT_MEAN_DEVIATION=0.1 WEIGHT_RESILIENCE=0.5 \
 MAX_ACCEPTABLE_DEVIATION=10 CONVERGENCE_THRESHOLD=0.1 \
-bun run src/main.ts --scenario research --start-date 2021-12-03 --end-date 2021-12-13 --no-open
+bun run src/main.ts --scenario research-ratio-eps --no-open
 ```
 
-### Example invocation
+After a run, you can re-score instantly (no re-simulation) with different criteria:
 
 ```bash
-# Run the full research grid (160 sims, parallelized across all CPU cores)
-bun run src/main.ts --scenario research --start-date 2021-12-03 --end-date 2021-12-13 --no-open
-
-# Use fewer threads
-bun run src/main.ts --scenario research --start-date 2021-12-03 --end-date 2021-12-13 --no-open --threads 4
-
-# Serve all results for visual inspection afterward
-bun run src/main.ts --data research_2021-12-03_2021-12-13.simdata
-
-# Serve a single scenario by index
-bun run src/main.ts --data research_2021-12-03_2021-12-13.simdata --index 42
-
-# Serve all scenarios matching a label (case-insensitive substring)
-bun run src/main.ts --data research_2021-12-03_2021-12-13.simdata --label "1.0x"
-bun run src/main.ts --data research_2021-12-03_2021-12-13.simdata --label baseline
-```
-
-### Re-analyzing with different weights
-
-After running the research scenario once, you can re-run the scoring and report generation instantly (no re-simulation) with different criteria weights via environment variables:
-
-```bash
-# Re-analyze with higher resilience weight
-WEIGHT_RESILIENCE=0.8 bun run src/main.ts --data research_2021-12-03_2021-12-13.simdata --reanalyze
-
-# Re-analyze with stricter max deviation threshold
-MAX_ACCEPTABLE_DEVIATION=5 bun run src/main.ts --data research_2021-12-03_2021-12-13.simdata --reanalyze
-```
-
-This reads all configs and summaries from the existing `index.json`, applies the current criteria, and overwrites `research_report.json` with the new results.
-
-### Report output
-
-The report prints a ranking table and detail table to stdout, and saves a JSON file (`research_report.json`) inside the output directory:
-
-```
-EPSILON RANKING (by composite score):
-  #1  eps=0.000120 (1.2x)  score=0.847  baseline=0.91  worst@33%=0.78  gap=0.13
-  #2  eps=0.000100 (1.0x)  score=0.831  baseline=0.90  worst@33%=0.72  gap=0.18
-  ...
-
-CONCLUSION: Optimal epsilon = 0.000120 (1.2x auto-epsilon)
+WEIGHT_RESILIENCE=0.8 bun run src/main.ts --data research-ratio-eps_2025-01-01_2025-01-07.simdata --reanalyze
 ```
 
 ## Multi-threading
 
-Batch scenarios (any scenario with multiple simulations) automatically parallelize across Bun Workers. Each worker runs simulations independently and writes its own output files.
+Batch scenarios (any scenario with multiple simulations) parallelize across Bun Workers automatically.
 
-- Default thread count: number of CPU cores (`os.cpus().length`)
-- Override with `--threads <N>`
-- Single simulations always run on the main thread
-- Progress is displayed as a live multi-line ANSI display showing per-worker and overall status
+- Default thread count: number of CPU cores; override with `--threads <N>`.
+- Single simulations always run on the main thread.
+- Progress shows as a live per-worker + overall ANSI display.
+- **Velocity-enabled scenarios force single-threaded** — velocity policies are functions and don't survive worker `postMessage`.
+
+## `.simdata` Output
+
+`.simdata` is a **directory**, not a single file:
+
+```
+<scenario>_<start>_<end>.simdata/
+  index.json        per-scenario config + summary + chunk ranges
+  venues.json       (trades only) per-venue price/volume series
+  events.json       (synthetic only) per-event spans for chart labels
+  <slug>_<i>/       columnar block chunks (≤ 1M blocks each)
+  <slug>_<i>.csv    per-block CSV (author, inherent composition, votes, prices)
+```
 
 ## Visualization
 
-The default mode starts a local server and opens an interactive chart in the browser with:
+The default mode starts a local server and opens an interactive chart:
 
 - Candlestick/line toggle for price and oracle series
-- Timeframe selection (6s to 1w)
-- On-demand data loading (zoom in for finer resolution)
-- Per-series visibility toggles
-- Collapsible stats panel
-- Drag-to-zoom, keyboard shortcuts (arrows to pan, +/- to zoom, R to reset)
+- Timeframe selection (6s to 1w) with on-demand data loading (zoom for finer resolution)
+- Per-series visibility toggles, collapsible stats panel
+- Drag-to-zoom; keyboard shortcuts (arrows to pan, +/- to zoom, R to reset)
+- **Click any block** to open a per-block detail page listing the full inherent vote breakdown for each scenario
 
-## Type Checking
+## Quality Gates
 
 ```bash
-npx tsc --noEmit
+npx tsc --noEmit                    # type check — the primary quality gate
+bun test tests/aggregator.test.ts   # per-block aggregator behaviour tests
 ```

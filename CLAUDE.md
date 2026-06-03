@@ -95,7 +95,7 @@ bun run src/main.ts --help                             # full flag list
 - `--data-source <candles|trades|synthetic>` (default `trades`).
 - `--venues <list|all>` — trade/synthetic venues (binance, kraken, bybit, gate, okx, coinbase).
 - `--cross-venue <mean|median|vwap>` — how per-venue prices combine into the ground truth (default mean).
-- `--price-source <random-venue|cross-venue>` — how each validator observes price
+- `--validator-price-source <random-venue|cross-venue>` — how each validator observes price
   (default random-venue for trades, cross-venue for candles).
 - `--synthetic-venue-jitter`, `--synthetic-move-blocks <list>` — synthetic-mode knobs.
 - `--data <dir>` + `--label <substr>` / `--index <N>` / `--from` / `--to` — serve/filter existing results.

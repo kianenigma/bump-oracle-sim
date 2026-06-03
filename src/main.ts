@@ -52,7 +52,7 @@ const { values: args } = parseArgs({
     "data-source": { type: "string", default: "trades" },
     venues: { type: "string" },
     "cross-venue": { type: "string" },
-    "price-source": { type: "string" },
+    "validator-price-source": { type: "string" },
     "synthetic-venue-jitter": { type: "string", default: String(DEFAULT_SYNTHETIC_VENUE_JITTER) },
     "synthetic-move-blocks": { type: "string", default: "10" },
     help: { type: "boolean", default: false },
@@ -93,7 +93,8 @@ Options:
                                 Available venues: ${ALL_VENUES.join(", ")}
   --cross-venue <rule>         How to combine per-venue prices into the ground-truth real price:
                                 "mean" (default), "median", "vwap". Only with --data-source=trades.
-  --price-source <mode>        "random-venue" (default; random venue per query) or "cross-venue".
+  --validator-price-source <mode>
+                                "random-venue" (default; random venue per query) or "cross-venue".
                                 random-venue requires --data-source=trades.
   --synthetic-venue-jitter <f> Per-venue Gaussian jitter as fraction of price for --data-source=synthetic
                                 (default: ${DEFAULT_SYNTHETIC_VENUE_JITTER}). Divergence events use 10× this.
@@ -118,7 +119,7 @@ function parsePriceSourceKindArg(raw: string | undefined): "cross-venue" | "rand
   if (raw === "cross-venue" || raw === "random-venue") return raw;
   // Back-compat: old "median" alias for the cross-venue observation mode.
   if (raw === "median") return "cross-venue";
-  console.error(`Invalid --price-source: "${raw}". Expected: cross-venue, random-venue.`);
+  console.error(`Invalid --validator-price-source: "${raw}". Expected: cross-venue, random-venue.`);
   process.exit(1);
 }
 
@@ -433,7 +434,7 @@ const jitterStdDev = parseFloat(args.jitter!);
 const convergenceThreshold = parseFloat(args["convergence-threshold"]!);
 
 // Default validator price-source: random-venue if trades data, cross-venue if candles.
-let priceSourceKind = parsePriceSourceKindArg(args["price-source"]);
+let priceSourceKind = parsePriceSourceKindArg(args["validator-price-source"]);
 if (priceSourceKind === undefined) {
   priceSourceKind = realPrice.kind === "candles" ? "cross-venue" : "random-venue";
 }

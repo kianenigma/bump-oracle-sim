@@ -400,6 +400,66 @@ function truncate(s: string, max: number): string {
 
 const RESEARCH_MULTIPLIERS = [0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
 
+// ── min-epsilon scenario ─────────────────────────────────────────────────────
+//
+// Max-divergence budget the smallest epsilon must respect (percent).
+const MIN_EPS_TARGET_PCT = 0.5;
+
+// Geometric grid of ratio-ε multipliers (× the default 0.01/N) the min-epsilon
+// scenario sweeps. Spans ~0.02× (way too slow to track) up to ~4× so the
+// feasible band's lower edge is bracketed at fine resolution.
+const MIN_EPS_MULTIPLIERS: number[] = Array.from({ length: 20 }, (_, i) =>
+  0.02 * Math.pow(1.32, i),
+);
+
+/**
+ * Scan a completed epsilon sweep and report the SMALLEST resolved nudge epsilon
+ * whose maximum percentage divergence stays at or under `targetPct`. Prints the
+ * full ε → maxDeviationPct curve (so the feasible band is visible) and calls out
+ * the winning epsilon, or warns when nothing in the sweep meets the budget.
+ */
+function reportMinEpsilon(results: SimulationResult[], targetPct: number): void {
+  const rows = results
+    .map((r) => ({
+      epsilon: r.summary.epsilon,
+      ratioPct: r.summary.epsilonMode === "ratio" ? r.summary.epsilon * 100 : NaN,
+      maxDevPct: r.summary.maxDeviationPct,
+      p99: r.summary.p99DeviationPct,
+      label: r.config.label,
+    }))
+    .sort((a, b) => a.epsilon - b.epsilon);
+
+  console.log(`\n  ── min-epsilon results (sorted by ε) ──`);
+  console.log(`  ${"ratio ε".padStart(12)}  ${"maxDev%".padStart(9)}  ${"p99%".padStart(8)}   meets ≤${targetPct}%`);
+  for (const row of rows) {
+    const epsStr = isNaN(row.ratioPct) ? row.epsilon.toExponential(3) : `${row.ratioPct.toFixed(4)}%`;
+    const ok = row.maxDevPct <= targetPct;
+    console.log(
+      `  ${epsStr.padStart(12)}  ${row.maxDevPct.toFixed(4).padStart(9)}  ${row.p99.toFixed(4).padStart(8)}   ${ok ? "✓" : "✗"}`,
+    );
+  }
+
+  const passing = rows.filter((r) => r.maxDevPct <= targetPct);
+  if (passing.length === 0) {
+    const best = rows.reduce((a, b) => (a.maxDevPct <= b.maxDevPct ? a : b));
+    console.log(
+      `\n  ✗ No epsilon in the sweep stays within ${targetPct}%. Closest: ${best.label} (maxDev ${best.maxDevPct.toFixed(4)}%). Extend MIN_EPS_MULTIPLIERS upward.`,
+    );
+    return;
+  }
+
+  // passing is sorted ascending by ε; the first entry is the smallest.
+  const smallest = passing[0];
+  const epsStr = isNaN(smallest.ratioPct) ? smallest.epsilon.toExponential(3) : `${smallest.ratioPct.toFixed(4)}% per bump`;
+  console.log(
+    `\n  ✓ Smallest epsilon within ${targetPct}% divergence: ${epsStr} (maxDev ${smallest.maxDevPct.toFixed(4)}%, p99 ${smallest.p99.toFixed(4)}%)`,
+  );
+  console.log(`    → ${smallest.label}`);
+  if (smallest === rows[0]) {
+    console.log(`    ⚠ This is the smallest ε tested — the true minimum may be lower. Extend MIN_EPS_MULTIPLIERS downward to confirm.`);
+  }
+}
+
 /** Mixes used by the research scenarios — kept as a record-of-fractions for
  *  readability (same shape as the old ValidatorMix). */
 const RESEARCH_MIXES: Record<string, number>[] = [
@@ -462,9 +522,11 @@ export const scenarios: Record<string, ScenarioFn> = {
   async honest(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: honest]`);
     const configs: SimulationConfig[] = [
+      makeConfig(ctx, [], nudgeAgg(ratioEpsilon(ctx.validatorCount, 0.5))),
       makeConfig(ctx, [], nudgeAgg(ratioEpsilon(ctx.validatorCount))),
       makeConfig(ctx, [], nudgeAgg(ratioEpsilon(ctx.validatorCount, 2))),
       makeConfig(ctx, [], { kind: "median", minInputs: ctx.validatorCount * 2 / 3 + 1 }),
+      makeConfig(ctx, [], { kind: "latched-median" }),
     ];
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
@@ -605,6 +667,44 @@ export const scenarios: Record<string, ScenarioFn> = {
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
 
+  /**
+   * Find the smallest pure-nudge epsilon that tracks DOT within MIN_EPS_TARGET_PCT
+   * (0.5%) max divergence over its whole history since the start of 2023.
+   *
+   * All validators are honest and read the SAME combined ground-truth price
+   * (cross-venue, jitter=0) — so every block they unanimously agree on the bump
+   * direction. The combination rule (mean vs vwap) is whatever the ground-truth
+   * data was loaded with (`--cross-venue`), so this scenario honours either.
+   *
+   * Sweeps a geometric grid of ratio epsilons, then reports the SMALLEST resolved
+   * epsilon whose `maxDeviationPct` stays at/under the target. Smaller ε tracks
+   * slower (divergence blows past 0.5% on fast moves); large ε overshoots — so the
+   * answer is the lower edge of the feasible band, which the post-run scan finds.
+   */
+  async "min-epsilon"(ctx, priceSource, outputDir, threadCount) {
+    console.log(`\n[Scenario: min-epsilon]`);
+
+    // Force the requested observation model regardless of CLI --validator-price-source/
+    // --jitter: every validator sees the same combined ground truth with no
+    // jitter, so honest agreement is unanimous each block.
+    ctx.priceSource = { kind: "cross-venue", jitterStdDev: 0 };
+
+    // Geometric sweep of ratio-ε multipliers (× the default 0.01/N). mult=1 means
+    // a fully-agreed block moves the oracle 1% of price; we go well below that to
+    // locate the smallest ε that still keeps up.
+    const multipliers = MIN_EPS_MULTIPLIERS;
+    const configs = multipliers.map((mult) =>
+      makeConfig(ctx, [], nudgeAgg(ratioEpsilon(ctx.validatorCount, mult)), `(${mult.toPrecision(3)}x)`),
+    );
+
+    console.log(`  Sweeping ${multipliers.length} ratio epsilons (all honest, pure nudge, cross-venue jitter=0)`);
+    console.log(`  Target: max divergence ≤ ${MIN_EPS_TARGET_PCT}% over the full pinned window`);
+    const results = await runBatch(configs, priceSource, outputDir, threadCount);
+
+    reportMinEpsilon(results, MIN_EPS_TARGET_PCT);
+    return results;
+  },
+
   /** engine=ctx.aggregator × {49, 50}% × {malicious, pushy, noop, delayed, drift}. */
   async "edge-malicious"(ctx, priceSource, outputDir, threadCount) {
     const types: Exclude<ValidatorType, "honest">[] = ["malicious", "pushy", "noop", "delayed", "drift"];
@@ -740,8 +840,10 @@ export const scenarios: Record<string, ScenarioFn> = {
   async "aggregator-comparison"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: aggregator-comparison]`);
     const aggregators: AggregatorConfig[] = [
+      nudgeAgg(ratioEpsilon(ctx.validatorCount, 0.5)),
       nudgeAgg(ratioEpsilon(ctx.validatorCount)),
-      { kind: "median", minInputs: Math.floor(2 * ctx.validatorCount / 3) },
+      nudgeAgg(ratioEpsilon(ctx.validatorCount, 2)),
+      // { kind: "median", minInputs: Math.floor(2 * ctx.validatorCount / 3) },
       { kind: "latched-median" },
     ];
     const adversaryTypes: Exclude<ValidatorType, "honest">[] = ["pushy-max", "noop"];
