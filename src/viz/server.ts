@@ -18,6 +18,7 @@ import { BLOCK_TIME_SECONDS } from "../config.js";
 
 const TEMPLATE_PATH = join(import.meta.dir, "template.html");
 const BLOCK_TEMPLATE_PATH = join(import.meta.dir, "block.html");
+const PRICE_ANALYSIS_TEMPLATE_PATH = join(import.meta.dir, "price-analysis.html");
 const MAX_CANDLES = 10_000;
 const OVER_FETCH_RATIO = 0.1;
 const CHUNK_CACHE_MAX = 60;
@@ -417,12 +418,19 @@ export async function startServer(
   const index = await loadIndex(outputDir);
   const venues = await loadVenues(outputDir);
   const events = await loadEvents(outputDir);
-  const templateHtml = await Bun.file(TEMPLATE_PATH).text();
   const blockTemplateHtml = await Bun.file(BLOCK_TEMPLATE_PATH).text();
   const metaResponse = JSON.stringify(buildMetaResponse(index, filterIndices, timeConstraint));
 
   const reportPath = join(outputDir, "research_report.json");
   const researchJson = existsSync(reportPath) ? await Bun.file(reportPath).text() : null;
+
+  // A price-analysis .simdata carries price_analysis.json. When present, serve
+  // the focused price-analysis template at "/" and expose its report.
+  const priceAnalysisPath = join(outputDir, "price_analysis.json");
+  const priceAnalysisJson = existsSync(priceAnalysisPath) ? await Bun.file(priceAnalysisPath).text() : null;
+  const rootHtml = priceAnalysisJson !== null
+    ? await Bun.file(PRICE_ANALYSIS_TEMPLATE_PATH).text()
+    : await Bun.file(TEMPLATE_PATH).text();
 
   const server = Bun.serve({
     port,
@@ -430,8 +438,15 @@ export async function startServer(
       const url = new URL(req.url);
 
       if (url.pathname === "/") {
-        return new Response(templateHtml, {
+        return new Response(rootHtml, {
           headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
+
+      if (url.pathname === "/api/price-analysis") {
+        if (priceAnalysisJson === null) return new Response("Not Found", { status: 404 });
+        return new Response(priceAnalysisJson, {
+          headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
         });
       }
 

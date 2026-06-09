@@ -28,6 +28,11 @@ export function bucketizeDay(trades: RawTrade[], dayStartSec: number): VenueBuck
   const sumPxQty = new Float64Array(BLOCKS_PER_DAY);
   const sumQty = new Float64Array(BLOCKS_PER_DAY);
   const counts = new Int32Array(BLOCKS_PER_DAY);
+  // Last-trade tracking: keep the price of the latest trade seen per bucket.
+  // Input is documented as chronologically sorted, but we guard with a
+  // per-bucket max-timestamp so an out-of-order print can't win.
+  const lastPx = new Float64Array(BLOCKS_PER_DAY);
+  const lastTs = new Float64Array(BLOCKS_PER_DAY).fill(-1);
 
   const dayEnd = dayStartSec + 86400;
   for (const t of trades) {
@@ -38,16 +43,21 @@ export function bucketizeDay(trades: RawTrade[], dayStartSec: number): VenueBuck
     sumPxQty[idx] += t.price * t.qty;
     sumQty[idx] += t.qty;
     counts[idx] += 1;
+    if (t.timestampSec >= lastTs[idx]) {
+      lastTs[idx] = t.timestampSec;
+      lastPx[idx] = t.price;
+    }
   }
 
   for (let i = 0; i < BLOCKS_PER_DAY; i++) {
     const blockTimestamp = dayStartSec + i * BLOCK_TIME_SECONDS;
     if (counts[i] === 0) {
-      buckets[i] = { blockTimestamp, vwap: null, tradeCount: 0, volume: 0 };
+      buckets[i] = { blockTimestamp, vwap: null, lastTrade: null, tradeCount: 0, volume: 0 };
     } else {
       buckets[i] = {
         blockTimestamp,
         vwap: sumPxQty[i] / sumQty[i],
+        lastTrade: lastPx[i],
         tradeCount: counts[i],
         volume: sumQty[i],
       };
@@ -80,7 +90,15 @@ export function bucketizeDay(trades: RawTrade[], dayStartSec: number): VenueBuck
 export function combineVenues(
   perVenue: Map<VenueId, VenueBucket[]>,
   spec: CrossVenueSpec = { kind: "median" },
+  /** Which per-bucket reduction drives each venue's price: the window VWAP
+   *  (default, used by the simulator) or the window's last trade (used by the
+   *  price-analysis subcommand). When "lastTrade" is requested but a bucket
+   *  lacks it (legacy cache / candle-derived source), we fall back to vwap —
+   *  within a 6s window the two differ negligibly. */
+  valueField: "vwap" | "lastTrade" = "vwap",
 ): CombinedSource {
+  const pick = (b: VenueBucket): number | null =>
+    valueField === "lastTrade" ? (b.lastTrade ?? b.vwap) : b.vwap;
   const venues = [...perVenue.keys()];
   if (venues.length === 0) {
     return { points: [], venuePrices: new Map(), venueVolumes: new Map() };
@@ -119,9 +137,10 @@ export function combineVenues(
     let anyFresh = false;
     for (const v of venues) {
       const cur = perVenue.get(v)![i];
-      if (cur.vwap !== null) {
-        lastSeen.set(v, cur.vwap);
-        samples.push({ venue: v, price: cur.vwap, volume: cur.volume, fresh: true });
+      const curVal = pick(cur);
+      if (curVal !== null) {
+        lastSeen.set(v, curVal);
+        samples.push({ venue: v, price: curVal, volume: cur.volume, fresh: true });
         anyFresh = true;
       } else {
         const prev = fillFromMedian(lastSeen.get(v));
@@ -164,10 +183,11 @@ export function combineVenues(
     // really is zero in that block.
     for (const v of venues) {
       const cur = perVenue.get(v)![i];
+      const curVal = pick(cur);
       const priceArr = venueSeries.get(v)!;
       const volArr = venueVolumeSeries.get(v)!;
-      if (cur.vwap !== null) {
-        priceArr.push(cur.vwap);
+      if (curVal !== null) {
+        priceArr.push(curVal);
         volArr.push(cur.volume);
       } else {
         const prev = lastSeen.get(v);

@@ -22,9 +22,11 @@ import { isBaselineValidators } from "./validators.js";
 import { loadPriceSource } from "./data/source.js";
 import { loadIndex } from "./viz/writer.js";
 import { startServer } from "./viz/server.js";
-import { scenarios, listScenarios, SCENARIO_DATE_RANGES, type ScenarioCtx } from "./analysis/scenarios.js";
+import { scenarios, listScenarios, SCENARIO_DATE_RANGES, ENTIRE_VENUES_HISTORY, type ScenarioCtx } from "./analysis/scenarios.js";
 import { loadCriteria } from "./analysis/research-criteria.js";
 import { generateReport } from "./analysis/research-report.js";
+import { runPriceAnalysis } from "./analysis/price-analysis.js";
+import { setBucketCacheBypass } from "./data/trades/cache.js";
 
 const { values: args } = parseArgs({
   args: Bun.argv.slice(2),
@@ -39,6 +41,8 @@ const { values: args } = parseArgs({
     jitter: { type: "string", default: String(DEFAULT_PRICE_SOURCE.jitterStdDev) },
     "convergence-threshold": { type: "string", default: String(DEFAULT_CONFIG.convergenceThreshold) },
     "list-scenarios": { type: "boolean", default: false },
+    "analyze-price": { type: "boolean", default: false },
+    "refresh-last-trade": { type: "boolean", default: false },
     port: { type: "string", default: "3000" },
     data: { type: "string" },
     label: { type: "string" },
@@ -71,7 +75,18 @@ Options:
   --validators <number>        Number of validators (default: ${DEFAULT_VALIDATOR_COUNT})
   --seed <number>              Random seed (default: ${DEFAULT_CONFIG.seed})
   --output <path>              Output directory (default: output.simdata)
-  --scenario <name>            REQUIRED — named scenario (use --list-scenarios to see options)
+  --scenario <name>            REQUIRED to simulate — named scenario (use --list-scenarios to see options)
+  --analyze-price              Run the price-analysis subcommand instead of a simulation:
+                                measures inter-venue spread of the live (last-trade) spot price
+                                over history, reports % of time within 0.5% / 0.5–1% / 1–5%
+                                divergence, and serves a per-venue + divergence chart.
+                                Requires --data-source=trades; coinbase is auto-excluded.
+                                Defaults to the full all-venue window (${ENTIRE_VENUES_HISTORY.startDate} → ${ENTIRE_VENUES_HISTORY.endDate})
+                                when --start-date/--end-date are not given. Fails hard if any
+                                venue is missing trade data for any day in the range.
+  --refresh-last-trade         Bypass the bucket cache so days cached before the last-trade field
+                                are re-downloaded and re-bucketized (repopulating the cache with
+                                genuine last-trade prices). Slow; use with --analyze-price.
   --fetch-only                 Only fetch and cache price data, don't simulate
   --jitter <fraction>          Price jitter std dev as fraction (default: ${DEFAULT_PRICE_SOURCE.jitterStdDev})
   --convergence-threshold <%>  Convergence threshold in % (default: ${DEFAULT_CONFIG.convergenceThreshold})
@@ -355,6 +370,58 @@ if (args.data) {
   }
 
   await startServer(args.data, port, !args["no-open"], filterIndices, timeConstraint);
+  process.exit(0);
+}
+
+// ── Mode: price analysis (inter-venue spread; no oracle simulation) ─────────
+if (args["analyze-price"]) {
+  const ds = args["data-source"]!;
+  if (ds !== "trades") {
+    console.error(`Error: --analyze-price requires --data-source=trades (got "${ds}"). It needs real per-venue trade data.`);
+    process.exit(1);
+  }
+  // Venues, minus coinbase (candle-backfilled — no genuine historical 6s
+  // last-trade; including it would understate the real cross-venue spread).
+  let venues = parseVenuesList(args.venues, "trades");
+  if (venues.includes("coinbase")) {
+    console.log(`  Note: excluding coinbase — it is candle-backfilled and has no genuine 6s last-trade.`);
+    venues = venues.filter((v) => v !== "coinbase");
+  }
+  if (venues.length < 2) {
+    console.error(`Error: --analyze-price needs at least 2 venues after excluding coinbase. Got: ${venues.join(", ") || "(none)"}`);
+    process.exit(1);
+  }
+
+  // Default to the full all-venue window (verified complete & gap-free) when the
+  // user didn't pin a range. Each bound defaults independently.
+  const cliPassedFlag = (flag: string) => Bun.argv.slice(2).includes(flag);
+  const aStart = cliPassedFlag("--start-date") ? args["start-date"]! : ENTIRE_VENUES_HISTORY.startDate;
+  const aEnd = cliPassedFlag("--end-date") ? args["end-date"]! : ENTIRE_VENUES_HISTORY.endDate;
+  if (!cliPassedFlag("--start-date") || !cliPassedFlag("--end-date")) {
+    console.log(`  Using all-venue window ${aStart} → ${aEnd} (override with --start-date/--end-date).`);
+  }
+
+  if (args["refresh-last-trade"]) {
+    console.log(`  --refresh-last-trade: bypassing the bucket cache — every day in range will be`);
+    console.log(`    re-downloaded and re-bucketized to capture genuine last-trade prices. This is slow.`);
+    setBucketCacheBypass(true);
+  }
+
+  const passedOutput = cliPassedFlag("--output");
+  const aOutput = passedOutput ? args.output! : `price-analysis_${aStart}_${aEnd}.simdata`;
+  ensureOutputDir(aOutput, !!args.force);
+
+  await runPriceAnalysis({
+    venues,
+    startDate: aStart,
+    endDate: aEnd,
+    seed: parseInt(args.seed!),
+    outputDir: aOutput,
+  });
+
+  const aPort = parseInt(args.port!);
+  console.log(`\nStarting price-analysis visualization server...`);
+  await startServer(aOutput, aPort, !args["no-open"]);
   process.exit(0);
 }
 

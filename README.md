@@ -70,6 +70,11 @@ bun run src/main.ts [options]
 
 Options:
   --scenario <name>            REQUIRED to simulate. See --list-scenarios.
+  --analyze-price              Inter-venue spread analysis instead of a simulation
+                               (trades only; coinbase auto-excluded). Defaults to the
+                               full all-venue window; hard-fails on missing data. See below.
+  --refresh-last-trade         With --analyze-price: bypass the bucket cache and re-fetch so
+                               days get genuine last-trade prices (slow). See below.
   --start-date <YYYY-MM-DD>    Start date (default: 2025-01-01)
   --end-date <YYYY-MM-DD>      End date (default: 2025-01-07)
   --validators <number>        Number of validators (default: 300)
@@ -128,6 +133,47 @@ Each scenario emits a batch of `SimulationConfig`s with canonical labels (`<engi
 | `research-ratio-eps-all-honest` | Ratio-ε grid, honest only, with scoring report |
 | `latched-median` | latched-median vs. median under 0/10/33/49% pushy-max |
 | `aggregator-comparison` | nudge vs. median vs. latched-median under pushy-max / noop |
+
+## Price Analysis (`--analyze-price`)
+
+A subcommand that runs **no oracle simulation**. Instead it asks: across the
+venues, how far apart is the live spot price, historically? For each 6s block it
+takes every venue's **last-trade** price (the closest analog to a validator
+reading a live ticker) and measures the **inter-venue spread**
+`(max − min) / reference`, for reference ∈ {mean, median, vwap}.
+
+```bash
+# Longest complete window across all venues (the default — omit the dates):
+bun run src/main.ts --analyze-price
+
+# A specific window
+bun run src/main.ts --analyze-price --start-date 2024-01-01 --end-date 2024-06-30
+
+# Force genuine last-trade prices for days cached before the field existed
+# (re-downloads the whole range — slow):
+bun run src/main.ts --analyze-price --refresh-last-trade
+
+# Re-serve an existing analysis without recomputing
+bun run src/main.ts --data price-analysis_2022-11-10_2025-10-30.simdata
+```
+
+With no `--start-date`/`--end-date`, it defaults to the full all-venue window
+(`2022-11-10 → 2025-10-30`) — the longest span where every venue has complete,
+gap-free trade data. The command **hard-fails if any venue is missing trade data
+for any day** in the range (rather than silently padding with carry-forward), so
+narrow the range or drop a venue if it complains.
+
+It prints, for each reference, the **% of time / duration** the spread sat in
+each band (`< 0.5%`, `0.5–1%`, `1–5%`, `≥ 5%`) plus grouped **episode lists**
+(start, duration, peak, which venues were high/low) for the elevated bands, and
+writes a full `price_analysis.json`. Since spread is a conservative upper bound
+on any single venue's error vs the mean, "spread < 0.5% for X% of blocks" is
+direct evidence that using one venue's spot price (or the mean) stays within
+0.5% of consensus that often.
+
+Requires `--data-source=trades`. **Coinbase is auto-excluded** — our Coinbase
+history is backfilled from 1m candles, so it has no genuine 6s last-trade; the
+other five venues use real per-trade data.
 
 ## Aggregators
 

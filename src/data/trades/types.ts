@@ -15,6 +15,13 @@ export interface VenueBucket {
   blockTimestamp: number;
   /** Volume-weighted average price across trades in this window, or null if no trades. */
   vwap: number | null;
+  /** Price of the chronologically-last trade in this window, or null if no
+   *  trades. This is the "spot price a validator would read off a live ticker"
+   *  signal (the last print), as opposed to `vwap` which averages the window.
+   *  OPTIONAL for backward compat: buckets cached before this field existed
+   *  (and candle-derived sources that have no per-trade data) leave it absent;
+   *  readers fall back to `vwap`. */
+  lastTrade?: number | null;
   /** Number of trades aggregated into this bucket. */
   tradeCount: number;
   /** Sum of base-asset volume across trades in this window. */

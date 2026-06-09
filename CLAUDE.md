@@ -80,9 +80,36 @@ bun run src/main.ts --scenario honest                 # simulate → .simdata �
 bun run src/main.ts --data path.simdata               # serve an existing .simdata (no re-run)
 bun run src/main.ts --reanalyze --data path.simdata   # re-run scoring/report only
 bun run src/main.ts --scenario honest --fetch-only     # fetch/generate price data only
+bun run src/main.ts --analyze-price                    # inter-venue spread analysis (no sim)
 bun run src/main.ts --list-scenarios                   # print scenario names
 bun run src/main.ts --help                             # full flag list
 ```
+
+### `--analyze-price` subcommand (no oracle simulation)
+
+Measures the **inter-venue spread** of the live (last-trade) spot price across
+venues — `(max − min) / reference` per 6s block, for reference ∈ {mean, median,
+vwap} — over the requested history. Answers "how far apart are the venues, i.e.
+what's the cost of trusting just one venue's spot price." Requires
+`--data-source=trades`; **coinbase is auto-excluded** (candle-backfilled, no
+genuine 6s last-trade). Prints band tables (% of time + duration in
+<0.5% / 0.5–1% / 1–5% / ≥5%) plus grouped episode lists for the elevated bands,
+writes `price_analysis.json`, and serves a per-venue + divergence chart
+(`viz/price-analysis.html`). Implementation: `analysis/price-analysis.ts`
+(spread/band/episode pass) + the `lastTrade` reduction in
+`data/trades/aggregate.ts` (`combineVenues(perVenue, spec, "lastTrade")`).
+
+- **Default range**: when `--start-date`/`--end-date` are omitted it uses
+  `ENTIRE_VENUES_HISTORY` (`2022-11-10 → 2025-10-30`, exported from
+  `analysis/scenarios.ts`) — the full window where all venues have complete,
+  gap-free trade data.
+- **Hard-fails on missing data**: `assertFullVenueCoverage` throws if any venue
+  has a UTC day with zero trades in the range (a missing dump 404s at the source
+  even earlier). It refuses to analyze partial/carry-forward-padded data.
+- `--refresh-last-trade`: bypasses the bucket cache (`setBucketCacheBypass` in
+  `data/trades/cache.ts`) so days cached before the `lastTrade` field are
+  re-downloaded/re-bucketized with genuine last-trade prices. Slow (re-fetches
+  the whole range); the cache is repopulated afterwards.
 
 ### Key flags
 

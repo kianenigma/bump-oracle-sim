@@ -13,7 +13,7 @@ import type {
   ValidatorType,
   VelocityConfig,
 } from "../types.js";
-import { DEFAULT_CONFIG, DEFAULT_PRICE_SOURCE, DEFAULT_VALIDATOR_COUNT } from "../config.js";
+import { DEFAULT_CONFIG, DEFAULT_PRICE_SOURCE, DEFAULT_VALIDATOR_COUNT, BLOCK_TIME_SECONDS } from "../config.js";
 import { runSimulation, type BlockSink } from "../sim/engine.js";
 import { ChunkWriter, CsvWriter, combineSinks, writeIndex, scenarioDirName } from "../viz/writer.js";
 import { loadCriteria } from "./research-criteria.js";
@@ -400,63 +400,79 @@ function truncate(s: string, max: number): string {
 
 const RESEARCH_MULTIPLIERS = [0.05, 0.1, 0.25, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 4.0, 5.0];
 
-// ── min-epsilon scenario ─────────────────────────────────────────────────────
-//
-// Max-divergence budget the smallest epsilon must respect (percent).
-const MIN_EPS_TARGET_PCT = 0.5;
-
-// Geometric grid of ratio-ε multipliers (× the default 0.01/N) the min-epsilon
-// scenario sweeps. Spans ~0.02× (way too slow to track) up to ~4× so the
-// feasible band's lower edge is bracketed at fine resolution.
-const MIN_EPS_MULTIPLIERS: number[] = Array.from({ length: 20 }, (_, i) =>
-  0.02 * Math.pow(1.32, i),
-);
-
 /**
- * Scan a completed epsilon sweep and report the SMALLEST resolved nudge epsilon
- * whose maximum percentage divergence stays at or under `targetPct`. Prints the
- * full ε → maxDeviationPct curve (so the feasible band is visible) and calls out
- * the winning epsilon, or warns when nothing in the sweep meets the budget.
+ * Scan a completed min-epsilon sweep and report TWO smallest-epsilon answers:
+ *
+ *   Criterion 1 — never exceeds `targetPct` divergence at all (strict).
+ *   Criterion 2 — never stays above `targetPct` for more than `maxBlocksBudget`
+ *                 consecutive blocks (allows brief excursions that recover
+ *                 quickly; read from the summary's
+ *                 `maxConsecutiveBlocksAboveThreshold`, which is measured
+ *                 against each config's convergenceThreshold = targetPct).
+ *
+ * Criterion 2 is the weaker bound, so its winning ε is ≤ criterion 1's. Prints
+ * the full ε → (maxDev, longest-streak) curve so both feasible edges are visible.
  */
-function reportMinEpsilon(results: SimulationResult[], targetPct: number): void {
+function reportMinEpsilon(
+  results: SimulationResult[],
+  targetPct: number,
+  maxBlocksBudget: number,
+  blockTimeSeconds: number,
+): void {
   const rows = results
     .map((r) => ({
       epsilon: r.summary.epsilon,
       ratioPct: r.summary.epsilonMode === "ratio" ? r.summary.epsilon * 100 : NaN,
       maxDevPct: r.summary.maxDeviationPct,
-      p99: r.summary.p99DeviationPct,
+      maxStreak: r.summary.maxConsecutiveBlocksAboveThreshold,
       label: r.config.label,
     }))
     .sort((a, b) => a.epsilon - b.epsilon);
 
+  const fmtEps = (row: { ratioPct: number; epsilon: number }) =>
+    isNaN(row.ratioPct) ? row.epsilon.toExponential(3) : `${row.ratioPct.toFixed(4)}%`;
+  const fmtBlocksTime = (blocks: number) => {
+    const sec = blocks * blockTimeSeconds;
+    if (sec < 60) return `${sec}s`;
+    if (sec < 3600) return `${(sec / 60).toFixed(1)}m`;
+    return `${(sec / 3600).toFixed(1)}h`;
+  };
+
   console.log(`\n  ── min-epsilon results (sorted by ε) ──`);
-  console.log(`  ${"ratio ε".padStart(12)}  ${"maxDev%".padStart(9)}  ${"p99%".padStart(8)}   meets ≤${targetPct}%`);
+  console.log(`  target divergence = ${targetPct}%  ·  streak budget = ${maxBlocksBudget} blocks (${fmtBlocksTime(maxBlocksBudget)})`);
+  console.log(`  ${"ratio ε".padStart(12)}  ${"maxDev%".padStart(9)}  ${"longest streak".padStart(20)}  ${"≤max".padStart(5)}  ${"≤streak".padStart(7)}`);
   for (const row of rows) {
-    const epsStr = isNaN(row.ratioPct) ? row.epsilon.toExponential(3) : `${row.ratioPct.toFixed(4)}%`;
-    const ok = row.maxDevPct <= targetPct;
+    const meetsMax = row.maxDevPct <= targetPct;
+    const meetsStreak = row.maxStreak <= maxBlocksBudget;
+    const streakStr = `${row.maxStreak.toLocaleString()} blk (${fmtBlocksTime(row.maxStreak)})`;
     console.log(
-      `  ${epsStr.padStart(12)}  ${row.maxDevPct.toFixed(4).padStart(9)}  ${row.p99.toFixed(4).padStart(8)}   ${ok ? "✓" : "✗"}`,
+      `  ${fmtEps(row).padStart(12)}  ${row.maxDevPct.toFixed(4).padStart(9)}  ${streakStr.padStart(20)}  ` +
+      `${(meetsMax ? "✓" : "✗").padStart(5)}  ${(meetsStreak ? "✓" : "✗").padStart(7)}`,
     );
   }
 
-  const passing = rows.filter((r) => r.maxDevPct <= targetPct);
-  if (passing.length === 0) {
+  // Criterion 1 — never exceeds the target divergence.
+  console.log(`\n  Criterion 1 — never exceeds ${targetPct}% divergence:`);
+  const strict = rows.filter((r) => r.maxDevPct <= targetPct);
+  if (strict.length === 0) {
     const best = rows.reduce((a, b) => (a.maxDevPct <= b.maxDevPct ? a : b));
-    console.log(
-      `\n  ✗ No epsilon in the sweep stays within ${targetPct}%. Closest: ${best.label} (maxDev ${best.maxDevPct.toFixed(4)}%). Extend MIN_EPS_MULTIPLIERS upward.`,
-    );
-    return;
+    console.log(`    ✗ none in sweep. Closest: ${fmtEps(best)} (maxDev ${best.maxDevPct.toFixed(4)}%). Extend the grid upward.`);
+  } else {
+    const s = strict[0];
+    console.log(`    ✓ smallest ε = ${fmtEps(s)} per bump (maxDev ${s.maxDevPct.toFixed(4)}%) → ${s.label}`);
+    if (s === rows[0]) console.log(`    ⚠ smallest ε tested — true minimum may be lower; extend the grid downward.`);
   }
 
-  // passing is sorted ascending by ε; the first entry is the smallest.
-  const smallest = passing[0];
-  const epsStr = isNaN(smallest.ratioPct) ? smallest.epsilon.toExponential(3) : `${smallest.ratioPct.toFixed(4)}% per bump`;
-  console.log(
-    `\n  ✓ Smallest epsilon within ${targetPct}% divergence: ${epsStr} (maxDev ${smallest.maxDevPct.toFixed(4)}%, p99 ${smallest.p99.toFixed(4)}%)`,
-  );
-  console.log(`    → ${smallest.label}`);
-  if (smallest === rows[0]) {
-    console.log(`    ⚠ This is the smallest ε tested — the true minimum may be lower. Extend MIN_EPS_MULTIPLIERS downward to confirm.`);
+  // Criterion 2 — never above the target for more than the block budget.
+  console.log(`\n  Criterion 2 — never above ${targetPct}% for more than ${maxBlocksBudget} blocks (${fmtBlocksTime(maxBlocksBudget)}):`);
+  const streakOk = rows.filter((r) => r.maxStreak <= maxBlocksBudget);
+  if (streakOk.length === 0) {
+    const best = rows.reduce((a, b) => (a.maxStreak <= b.maxStreak ? a : b));
+    console.log(`    ✗ none in sweep. Closest: ${fmtEps(best)} (longest streak ${best.maxStreak.toLocaleString()} blk = ${fmtBlocksTime(best.maxStreak)}). Extend the grid upward.`);
+  } else {
+    const s = streakOk[0];
+    console.log(`    ✓ smallest ε = ${fmtEps(s)} per bump (longest streak ${s.maxStreak.toLocaleString()} blk = ${fmtBlocksTime(s.maxStreak)}, maxDev ${s.maxDevPct.toFixed(4)}%) → ${s.label}`);
+    if (s === rows[0]) console.log(`    ⚠ smallest ε tested — true minimum may be lower; extend the grid downward.`);
   }
 }
 
@@ -501,7 +517,7 @@ const RESEARCH_MIXES: Record<string, number>[] = [
  * skipped by the "first-real-data" walker. The cache directory carries
  * them but the simulator would see all-null venue prices on those days.
  */
-const ENTIRE_VENUES_HISTORY = {
+export const ENTIRE_VENUES_HISTORY = {
   startDate: "2022-11-10",
   endDate: "2025-10-30",
 };
@@ -668,40 +684,55 @@ export const scenarios: Record<string, ScenarioFn> = {
   },
 
   /**
-   * Find the smallest pure-nudge epsilon that tracks DOT within MIN_EPS_TARGET_PCT
-   * (0.5%) max divergence over its whole history since the start of 2023.
+   * Find the smallest pure-nudge epsilon that tracks DOT well over its whole
+   * history since the start of 2023, answering two questions:
+   *
+   *   1. the smallest ε that NEVER exceeds the target divergence at all; and
+   *   2. the smallest ε that never STAYS above the target for more than a given
+   *      number of consecutive blocks (brief excursions allowed if they recover
+   *      quickly).
    *
    * All validators are honest and read the SAME combined ground-truth price
    * (cross-venue, jitter=0) — so every block they unanimously agree on the bump
    * direction. The combination rule (mean vs vwap) is whatever the ground-truth
    * data was loaded with (`--cross-venue`), so this scenario honours either.
    *
-   * Sweeps a geometric grid of ratio epsilons, then reports the SMALLEST resolved
-   * epsilon whose `maxDeviationPct` stays at/under the target. Smaller ε tracks
-   * slower (divergence blows past 0.5% on fast moves); large ε overshoots — so the
-   * answer is the lower edge of the feasible band, which the post-run scan finds.
+   * Sweeps a geometric grid of ratio epsilons. Smaller ε tracks slower
+   * (divergence lingers above target on fast moves); large ε overshoots — so
+   * each criterion's answer is a lower edge of a feasible band.
    */
   async "min-epsilon"(ctx, priceSource, outputDir, threadCount) {
     console.log(`\n[Scenario: min-epsilon]`);
 
-    // Force the requested observation model regardless of CLI --validator-price-source/
+    // Max-divergence budget the epsilon must respect (percent).
+    const TARGET_PCT = 0.5;
+    // Criterion-2 budget: the oracle may briefly exceed TARGET_PCT, but never for
+    // more than this many consecutive 6s blocks before recovering back under it
+    // (100 blocks = 10 minutes).
+    const MAX_BLOCKS_ABOVE = 100;
+    // Geometric sweep of ratio-ε multipliers (× the default 0.01/N). mult=1 means
+    // a fully-agreed block moves the oracle 1% of price; the grid spans ~0.02×
+    // (too slow to track) up to ~4× so each feasible band's lower edge is bracketed.
+    const MULTIPLIERS: number[] = Array.from({ length: 20 }, (_, i) => 0.02 * Math.pow(1.32, i));
+
+    // Force the observation model regardless of CLI --validator-price-source /
     // --jitter: every validator sees the same combined ground truth with no
     // jitter, so honest agreement is unanimous each block.
     ctx.priceSource = { kind: "cross-venue", jitterStdDev: 0 };
 
-    // Geometric sweep of ratio-ε multipliers (× the default 0.01/N). mult=1 means
-    // a fully-agreed block moves the oracle 1% of price; we go well below that to
-    // locate the smallest ε that still keeps up.
-    const multipliers = MIN_EPS_MULTIPLIERS;
-    const configs = multipliers.map((mult) =>
-      makeConfig(ctx, [], nudgeAgg(ratioEpsilon(ctx.validatorCount, mult)), `(${mult.toPrecision(3)}x)`),
-    );
+    // Pin convergenceThreshold = TARGET_PCT on every config so the summary's
+    // maxConsecutiveBlocksAboveThreshold counts runs above the target (criterion 2).
+    const configs = MULTIPLIERS.map((mult) => ({
+      ...makeConfig(ctx, [], nudgeAgg(ratioEpsilon(ctx.validatorCount, mult)), `(${mult.toPrecision(3)}x)`),
+      convergenceThreshold: TARGET_PCT,
+    }));
 
-    console.log(`  Sweeping ${multipliers.length} ratio epsilons (all honest, pure nudge, cross-venue jitter=0)`);
-    console.log(`  Target: max divergence ≤ ${MIN_EPS_TARGET_PCT}% over the full pinned window`);
+    console.log(`  Sweeping ${MULTIPLIERS.length} ratio epsilons (all honest, pure nudge, cross-venue jitter=0)`);
+    console.log(`  Criterion 1: never exceeds ${TARGET_PCT}% divergence`);
+    console.log(`  Criterion 2: never above ${TARGET_PCT}% for more than ${MAX_BLOCKS_ABOVE} blocks`);
     const results = await runBatch(configs, priceSource, outputDir, threadCount);
 
-    reportMinEpsilon(results, MIN_EPS_TARGET_PCT);
+    reportMinEpsilon(results, TARGET_PCT, MAX_BLOCKS_ABOVE, BLOCK_TIME_SECONDS);
     return results;
   },
 
@@ -846,7 +877,7 @@ export const scenarios: Record<string, ScenarioFn> = {
       // { kind: "median", minInputs: Math.floor(2 * ctx.validatorCount / 3) },
       { kind: "latched-median" },
     ];
-    const adversaryTypes: Exclude<ValidatorType, "honest">[] = ["pushy-max", "noop"];
+    const adversaryTypes: Exclude<ValidatorType, "honest">[] = ["malicious", "pushy-max"];
     const fractions = [0.10, 0.33, 0.49];
 
     const configs: SimulationConfig[] = [];

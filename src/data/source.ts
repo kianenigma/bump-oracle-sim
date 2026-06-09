@@ -61,17 +61,21 @@ function makeVenueSource(id: VenueId): VenueSpotSource {
   }
 }
 
-async function loadTradeSourcePoints(
+/**
+ * Load per-venue 6s buckets for [startDate, endDate], one flat array per venue,
+ * all aligned to the same 6s grid. Shared by the simulator's trade pipeline and
+ * the price-analysis subcommand; the caller decides how to combine the buckets
+ * (which `CrossVenueSpec` / which per-bucket reduction).
+ */
+export async function loadVenueBuckets(
   venues: VenueId[],
   startDate: string,
   endDate: string,
-  crossVenue: CrossVenueSpec,
-): Promise<ResolvedPriceSource> {
+): Promise<Map<VenueId, VenueBucket[]>> {
   if (venues.length === 0) {
-    throw new Error("loadPriceSource(trades): at least one venue required");
+    throw new Error("loadVenueBuckets: at least one venue required");
   }
   const days = daysInRange(startDate, endDate);
-  console.log(`  Loading trade data: ${venues.join(", ")} × ${days.length} day${days.length === 1 ? "" : "s"} (${startDate} → ${endDate}); cross-venue rule: ${crossVenue.kind}`);
 
   // Per venue: load all days sequentially (respects per-venue rate limits and
   // any in-flight dedup like Gate's monthly download lock). Across venues:
@@ -95,7 +99,22 @@ async function loadTradeSourcePoints(
     }),
   );
 
-  const perVenue = new Map<VenueId, VenueBucket[]>(venueResults);
+  return new Map<VenueId, VenueBucket[]>(venueResults);
+}
+
+async function loadTradeSourcePoints(
+  venues: VenueId[],
+  startDate: string,
+  endDate: string,
+  crossVenue: CrossVenueSpec,
+): Promise<ResolvedPriceSource> {
+  if (venues.length === 0) {
+    throw new Error("loadPriceSource(trades): at least one venue required");
+  }
+  const days = daysInRange(startDate, endDate);
+  console.log(`  Loading trade data: ${venues.join(", ")} × ${days.length} day${days.length === 1 ? "" : "s"} (${startDate} → ${endDate}); cross-venue rule: ${crossVenue.kind}`);
+
+  const perVenue = await loadVenueBuckets(venues, startDate, endDate);
   const combined = combineVenues(perVenue, crossVenue);
   // Convert Maps to structuredClone-friendly Records so we can postMessage to workers.
   const venuePrices: Record<VenueId, number[]> = {} as Record<VenueId, number[]>;
