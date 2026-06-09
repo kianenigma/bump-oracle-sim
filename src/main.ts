@@ -43,6 +43,7 @@ const { values: args } = parseArgs({
     "list-scenarios": { type: "boolean", default: false },
     "analyze-price": { type: "boolean", default: false },
     "refresh-last-trade": { type: "boolean", default: false },
+    csv: { type: "boolean", default: false },
     port: { type: "string", default: "3000" },
     data: { type: "string" },
     label: { type: "string" },
@@ -90,6 +91,9 @@ Options:
   --fetch-only                 Only fetch and cache price data, don't simulate
   --jitter <fraction>          Price jitter std dev as fraction (default: ${DEFAULT_PRICE_SOURCE.jitterStdDev})
   --convergence-threshold <%>  Convergence threshold in % (default: ${DEFAULT_CONFIG.convergenceThreshold})
+  --csv                        Also write the per-block <scenario>.csv alongside the chunked
+                                data (off by default; large). Required for the per-block detail
+                                page's full inherent vote list.
   --list-scenarios             List available named scenarios
   --port <number>              Server port (default: 3000)
   --data <path>                Serve existing .simdata directory without re-running simulation
@@ -545,6 +549,7 @@ const ctx: ScenarioCtx = {
   aggregator: ctxAggregator,
   priceSource: ctxPriceSource,
   validatorCount,
+  writeCsv: !!args.csv,
 };
 await scenarioFn(ctx, priceSource, outputDir, threadCount);
 

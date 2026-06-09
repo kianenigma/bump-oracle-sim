@@ -59,8 +59,19 @@ How each validator *observes* the price is set by `--validator-price-source`:
 Downloads price data into a local cache so subsequent runs skip the network. Re-running is incremental.
 
 ```bash
-bun run src/fetch-all.ts                 # pre-fetch the full candle history
+bun run src/fetch-all.ts                 # pre-fetch the full candle history (Binance 1m → candle cache)
+bun run src/fetch-trades.ts              # pre-fetch ALL venues' full trade history (→ bucket cache)
 bun run src/main.ts --scenario honest --fetch-only   # fetch/generate only for one scenario's config
+```
+
+`fetch-trades` downloads each venue's entire listing→yesterday spot-trade
+history independently. Days a venue can't serve (pre-listing, not-yet-published,
+or gaps) are **skipped and logged, never fatal**. Options:
+
+```bash
+bun run src/fetch-trades.ts --venues binance,okx   # a subset of venues
+bun run src/fetch-trades.ts --end 2025-10-30       # stop at a specific day
+bun run src/fetch-trades.ts --refresh              # re-download (repopulate cache with last-trade)
 ```
 
 ## CLI Reference
@@ -84,6 +95,8 @@ Options:
   --output <path>              Output directory (default: <scenario>_<start>_<end>.simdata)
   --force                      Overwrite an existing output directory
   --threads <number>           Worker threads for batch scenarios (default: CPU count)
+  --csv                        Also write the per-block <scenario>.csv (off by default; large).
+                               Required for the block-detail page's full vote list.
 
   --data-source <kind>         "trades" (default), "candles", or "synthetic"
   --venues <list|all>          Comma-separated venue ids, or "all" (default).
@@ -240,7 +253,7 @@ Batch scenarios (any scenario with multiple simulations) parallelize across Bun 
   venues.json       (trades only) per-venue price/volume series
   events.json       (synthetic only) per-event spans for chart labels
   <slug>_<i>/       columnar block chunks (≤ 1M blocks each)
-  <slug>_<i>.csv    per-block CSV (author, inherent composition, votes, prices)
+  <slug>_<i>.csv    per-block CSV (author, inherent composition, votes, prices) — only with --csv
 ```
 
 ## Visualization

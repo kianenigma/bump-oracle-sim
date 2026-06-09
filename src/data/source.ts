@@ -50,7 +50,7 @@ export async function loadPriceSource(
 export type { SyntheticSource };
 
 /** Return a venue source instance by id. */
-function makeVenueSource(id: VenueId): VenueSpotSource {
+export function makeVenueSource(id: VenueId): VenueSpotSource {
   switch (id) {
     case "binance":  return new BinanceSpotSource();
     case "bybit":    return new BybitSpotSource();

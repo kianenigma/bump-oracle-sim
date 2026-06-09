@@ -327,6 +327,12 @@ export interface SimulationConfig {
   aggregator?: AggregatorConfig;
   /** How the ground-truth real price is produced. Default applied in engine. */
   realPrice?: RealPriceSpec;
+  /** Output option (not a sim parameter): write the per-block `<dir>.csv`
+   *  alongside the chunked data. Off by default — the CSV is large and only
+   *  the block-detail page's full inherent vote list needs it. Set from the
+   *  CLI `--csv` flag; carried on the config so it survives the worker
+   *  postMessage to the parallel pool. */
+  writeCsv?: boolean;
 }
 
 export interface SimulationResult {

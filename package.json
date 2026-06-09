@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "sim": "bun run src/main.ts"
+    "sim": "bun run src/main.ts",
+    "fetch-trades": "bun run src/fetch-trades.ts"
   },
   "devDependencies": {
     "@types/bun": "^1.1.0",

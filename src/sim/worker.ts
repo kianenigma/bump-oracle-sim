@@ -26,7 +26,7 @@ self.onmessage = (event: MessageEvent) => {
     let csv: CsvWriter | undefined;
     if (outputDir) {
       writer = new ChunkWriter(join(outputDir, dirName));
-      csv = new CsvWriter(join(outputDir, `${dirName}.csv`));
+      if (config.writeCsv) csv = new CsvWriter(join(outputDir, `${dirName}.csv`));
     }
 
     const onProgress = (pct: number) => {

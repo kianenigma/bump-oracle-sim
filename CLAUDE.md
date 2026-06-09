@@ -15,6 +15,7 @@ serves an interactive chart.
 
 ```bash
 bun run src/main.ts --scenario honest   # run a scenario, write .simdata, serve, open browser
+bun run src/fetch-trades.ts             # bulk-download ALL venues' full trade history into the cache
 npx tsc --noEmit                         # type check — the primary quality gate
 bun test tests/aggregator.test.ts        # per-block aggregator behaviour tests
 ```
@@ -31,7 +32,10 @@ src/
   rng.ts               Seeded PRNG (mulberry32) + Gaussian RNG
   validators.ts        buildValidators (GroupSpec[] → ValidatorGroup[]), compatibility, formatting
   mix.ts               DEPRECATED placeholder (no exports; kept pending deletion approval)
-  fetch-all.ts         Standalone data pre-fetch script
+  fetch-all.ts         Standalone candle pre-fetch script (Binance 1m → candle cache)
+  fetch-trades.ts      Standalone per-venue trade pre-fetch: each venue's FULL
+                       listing→yesterday history into the bucket cache; skips
+                       (never fatals on) days a venue can't serve
   data/
     source.ts          loadPriceSource: dispatches candles / trades / synthetic → ResolvedPriceSource
     fetcher.ts         Binance US candle API client (with retry)
@@ -118,6 +122,8 @@ writes `price_analysis.json`, and serves a per-venue + divergence chart
   (see `SCENARIO_DATE_RANGES`) and override these.
 - `--validators <N>` (default 300), `--seed`, `--jitter`, `--convergence-threshold`.
 - `--threads <N>` — Bun Worker pool size for batch scenarios (default CPU count).
+- `--csv` — also write the per-block `<scenario>.csv` (off by default; large).
+  Required for the block-detail page's full inherent vote list.
 - `--force` — overwrite an existing output directory.
 - `--data-source <candles|trades|synthetic>` (default `trades`).
 - `--venues <list|all>` — trade/synthetic venues (binance, kraken, bybit, gate, okx, coinbase).
@@ -222,6 +228,7 @@ JSON is gone). Layout:
     blocks_0.json         BlockChunk (≤ 1M blocks each, columnar, stream-written)
     blocks_1.json
   <slug>_<i>.csv          per-block CSV (CsvWriter): author, inherent composition, votes, prices
+                          — written ONLY when `--csv` is passed (off by default; large)
 ```
 
 A `BlockChunk` carries columnar arrays: `timestamps`, `realPrices`,
@@ -254,7 +261,9 @@ the ones passed in `active`, and fetches detail lazily per scenario on expand:
   per-scenario CSV, so this endpoint streams that `<dir>.csv` to the target row
   (block N = line N+1); everything else comes from the chunk + `index.json`.
   The page groups votes by validator type (count + min/median/max, or up/down
-  split for nudge), expandable to raw per-input rows.
+  split for nudge), expandable to raw per-input rows. **The CSV is written only
+  when the sim ran with `--csv`** — without it the endpoint degrades gracefully
+  (no vote list; author/prices still resolve from the chunk).
 
 ## Gotchas
 
