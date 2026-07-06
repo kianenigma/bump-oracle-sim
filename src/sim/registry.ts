@@ -6,6 +6,7 @@ import {
   DelayedValidator,
   DriftValidator,
   MaximallyPushyValidator,
+  RedemptionAttacker,
 } from "./malicious.js";
 import type { ValidatorType } from "../types.js";
 
@@ -23,4 +24,5 @@ export const VALIDATOR_REGISTRY: Record<ValidatorType, ValidatorConstructor> = {
   noop:        NoopValidator,
   delayed:     DelayedValidator,
   drift:       DriftValidator,
+  redemption:  RedemptionAttacker,
 };

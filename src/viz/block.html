@@ -146,9 +146,9 @@
     // ── Engine / aggregator formatting (mirrors scenarios.ts formatEngine) ──
     function epsilonStr(summary) {
       if (summary == null || summary.epsilon == null) return '?';
-      if (summary.epsilonMode === 'ratio') return (summary.epsilon * 100).toFixed(4) + '% / bump';
+      if (summary.epsilonMode === 'ratio') return (summary.epsilon * 100).toFixed(6) + '% / bump';
       const e = summary.epsilon;
-      return Math.abs(e) >= 1e-3 ? e.toFixed(4) : e.toExponential(2);
+      return Math.abs(e) >= 1e-3 ? e.toFixed(6) : e.toExponential(6);
     }
     function engineLabel(cfg) {
       if (!cfg) return 'median';

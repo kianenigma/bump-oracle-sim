@@ -452,3 +452,26 @@ export class DriftValidator extends BaseValidator {
     return pickAllInDirectionBumps(inputs, Bump.Up);
   }
 }
+
+export class RedemptionAttacker extends BaseValidator {
+  static readonly compatibleEngines: ReadonlyArray<AggregatorMode> = ["nudge"];
+  readonly type: ValidatorType = "redemption";
+
+  protected produceQuoteInput(ctx: ProduceCtx): Submission {
+    throw new Error("RedemptionAttacker does not produce quotes");
+  }
+
+  protected produceQuoteInherent(inputs: Submission[], _ctx: ProduceCtx): Submission[] {
+    throw new Error("RedemptionAttacker does not produce quotes");
+  }
+
+    // always vote down
+  protected produceNudgeInput(ctx: ProduceCtx): Submission {
+    return nudge(this.index, this.type, Bump.Down);
+  }
+
+  // pick all down votes
+  protected produceNudgeInherent(inputs: Submission[], _ctx: ProduceCtx): Submission[] {
+    return inputs.filter(s => s.kind === "nudge" && s.bump === Bump.Down);
+  }
+}

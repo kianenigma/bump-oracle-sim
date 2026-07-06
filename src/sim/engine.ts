@@ -46,7 +46,7 @@ function resolveEpsilon(
     return { epsilon: eps, mode: "abs" };
   }
   if (typeof spec === "object" && "ratio" in spec) {
-    if (log) console.log(`  Ratio epsilon: ${(spec.ratio * 100).toFixed(4)}% per bump`);
+    if (log) console.log(`  Ratio epsilon: ${(spec.ratio * 100).toFixed(6)}% per bump`);
     return { epsilon: spec.ratio, mode: "ratio" };
   }
   return { epsilon: spec, mode: "abs" };
@@ -275,7 +275,7 @@ function printConfig(config: SimulationConfig, pricePoints?: PricePoint[]): void
   let epsStr = "—";
   if (agg.kind === "nudge") {
     if (agg.epsilon === "auto") epsStr = "auto";
-    else if (typeof agg.epsilon === "object" && "ratio" in agg.epsilon) epsStr = `ratio=${(agg.epsilon.ratio * 100).toFixed(4)}%/bump`;
+    else if (typeof agg.epsilon === "object" && "ratio" in agg.epsilon) epsStr = `ratio=${(agg.epsilon.ratio * 100).toFixed(6)}%/bump`;
     else epsStr = agg.epsilon.toString();
   }
 

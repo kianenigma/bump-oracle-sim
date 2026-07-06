@@ -109,9 +109,9 @@ export type ScenarioFn = (
 
 function formatEpsilon(eps: EpsilonSpec): string {
   if (eps === "auto") return "auto";
-  if (typeof eps === "object" && "ratio" in eps) return `r=${(eps.ratio * 100).toFixed(4)}%`;
+  if (typeof eps === "object" && "ratio" in eps) return `r=${(eps.ratio * 100).toFixed(6)}%`;
   const n = eps as number;
-  return Math.abs(n) >= 1e-3 ? n.toFixed(4) : n.toExponential(2);
+  return Math.abs(n) >= 1e-3 ? n.toFixed(6) : n.toExponential(6);
 }
 
 function formatEngine(cfg: AggregatorConfig): string {
@@ -434,7 +434,7 @@ function reportMinEpsilon(
     .sort((a, b) => a.epsilon - b.epsilon);
 
   const fmtEps = (row: { ratioPct: number; epsilon: number }) =>
-    isNaN(row.ratioPct) ? row.epsilon.toExponential(3) : `${row.ratioPct.toFixed(4)}%`;
+    isNaN(row.ratioPct) ? row.epsilon.toExponential(6) : `${row.ratioPct.toFixed(6)}%`;
   const fmtBlocksTime = (blocks: number) => {
     const sec = blocks * blockTimeSeconds;
     if (sec < 60) return `${sec}s`;
@@ -632,8 +632,8 @@ export const scenarios: Record<string, ScenarioFn> = {
 
   async "nudge-pushy-max-with-eps"(ctx, priceSource, outputDir, threadCount) {
     // custom epsilon value derived from the research-ratio-eps scenario or a similar scenario
-    const epsilon = 0.0748 * 0.01;
-    const fractions = [0.05, 0.10, 0.33];
+    const epsilon = 0.0075 * 0.01;
+    const fractions = [0, 0.05, 0.10, 0.33];
     const configs = [];
 
     for (const fraction of fractions) {
@@ -641,11 +641,20 @@ export const scenarios: Record<string, ScenarioFn> = {
       configs.push(makeConfig(ctx, specs, { kind: "nudge", epsilon: { ratio: epsilon } }));
     }
 
-    // and one honest
-    configs.push(makeConfig(ctx, [], { kind: "nudge", epsilon: { ratio: epsilon } }));
-
     return runBatch(configs, priceSource, outputDir, threadCount);
   },
+
+  // Set of attackers that only want to push the price down.
+  async "redemption-attacker"(ctx, priceSource, outputDir, threadCount) {
+    const epsilon = 0.0075 * 0.01;
+    const configs: SimulationConfig[] = [];
+    for (const fraction of [0.05, 0.10, 0.33]) {
+      const specs: GroupSpec[] = [{ type: "redemption", fraction: fraction }];
+      configs.push(makeConfig(ctx, specs, { kind: "nudge", epsilon: { ratio: epsilon } }));
+    }
+    return runBatch(configs, priceSource, outputDir, threadCount);
+  },
+
   /**
    * Find the smallest pure-nudge epsilon that tracks DOT well over its whole
    * history since the start of 2023: the smallest ε whose longest consecutive
@@ -690,7 +699,9 @@ export const scenarios: Record<string, ScenarioFn> = {
       convergenceThreshold: TARGET_PCT,
     }));
 
-    console.log(`  Sweeping ${MULTIPLIERS.length} ratio epsilons (all honest, pure nudge, cross-venue jitter=0)`);
+    const baselineRatio = 0.01 / ctx.validatorCount; // the mult=1 default ε
+    console.log(`  Baseline ε (1×): ratio=${(baselineRatio * 100).toFixed(6)}% per bump (0.01 / ${ctx.validatorCount} validators)`);
+    console.log(`  Sweeping ${MULTIPLIERS.length} ratio epsilons spanning ${MULTIPLIERS[0].toPrecision(2)}×–${MULTIPLIERS[MULTIPLIERS.length - 1].toPrecision(2)}× baseline (all honest, pure nudge, cross-venue jitter=0)`);
     console.log(`  Criterion: never above ${TARGET_PCT}% divergence for more than ${MAX_BLOCKS_ABOVE} blocks (0 = never at all)`);
     const results = await runBatch(configs, priceSource, outputDir, threadCount);
 

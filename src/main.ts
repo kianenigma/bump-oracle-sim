@@ -505,11 +505,13 @@ const jitterStdDev = parseFloat(args.jitter!);
 const convergenceThreshold = parseFloat(args["convergence-threshold"]!);
 
 // Default validator price-source: random-venue if trades data, cross-venue if candles.
-let priceSourceKind = parsePriceSourceKindArg(args["validator-price-source"]);
-if (priceSourceKind === undefined) {
-  priceSourceKind = realPrice.kind === "candles" ? "cross-venue" : "random-venue";
-}
+const priceSourceExplicit = parsePriceSourceKindArg(args["validator-price-source"]);
+const priceSourceKind = priceSourceExplicit ?? (realPrice.kind === "candles" ? "cross-venue" : "random-venue");
 const ctxPriceSource: ValidatorPriceSource = { kind: priceSourceKind, jitterStdDev };
+console.log(
+  `  Validator price-source: ${priceSourceKind}` +
+  `${priceSourceExplicit === undefined ? " (default)" : ""}, jitter=${jitterStdDev}`,
+);
 
 // `ctx.aggregator` used to be CLI-driven via --aggregator. We removed that
 // flag — the CLI runs scenarios only, and each scenario specifies the

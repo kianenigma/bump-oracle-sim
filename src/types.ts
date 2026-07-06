@@ -207,7 +207,7 @@ export interface ResolvedPriceSource {
 // validatorPriceSource, maliciousParams) bundle. A simulation's full
 // validator set is the concatenation of all groups, in order.
 export type ValidatorType =
-  "honest" | "malicious" | "pushy" | "pushy-max" | "noop" | "delayed" | "drift";
+  "honest" | "malicious" | "pushy" | "pushy-max" | "noop" | "delayed" | "drift" | "redemption";
 
 /** Type-specific behavior knobs. Required keys depend on `type`:
  *    delayed   → delayBlocks

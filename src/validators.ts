@@ -148,7 +148,10 @@ export function formatValidators(validators: ValidatorGroup[]): string {
   for (const g of validators) {
     if (g.type === "honest") continue;
     const pct = (g.count / total) * 100;
-    parts.push(`${pct.toFixed(0)}% ${g.type}`);
+    // Show both the realized percentage and the actual validator count (out of
+    // the total), so a fraction that floored to a non-round count is unambiguous
+    // (e.g. "5%" requested on 30 validators shows as "3% (1/30) pushy-max").
+    parts.push(`${pct.toFixed(0)}% (${g.count}/${total}) ${g.type}`);
   }
   return parts.length > 0 ? parts.join(", ") : "0% (baseline)";
 }
