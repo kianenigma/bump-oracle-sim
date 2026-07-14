@@ -354,6 +354,70 @@
       // Inputs (grouped)
       html += `<div class="section-title">Inputs · author-selected inherent (${d.votes.length})</div>`;
       html += renderVotes(d);
+      if (d.live) html += renderLiveSection(d);
+      return html;
+    }
+
+    // ── Live mode: per-validator Mini Oracle breakdown ──
+    // Renders one row per validator (quote, venue subset, pipeline point
+    // counts); clicking a row expands the full pipeline trace — every ticker
+    // point with its USD-normalized price, VWAP weight, and drop reason.
+    function renderLiveSection(d) {
+      const L = d.live;
+      let html = '';
+
+      if (L.venueStatus) {
+        html += `<div class="section-title">Live venues</div><div class="facts">`;
+        for (const [v, s] of Object.entries(L.venueStatus)) {
+          const price = L.venuePrices && L.venuePrices[v] != null ? Number(L.venuePrices[v]).toFixed(4) : '—';
+          const state = s.ok
+            ? `<span style="color:var(--good)">●</span>`
+            : `<span style="color:var(--bad)" title="${esc(s.lastError || 'down')}">●</span>`;
+          html += fact(esc(v), `${state} <span class="mono">${price}</span>`);
+        }
+        html += `</div>`;
+      }
+
+      const vs = L.validators || [];
+      html += `<div class="section-title">Mini Oracle · per validator (${vs.length})</div>`;
+      let rows = '';
+      for (const v of vs) {
+        const dropped = v.droppedStale + v.droppedVolume + v.droppedMad;
+        const badges = (v.isAuthor ? ' <span class="dim" title="block author">author</span>' : '') +
+                       (v.isMedian ? ' <span class="dim" title="latched-median selected">median</span>' : '');
+        const cls = ['grp-row', 'live-vrow'];
+        if (v.isAuthor) cls.push('is-author');
+        if (v.isMedian) cls.push('is-median');
+        if (v.trace) cls.push('has-rows');
+        rows += `<tr class="${cls.join(' ')}" data-vi="${v.index}">` +
+          `<td class="gname"><span class="mono">#${v.index}</span>${badges}</td>` +
+          `<td class="mono">${v.price != null ? Number(v.price).toFixed(6) : '<span class="dim">abstain</span>'}</td>` +
+          `<td class="dim">${v.venues.map(esc).join(', ')}</td>` +
+          `<td class="mono">${v.used}<span class="dim">/${v.used + dropped}</span>` +
+          (dropped > 0 ? ` <span class="dim">(−${v.droppedVolume}vol −${v.droppedStale}stale −${v.droppedMad}mad)</span>` : '') +
+          `</td></tr>`;
+        if (v.trace) {
+          const t = v.trace;
+          let traceRows = `<tr class="raw-rows"><td></td><td colspan="3" class="dim">` +
+            `USDT→USD <span class="mono">${t.usdtUsd.toFixed(5)}</span> · ` +
+            `USDC→USD <span class="mono">${t.usdcUsd.toFixed(5)}</span>` +
+            (t.usdIndexAssumed ? ' <span style="color:var(--warn)">(assumed 1.0 — no stable/USD market visible)</span>' : '') +
+            (t.median != null ? ` · median <span class="mono">${t.median.toFixed(5)}</span>` : '') +
+            (t.mad != null ? ` · MAD <span class="mono">${t.mad.toFixed(6)}</span>` : '') +
+            `</td></tr>`;
+          for (const p of t.points) {
+            const drop = p.dropped
+              ? `<span style="color:var(--bad)">✗ ${p.dropped}</span>`
+              : `<span style="color:var(--good)">✓ used</span>`;
+            traceRows += `<tr class="raw-rows"><td></td>` +
+              `<td class="dim">${esc(p.venue)} ${esc(p.pair)}</td>` +
+              `<td class="mono">${p.usdPrice.toFixed(6)} <span class="dim">(raw ${p.rawLast})</span></td>` +
+              `<td>${drop} <span class="dim mono">$${Math.round(p.usdVolume24h).toLocaleString()}/24h</span></td></tr>`;
+          }
+          rows += `<tbody class="vraw-${v.index}" style="display:none">${traceRows}</tbody>`;
+        }
+      }
+      html += `<table class="votes"><thead><tr><th>Validator</th><th>Quote (USD)</th><th>Venue subset</th><th>Points used</th></tr></thead><tbody>${rows}</tbody></table>`;
       return html;
     }
 
@@ -420,8 +484,11 @@
     function wireGroupToggles(body) {
       body.querySelectorAll('.grp-row.has-rows').forEach(row => {
         row.addEventListener('click', () => {
+          const vi = row.getAttribute('data-vi');
           const gi = row.getAttribute('data-gi');
-          const tb = body.querySelector('.raw-' + gi);
+          const tb = vi !== null
+            ? body.querySelector('.vraw-' + vi)
+            : body.querySelector('.raw-' + gi);
           if (!tb) return;
           const showing = tb.style.display !== 'none';
           tb.style.display = showing ? 'none' : '';

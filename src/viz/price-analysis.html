@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Price Analysis — inter-venue spread</title>
+  <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+  <script>window.LightweightCharts || document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"><\/script>');</script>
+  <style>
+    :root {
+      --bg: #0e1116; --panel: #161b22; --border: #2b313a; --fg: #d8dee6;
+      --muted: #8b949e; --accent: #e6a05e; --good: #3fb950; --warn: #d29922; --bad: #f85149;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--fg);
+      font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+    header { padding: 12px 18px; border-bottom: 1px solid var(--border); background: var(--panel); }
+    header h1 { margin: 0; font-size: 15px; font-weight: 600; }
+    header .sub { color: var(--muted); font-size: 12px; margin-top: 3px; }
+    .layout { display: flex; height: calc(100vh - 58px); }
+    .charts { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+    .chart-block { border-bottom: 1px solid var(--border); position: relative; }
+    .chart-block .label { position: absolute; top: 6px; left: 10px; z-index: 4;
+      color: var(--muted); font-size: 11px; pointer-events: none;
+      background: rgba(14,17,22,0.6); padding: 1px 6px; border-radius: 4px; }
+    #price-chart { height: 58%; }
+    #dev-chart { height: 42%; }
+    aside { width: 380px; border-left: 1px solid var(--border); background: var(--panel);
+      overflow-y: auto; padding: 14px 16px; }
+    aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .04em;
+      color: var(--muted); margin: 18px 0 6px; }
+    aside h2:first-child { margin-top: 0; }
+    table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    th, td { text-align: right; padding: 3px 6px; border-bottom: 1px solid var(--border); }
+    th:first-child, td:first-child { text-align: left; }
+    th { color: var(--muted); font-weight: 500; font-size: 11px; }
+    .band-good td:first-child { color: var(--good); }
+    .band-warn td:first-child { color: var(--warn); }
+    .band-bad td:first-child { color: var(--bad); }
+    .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 8px 18px;
+      border-bottom: 1px solid var(--border); background: var(--panel); font-size: 12px; }
+    .legend span { display: inline-flex; align-items: center; gap: 5px; }
+    .swatch { width: 11px; height: 3px; border-radius: 2px; display: inline-block; }
+    .note { color: var(--muted); font-size: 11px; margin: 6px 0; }
+    .big { font-size: 22px; font-weight: 600; }
+    .epi { font-size: 11px; font-variant-numeric: tabular-nums; }
+    .epi td { padding: 2px 5px; }
+    .pill { display:inline-block; padding:1px 7px; border-radius:10px; background:#21262d; color:var(--muted); font-size:11px; }
+    #status { color: var(--muted); font-size: 11px; padding: 4px 18px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Price Analysis — inter-venue spread of the live spot price</h1>
+    <div class="sub" id="subtitle">loading…</div>
+  </header>
+  <div class="legend" id="legend"></div>
+  <div class="layout">
+    <div class="charts">
+      <div class="chart-block" id="price-chart"><div class="label">Per-venue last-trade price + cross-venue mean</div></div>
+      <div class="chart-block" id="dev-chart"><div class="label">Inter-venue spread % = (max − min) / mean</div></div>
+      <div id="status"></div>
+    </div>
+    <aside id="report">loading report…</aside>
+  </div>
+
+  <script>
+    const VENUE_COLORS = {
+      binance: "#f0b90b", bybit: "#f7a600", gate: "#c026d3",
+      kraken: "#7b61ff", okx: "#cdd9e5", coinbase: "#1652f0",
+    };
+    const MEAN_COLOR = "#9aa7b4";
+    const TIMEFRAMES = [6, 60, 900, 3600, 21600, 43200, 86400, 604800];
+
+    const $ = (id) => document.getElementById(id);
+    const fmtPct = (x) => x.toFixed(4) + "%";
+    function fmtDur(sec) {
+      if (sec < 60) return sec + "s";
+      const m = sec / 60; if (m < 60) return m.toFixed(1) + "m";
+      const h = m / 60; if (h < 24) return h.toFixed(1) + "h";
+      return (h / 24).toFixed(1) + "d";
+    }
+    const fmtTs = (ts) => new Date(ts * 1000).toISOString().replace("T", " ").slice(0, 16);
+
+    function chartOpts(extra) {
+      return Object.assign({
+        layout: { background: { color: "#0e1116" }, textColor: "#8b949e" },
+        grid: { vertLines: { color: "#1b212a" }, horzLines: { color: "#1b212a" } },
+        rightPriceScale: { borderColor: "#2b313a" },
+        timeScale: { borderColor: "#2b313a", timeVisible: true, secondsVisible: false },
+        crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+      }, extra || {});
+    }
+
+    const priceChart = LightweightCharts.createChart($("price-chart"), chartOpts());
+    const devChart = LightweightCharts.createChart($("dev-chart"), chartOpts());
+
+    function resize() {
+      for (const [el, c] of [["price-chart", priceChart], ["dev-chart", devChart]]) {
+        const e = $(el);
+        c.applyOptions({ width: e.clientWidth, height: e.clientHeight });
+      }
+    }
+    window.addEventListener("resize", resize);
+
+    // Keep the two charts' time axes in lockstep.
+    let syncing = false;
+    function link(a, b) {
+      a.timeScale().subscribeVisibleTimeRangeChange((range) => {
+        if (syncing || !range) return;
+        syncing = true;
+        b.timeScale().setVisibleRange(range);
+        syncing = false;
+      });
+    }
+    link(priceChart, devChart);
+    link(devChart, priceChart);
+
+    const venueSeries = {};   // venueId -> series
+    let meanSeries = null;
+    let devSeries = null;
+    let meta = null, report = null;
+    let venueIds = [];
+
+    function pickTF(span) {
+      for (const tf of TIMEFRAMES) if (span / tf <= 4000) return tf;
+      return TIMEFRAMES[TIMEFRAMES.length - 1];
+    }
+
+    async function loadData(from, to) {
+      const tf = pickTF(to - from);
+      const params = new URLSearchParams({ scenario: "0", from: String(from), to: String(to), tf: String(tf) });
+      const res = await fetch(`/api/data?${params}`);
+      const data = await res.json();
+      $("status").textContent =
+        `window ${fmtTs(data.from)} → ${fmtTs(data.to)} · timeframe ${fmtDur(data.tf)}`;
+
+      // Per-venue price lines.
+      if (data.venues) {
+        for (const v of Object.keys(data.venues)) {
+          if (!venueSeries[v]) {
+            venueSeries[v] = priceChart.addLineSeries({
+              color: VENUE_COLORS[v] || "#888", lineWidth: 1,
+              priceLineVisible: false, lastValueVisible: true,
+            });
+          }
+          venueSeries[v].setData(data.venues[v]);
+        }
+      }
+      // Cross-venue mean (real price line of the pseudo-scenario).
+      if (!meanSeries) {
+        meanSeries = priceChart.addLineSeries({
+          color: MEAN_COLOR, lineWidth: 2, priceLineVisible: false, lastValueVisible: true,
+        });
+      }
+      meanSeries.setData(data.realPrice.line);
+
+      // Spread (the pseudo-scenario's deviation series, max-aggregated server-side).
+      const dev = data.oracles && data.oracles[0] && data.oracles[0].deviation;
+      if (dev) {
+        if (!devSeries) {
+          devSeries = devChart.addLineSeries({
+            color: "#e6a05e", lineWidth: 1, priceLineVisible: false, lastValueVisible: true,
+          });
+        }
+        devSeries.setData(dev);
+        // Window-average spread footer.
+        let s = 0; for (const p of dev) s += p.value;
+        if (dev.length) {
+          const avg = s / dev.length;
+          $("status").textContent += ` · visible spread ~${avg.toFixed(4)}% (window-mean)`;
+        }
+      }
+    }
+
+    let debounceTimer = null;
+    function onRangeChange() {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(async () => {
+        const r = priceChart.timeScale().getVisibleRange();
+        if (!r) return;
+        await loadData(Math.floor(r.from), Math.ceil(r.to));
+      }, 220);
+    }
+
+    function buildLegend() {
+      const el = $("legend");
+      el.innerHTML = "";
+      for (const v of venueIds) {
+        const s = document.createElement("span");
+        s.innerHTML = `<i class="swatch" style="background:${VENUE_COLORS[v] || "#888"}"></i>${v}`;
+        el.appendChild(s);
+      }
+      const m = document.createElement("span");
+      m.innerHTML = `<i class="swatch" style="background:${MEAN_COLOR}"></i>cross-venue mean`;
+      el.appendChild(m);
+    }
+
+    function bandClass(label) {
+      if (label.startsWith("<")) return "band-good";
+      if (label.startsWith("≥") || label.startsWith("1–5")) return "band-bad";
+      return "band-warn";
+    }
+
+    function renderReport() {
+      const el = $("report");
+      el.innerHTML = "";
+      const mean = report.references[0];
+
+      // Headline.
+      const head = document.createElement("div");
+      const under = mean.bands[0].pctTime;
+      head.innerHTML = `<h2>Headline (vs mean)</h2>
+        <div class="big" style="color:var(--good)">${under.toFixed(3)}%</div>
+        <div class="note">of all blocks have inter-venue spread &lt; 0.5%</div>
+        <div class="note">mean spread ${fmtPct(mean.meanSpreadPct)} · max ${fmtPct(mean.maxSpreadPct)}</div>`;
+      el.appendChild(head);
+
+      // Fallback note.
+      const fb = report.lastTradeFallbackPctByVenue;
+      const fbParts = report.venues.filter((v) => fb[v] > 0.01).map((v) => `${v} ${fb[v].toFixed(1)}%`);
+      if (fbParts.length) {
+        const n = document.createElement("div");
+        n.className = "note";
+        n.textContent = `Last-trade VWAP-fallback (cached pre-feature): ${fbParts.join(", ")}. Negligible for spread.`;
+        el.appendChild(n);
+      }
+
+      // Band tables, all three references.
+      for (const ref of report.references) {
+        const h = document.createElement("h2");
+        h.textContent = `Bands vs ${ref.reference}`;
+        el.appendChild(h);
+        const t = document.createElement("table");
+        t.innerHTML = `<tr><th>band</th><th>% time</th><th>duration</th></tr>`;
+        for (const b of ref.bands) {
+          const tr = document.createElement("tr");
+          tr.className = bandClass(b.label);
+          tr.innerHTML = `<td>${b.label}</td><td>${b.pctTime.toFixed(4)}%</td><td>${fmtDur(b.durationSec)}</td>`;
+          t.appendChild(tr);
+        }
+        el.appendChild(t);
+      }
+
+      // Episodes (mean reference) for the elevated bands.
+      const eh = document.createElement("h2");
+      eh.textContent = "Elevated-spread episodes (vs mean)";
+      el.appendChild(eh);
+      for (const bandLabel of Object.keys(mean.episodes)) {
+        const eps = [...mean.episodes[bandLabel]].sort((a, b) => b.peakSpreadPct - a.peakSpreadPct);
+        const cap = document.createElement("div");
+        cap.className = "note";
+        cap.innerHTML = `<span class="pill">${bandLabel}</span> ${eps.length.toLocaleString()} episode(s)`;
+        el.appendChild(cap);
+        if (!eps.length) continue;
+        const t = document.createElement("table");
+        t.className = "epi";
+        t.innerHTML = `<tr><th>start (UTC)</th><th>dur</th><th>peak</th><th>high→low</th></tr>`;
+        for (const e of eps.slice(0, 30)) {
+          const tr = document.createElement("tr");
+          tr.style.cursor = "pointer";
+          tr.title = "click to zoom to this episode";
+          tr.onclick = () => {
+            const pad = Math.max((e.endTimestamp - e.startTimestamp) * 2, 1800);
+            loadData(Math.floor(e.startTimestamp - pad), Math.ceil(e.endTimestamp + pad))
+              .then(() => priceChart.timeScale().setVisibleRange({
+                from: e.startTimestamp - pad, to: e.endTimestamp + pad }));
+          };
+          tr.innerHTML = `<td>${fmtTs(e.startTimestamp)}</td><td>${fmtDur(e.durationSec)}</td>` +
+            `<td>${e.peakSpreadPct.toFixed(3)}%</td><td>${e.peakHighVenue}→${e.peakLowVenue}</td>`;
+          t.appendChild(tr);
+        }
+        el.appendChild(t);
+        if (eps.length > 30) {
+          const more = document.createElement("div");
+          more.className = "note";
+          more.textContent = `… ${eps.length - 30} more in price_analysis.json (top 30 by peak shown)`;
+          el.appendChild(more);
+        }
+      }
+    }
+
+    async function init() {
+      resize();
+      const [metaRes, repRes] = await Promise.all([
+        fetch("/api/meta").then((r) => r.json()),
+        fetch("/api/price-analysis").then((r) => r.json()),
+      ]);
+      meta = metaRes.scenarios[0];
+      report = repRes;
+      venueIds = report.venues;
+
+      $("subtitle").textContent =
+        `${report.venues.join(", ")} · ${report.startDate} → ${report.endDate} · ` +
+        `${report.totalBlocks.toLocaleString()} blocks (6s) · coinbase excluded`;
+
+      buildLegend();
+      renderReport();
+
+      const { from, to } = meta.timeRange;
+      await loadData(from, to);
+      priceChart.timeScale().setVisibleRange({ from, to });
+
+      // Refetch finer data on zoom/pan (debounced).
+      priceChart.timeScale().subscribeVisibleTimeRangeChange(onRangeChange);
+    }
+
+    init().catch((e) => { $("status").textContent = "error: " + e.message; console.error(e); });
+  </script>
+</body>
+</html>

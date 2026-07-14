@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Oracle Bump Simulation</title>
   <script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+  <script>window.LightweightCharts || document.write('<script src="https://cdn.jsdelivr.net/npm/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"><\/script>');</script>
   <style>
     :root[data-theme="dark"] {
       --bg: #1b1d23; --bg-surface: #22252b; --bg-elevated: #2a2d34;
@@ -42,6 +43,11 @@
     #header h1 { font-size: 18px; font-weight: 600; }
     #config-info { font-size: 11px; color: var(--text-muted); display: flex; gap: 8px; flex-wrap: wrap; }
     #config-info span { background: var(--tag-bg); padding: 2px 8px; border-radius: 4px; }
+    #live-badge { display: flex; align-items: center; gap: 7px; font: 600 11px ui-monospace, SFMono-Regular, Menlo, monospace; color: #4ade80; background: rgba(74, 222, 128, 0.08); border: 1px solid rgba(74, 222, 128, 0.35); border-radius: 4px; padding: 4px 10px; white-space: nowrap; }
+    #live-dot { width: 8px; height: 8px; border-radius: 50%; background: #4ade80; animation: live-pulse 1.2s ease-in-out infinite; }
+    @keyframes live-pulse { 0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(74, 222, 128, 0.5); } 50% { opacity: 0.55; box-shadow: 0 0 0 4px rgba(74, 222, 128, 0); } }
+    #live-badge.stalled { color: #f87171; background: rgba(248, 113, 113, 0.08); border-color: rgba(248, 113, 113, 0.4); }
+    #live-badge.stalled #live-dot { background: #f87171; animation: none; }
     #header-right { display: flex; gap: 6px; align-items: center; }
 
     /* Tab buttons in header */
@@ -275,6 +281,9 @@
       <div id="config-info"></div>
     </div>
     <div id="header-right">
+      <div id="live-badge" style="display:none" title="Live oracle — updates every 6s block">
+        <span id="live-dot"></span><span id="live-badge-text">LIVE</span>
+      </div>
       <div id="loading-bar"><div class="spinner-sm"></div><span>Loading...</span></div>
       <button class="tab-btn active" data-tab="chart">Chart</button>
       <button class="tab-btn" data-tab="stats">Stats</button>
@@ -1612,7 +1621,7 @@
         if (fitContent) {
           for (const c of allCharts) c.timeScale().fitContent();
         } else if (savedTimeRange) {
-          for (const c of allCharts) c.timeScale().setVisibleRange(savedTimeRange);
+          for (const c of allCharts) safeSetVisibleRange(c, savedTimeRange);
         }
 
         transitionLock = false;
@@ -1760,15 +1769,104 @@
         // activeScenarios. For sweeps with many scenarios, only the first is
         // visible by default to keep the chart readable.
         buildSeriesPanel(serverMeta);
+
+        // Live datasets start minutes old and grow block-by-block — the 15m
+        // historical default renders that as a single near-static bucket.
+        // Default to 6s so every new block is visible immediately.
+        if (serverMeta.live) {
+          currentTF = 6;
+          document.querySelectorAll('.tf-btn').forEach(b => {
+            b.classList.toggle('active', parseInt(b.dataset.tf) === currentTF);
+          });
+        }
         updateTFButtonStates();
 
         await fetchData(totalTimeRange.from, totalTimeRange.to, currentTF, true);
 
         priceChart.timeScale().subscribeVisibleTimeRangeChange(onViewportChange);
+
+        if (serverMeta.live) startLivePolling();
       } catch (e) {
         console.error('Failed to initialize:', e);
         hideLoading();
       }
+    }
+
+    // ── Live mode: follow the chain tail ───────────────────────────────────
+    // When /api/meta reports live=true the dataset grows one block every 6s.
+    // Poll meta on the block cadence; if the user is viewing the right edge
+    // ("following"), extend the window to the new tail and keep the same span.
+    // A user panned into history is left alone until they return to the edge.
+    let livePollBusy = false;
+    let liveLastBlockCount = 0;
+    let liveLastAdvanceMs = Date.now();
+
+    // The badge is the "is it actually live?" ground truth: it shows the
+    // on-chain block counter + oracle price straight from /api/meta and ticks
+    // every 6s — even at coarse timeframes where the chart's last bucket
+    // visibly moves only once per bucket. No new block for 20s ⇒ STALLED.
+    function updateLiveBadge(meta) {
+      const badge = document.getElementById('live-badge');
+      const text = document.getElementById('live-badge-text');
+      badge.style.display = 'flex';
+      const sc = meta ? meta.scenarios[0] : (serverMeta && serverMeta.scenarios[0]);
+      if (!sc) return;
+      if (meta && sc.blockCount > liveLastBlockCount) {
+        liveLastBlockCount = sc.blockCount;
+        liveLastAdvanceMs = Date.now();
+      }
+      const ageS = Math.round((Date.now() - liveLastAdvanceMs) / 1000);
+      const stalled = ageS > 20;
+      badge.classList.toggle('stalled', stalled);
+      const price = sc.summary && sc.timeRange ? lastOraclePriceLabel() : '';
+      text.textContent = (stalled ? `STALLED ${ageS}s` : 'LIVE') +
+        ` · block ${liveLastBlockCount.toLocaleString()}` + price;
+    }
+
+    function lastOraclePriceLabel() {
+      if (!lastServerData || !lastServerData.oracles || !lastServerData.oracles[0]) return '';
+      const line = lastServerData.oracles[0].line;
+      if (!line || line.length === 0) return '';
+      return ` · ${line[line.length - 1].value.toFixed(4)}`;
+    }
+
+    function startLivePolling() {
+      updateLiveBadge(serverMeta);
+      setInterval(() => updateLiveBadge(null), 1000);
+      setInterval(async () => {
+        if (livePollBusy || document.hidden || transitionLock) return;
+        livePollBusy = true;
+        try {
+          const res = await fetch('/api/meta');
+          const m = await res.json();
+          serverMeta = m;
+          let minFrom = Infinity, maxTo = -Infinity;
+          for (const sc of m.scenarios) {
+            if (sc.timeRange.from < minFrom) minFrom = sc.timeRange.from;
+            if (sc.timeRange.to > maxTo) maxTo = sc.timeRange.to;
+          }
+          const prevTo = totalTimeRange ? totalTimeRange.to : maxTo;
+          totalTimeRange = { from: minFrom, to: maxTo };
+          buildStatsTable(m.scenarios.map(sc => ({ config: sc.config, summary: sc.summary })));
+
+          const vis = getVisibleTimeRange();
+          const following = !vis || vis.to >= prevTo - 3 * currentTF;
+          if (following) {
+            const span = vis ? (vis.to - vis.from) : Math.max(6, maxTo - minFrom);
+            await fetchData(maxTo - span, maxTo, currentTF, false);
+            transitionLock = true;
+            for (const c of allCharts) {
+              safeSetVisibleRange(c, { from: maxTo - span, to: maxTo });
+            }
+            transitionLock = false;
+          }
+          updateLiveBadge(m);
+        } catch (e) {
+          console.debug('live poll failed (will retry):', e);
+        } finally {
+          livePollBusy = false;
+        }
+      }, 6000);
     }
 
     // ── Toolbar: timeframe buttons ──
@@ -1805,7 +1903,7 @@
           transitionLock = true;
           rebuildServerSeries(lastServerData);
           if (savedRange) {
-            for (const c of allCharts) c.timeScale().setVisibleRange(savedRange);
+            for (const c of allCharts) safeSetVisibleRange(c, savedRange);
           }
           transitionLock = false;
         }
@@ -2058,6 +2156,16 @@
     let syncing = false;
     let transitionLock = false;
     const allCharts = [priceChart, devChart, vdChart, volumeChart];
+    // Lightweight Charts throws "Value is null" when setting a range on a
+    // chart with no data — a legitimate state for the aux charts (e.g. the
+    // volume panel in live mode, which has no per-block volume series).
+    function safeSetVisibleRange(chart, range) {
+      try {
+        chart.timeScale().setVisibleRange(range);
+      } catch (e) {
+        console.debug('setVisibleRange skipped (chart has no data):', e.message);
+      }
+    }
     for (const src of allCharts) {
       src.timeScale().subscribeVisibleLogicalRangeChange(() => {
         if (syncing || transitionLock) return;
@@ -2065,7 +2173,7 @@
         if (!tr) return;
         syncing = true;
         for (const dst of allCharts) {
-          if (dst !== src) dst.timeScale().setVisibleRange(tr);
+          if (dst !== src) safeSetVisibleRange(dst, tr);
         }
         syncing = false;
         recomputeVenueDivergence();

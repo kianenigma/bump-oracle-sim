@@ -147,6 +147,35 @@ Each scenario emits a batch of `SimulationConfig`s with canonical labels (`<engi
 | `latched-median` | latched-median vs. median under 0/10/33/49% pushy-max |
 | `aggregator-comparison` | nudge vs. median vs. latched-median under pushy-max / noop |
 
+## Live Mode (`--live`)
+
+Runs the oracle **live** instead of over history: every 6-second block, one
+shared fetch layer polls each venue's public (zero-auth) ticker API, each of
+the 30 validators runs the **Mini Oracle CEX-only pipeline** over its own
+4-venue subset (USD index from Kraken's genuine USDT/USD + USDC/USD books →
+1% volume floor → 8h staleness filter → MAD outlier removal → VWAP), and the
+**latched-median** aggregator produces the on-chain price. The regular chart
+UI opens at the 6s timeframe, follows the tail in real time, and shows a
+**LIVE badge** (block counter + oracle price, ticking every block; turns red
+STALLED if no block lands for 20s — e.g. at coarser timeframes the last
+bucket barely moves, but the badge proves liveness). Clicking a block shows
+per-venue health and every validator's quote with its full, expandable
+pipeline trace.
+
+```bash
+bun run src/main.ts --live                                  # 30 validators, all 6 venues, port 3000
+bun run src/main.ts --live --validators 50 --mad-k 5        # more validators, looser outlier filter
+bun run src/main.ts --live --venues binance,kraken,okx      # a venue subset
+```
+
+Live-mode flags: `--validators` (default **30**), `--venues`, `--seed`,
+`--jitter`, `--mad-k` (MAD multiplier, default 3), `--live-subset` (venues
+each validator sees, default 4), `--port`, `--no-open`, `--output` (default
+`live_<date>/`; slim per-block records append to `live_blocks.jsonl`).
+
+See [`LIVE_ORACLE_PLAN.md`](./LIVE_ORACLE_PLAN.md) for the live-API research
+(endpoints, rate limits, symbol spellings per venue) and the design.
+
 ## Price Analysis (`--analyze-price`)
 
 A subcommand that runs **no oracle simulation**. Instead it asks: across the

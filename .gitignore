@@ -2,11 +2,13 @@ node_modules/
 price-data/
 dist/
 *.html
-!src/viz/template.html
-!src/viz/block.html
+!src/viz/*.html
 *.simdata
+live_*/
 bun.lockb
 bun.lock
 .DS_Store
 .vscode
 .ipynb_checkpoints/
+.omo/
+.playwright-mcp/

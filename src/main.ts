@@ -42,6 +42,9 @@ const { values: args } = parseArgs({
     "convergence-threshold": { type: "string", default: String(DEFAULT_CONFIG.convergenceThreshold) },
     "list-scenarios": { type: "boolean", default: false },
     "analyze-price": { type: "boolean", default: false },
+    live: { type: "boolean", default: false },
+    "mad-k": { type: "string", default: "3" },
+    "live-subset": { type: "string", default: "4" },
     "refresh-last-trade": { type: "boolean", default: false },
     csv: { type: "boolean", default: false },
     port: { type: "string", default: "3000" },
@@ -88,6 +91,15 @@ Options:
   --refresh-last-trade         Bypass the bucket cache so days cached before the last-trade field
                                 are re-downloaded and re-bucketized (repopulating the cache with
                                 genuine last-trade prices). Slow; use with --analyze-price.
+  --live                       Run the LIVE oracle: every 6s block, poll each venue's public
+                                ticker API once, let every validator run the Mini Oracle
+                                CEX-only pipeline (USD index → volume filter → staleness filter
+                                → MAD outliers → VWAP) over its own venue subset, aggregate via
+                                latched-median, and serve the chart in real time. Defaults:
+                                30 validators, all venues, seed ${DEFAULT_CONFIG.seed}. Uses
+                                --validators/--venues/--seed/--jitter/--port/--no-open/--output.
+  --mad-k <k>                  Live mode: MAD outlier multiplier (default: 3)
+  --live-subset <n>            Live mode: venues each validator sees (default: 4)
   --fetch-only                 Only fetch and cache price data, don't simulate
   --jitter <fraction>          Price jitter std dev as fraction (default: ${DEFAULT_PRICE_SOURCE.jitterStdDev})
   --convergence-threshold <%>  Convergence threshold in % (default: ${DEFAULT_CONFIG.convergenceThreshold})
@@ -426,6 +438,47 @@ if (args["analyze-price"]) {
   const aPort = parseInt(args.port!);
   console.log(`\nStarting price-analysis visualization server...`);
   await startServer(aOutput, aPort, !args["no-open"]);
+  process.exit(0);
+}
+
+// ── Mode: LIVE oracle (real-time Mini Oracle + latched-median) ──────────────
+if (args.live) {
+  const { runLive } = await import("./live/run-live.js");
+  const liveVenues = parseVenuesList(args.venues, "live");
+  const liveCliPassed = (flag: string) => Bun.argv.slice(2).includes(flag);
+  // Live default is 30 validators (the project's quick-iteration size), not
+  // the historical-sim default of 300.
+  const liveValidators = liveCliPassed("--validators") ? parseInt(args.validators!) : 30;
+  const madK = parseFloat(args["mad-k"]!);
+  const subsetSize = parseInt(args["live-subset"]!);
+  if (isNaN(liveValidators) || liveValidators < 1) {
+    console.error(`Invalid --validators: "${args.validators}"`);
+    process.exit(1);
+  }
+  if (isNaN(madK) || madK <= 0) {
+    console.error(`Invalid --mad-k: "${args["mad-k"]}". Expected a positive number.`);
+    process.exit(1);
+  }
+  if (isNaN(subsetSize) || subsetSize < 1) {
+    console.error(`Invalid --live-subset: "${args["live-subset"]}". Expected a positive integer.`);
+    process.exit(1);
+  }
+  const liveOutput = liveCliPassed("--output")
+    ? args.output!
+    : `live_${new Date().toISOString().slice(0, 10)}`;
+
+  await runLive({
+    validatorCount: liveValidators,
+    venues: liveVenues,
+    seed: parseInt(args.seed!),
+    jitterStdDev: parseFloat(args.jitter!),
+    madK,
+    subsetSize,
+    convergenceThreshold: parseFloat(args["convergence-threshold"]!),
+    outputDir: liveOutput,
+    port: parseInt(args.port!),
+    openBrowser: !args["no-open"],
+  });
   process.exit(0);
 }
 

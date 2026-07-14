@@ -15,6 +15,7 @@ serves an interactive chart.
 
 ```bash
 bun run src/main.ts --scenario honest   # run a scenario, write .simdata, serve, open browser
+bun run src/main.ts --live              # LIVE oracle: real-time Mini Oracle + latched-median (see below)
 bun run src/fetch-trades.ts             # bulk-download ALL venues' full trade history into the cache
 npx tsc --noEmit                         # type check — the primary quality gate
 bun test tests/aggregator.test.ts        # per-block aggregator behaviour tests
@@ -61,6 +62,17 @@ src/
     research-criteria.ts  Scoring weights/thresholds (.env-overridable)
     research-report.ts    Formatted research report (stdout + research_report.json)
     scoring-functions.ts  Scoring primitives used by the report
+  live/
+    types.ts           TickerPoint/FeedSnapshot/MiniOracleTrace/LiveBlockRecord
+    venues.ts          Public REST ticker adapters (all 6 venues; zero-auth, batch where possible)
+    feed.ts            LiveFeed: one parallel poll per 6s block, timeout, last-good fallback,
+                       per-pair price-change clock (feeds the 8h staleness filter)
+    mini-oracle.ts     The CEX-only pipeline: USD index (Kraken USDT/USD + USDC/USD anchors) →
+                       volume floor (1%) → staleness (8h) → MAD outliers (k=3) → VWAP; full trace
+    validator.ts       LiveHonestValidator (quote mode; per-validator venue subset + jitter)
+    store.ts           Growing columnar series + slim per-block records (JSONL) + trace ring
+    run-live.ts        Wall-clock 6s loop reusing Chain + LatchedMedianAggregator verbatim
+    server.ts          Live chart server: same /api/* shapes from memory + live block detail
   viz/
     server.ts          Bun.serve(): /api/meta, /api/data, /api/block, /api/block-detail; /block page; LRU chunk cache; author replay
     aggregation.ts     Server-side OHLC/line/deviation/volume aggregation via binary search
@@ -114,6 +126,37 @@ writes `price_analysis.json`, and serves a per-venue + divergence chart
   `data/trades/cache.ts`) so days cached before the `lastTrade` field are
   re-downloaded/re-bucketized with genuine last-trade prices. Slow (re-fetches
   the whole range); the cache is repopulated afterwards.
+
+### `--live` subcommand (real-time Mini Oracle)
+
+Runs the oracle LIVE instead of over history (design + API research:
+`LIVE_ORACLE_PLAN.md`; validator internals: `Mini Oracle Design.md`). Every 6s
+wall-clock block:
+
+1. A **shared fetch layer** (`live/feed.ts`) polls each venue's public REST
+   ticker once (~14 req per block across 6 venues — far inside all rate
+   limits). A failing venue keeps its last-good points; the staleness clock
+   keeps running.
+2. Each of the (default 30) validators runs the **Mini Oracle CEX-only
+   pipeline** over its own deterministic 4-venue subset: USD-normalize via the
+   stable/USD index (Kraken `USDTZUSD`/`USDCUSD` are the genuine anchors;
+   Coinbase quotes USD natively), 1% volume floor, 8h staleness filter, MAD
+   outlier removal (`--mad-k`, default 3), final volume-weighted VWAP.
+3. The unchanged `Chain` + `LatchedMedianAggregator` consume the quotes.
+4. The block is recorded (slim record for every block → `live_blocks.jsonl`;
+   full per-validator pipeline traces kept for the last ~3000 blocks) and the
+   standard chart UI follows the tail (template polls `/api/meta` on the block
+   cadence). Clicking a block shows per-venue health + every validator's
+   quote, venue subset, and expandable pipeline trace.
+
+Flags: `--validators` (default 30 in live mode), `--venues`, `--seed`,
+`--jitter`, `--mad-k`, `--live-subset` (venues per validator, default 4),
+`--port`, `--no-open`, `--output` (default `live_<date>/`).
+
+Live-only notes: Coinbase has **no DOT-USDC product** (USDC books merged into
+USD); OKX's USDT/USD pair is deprecated (May 2026) — USD conversion leans on
+Kraken. Candidate venue additions (KuCoin, Bitget) are surveyed in
+`LIVE_ORACLE_PLAN.md`.
 
 ### Key flags
 
